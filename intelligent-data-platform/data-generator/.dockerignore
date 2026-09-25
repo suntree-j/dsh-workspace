@@ -1,0 +1,33 @@
+# ============================================================
+# Data Generator 构建上下文排除项
+# ============================================================
+# 减小构建上下文，避免把本地虚拟环境与运行时产物打进镜像。
+
+# 虚拟环境
+.venv/
+venv/
+ENV/
+env/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 运行时产物（快照由容器内生成）
+state/dataset_snapshot.json
+
+# 测试与文档不进入运行镜像
+tests/
+*.md
+
+# 编辑器
+.idea/
+.vscode/
+*.swp
+.DS_Store

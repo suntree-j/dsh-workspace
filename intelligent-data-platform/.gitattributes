@@ -1,0 +1,54 @@
+# ============================================================
+# Git attributes - 统一行尾，避免跨平台脚本失效
+# ============================================================
+#
+# 关键原因：
+#   本项目在 Windows 上开发，但 Shell 脚本（scripts/*.sh、init/*.sh）
+#   运行在 Linux 容器与 WSL/Git Bash 中。
+#   若这些脚本被检出为 CRLF，Linux 下会报
+#   `/usr/bin/env: 'bash\r': No such file or directory`。
+#
+#   因此：Shell 脚本强制 LF，Windows 专用脚本强制 CRLF。
+# ============================================================
+
+# 默认：由 Git 按内容自动判断，并在仓库内统一存储为 LF
+* text=auto eol=lf
+
+# ------------------------------------------------------------
+# Shell 脚本必须 LF
+# ------------------------------------------------------------
+*.sh        text eol=lf
+*.bash      text eol=lf
+*.sql       text eol=lf
+Dockerfile  text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+
+# ------------------------------------------------------------
+# Windows 脚本必须 CRLF
+# ------------------------------------------------------------
+*.ps1       text eol=crlf
+*.cmd       text eol=crlf
+*.bat       text eol=crlf
+
+# ------------------------------------------------------------
+# 二进制文件：禁止任何行尾转换
+# ------------------------------------------------------------
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+*.pdf       binary
+*.zip       binary
+*.gz        binary
+*.tar       binary
+*.jar       binary
+*.parquet   binary
+*.woff      binary
+*.woff2     binary
+
+# ------------------------------------------------------------
+# 语言统计：标记为 vendored / 生成物，不计入仓库语言占比
+# ------------------------------------------------------------
+*.lock      linguist-generated=true
