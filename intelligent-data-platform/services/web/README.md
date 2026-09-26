@@ -12,9 +12,11 @@
 （Kafka → Flink → Doris 的 ADS 层结果），前端不做任何数据加工与缓存。
 
 ```text
-浏览器  ──HTTP──►  Nginx（http://<ip>/data/）
-                     ├── /data/            → 本目录静态文件
-                     └── /data/api/*       → 后端 API 服务
+浏览器  ──HTTPS──►  Nginx（https://<ip>/data/）   ← TLS 终止在这里
+                      ├── /data/            → 本目录静态文件
+                      ├── /data/api/*       → 只读数据服务（127.0.0.1:8000）
+                      └── /data/agent/*     → 数据问答 Agent（127.0.0.1:8100）
+                    :80 只留 /data/healthz 探针，其余 302 跳转到 HTTPS
 ```
 
 | 文件 | 职责 |
@@ -146,33 +148,37 @@ cd /opt/data-platform && bash scripts/install-web.sh
 
 ### 3.2 Nginx 站点配置
 
-要求：页面挂在 `http://<ip>/data/` 下，接口挂在 `http://<ip>/data/api/` 下；
+> **以文件为准**：站点配置的唯一权威是
+> [`deploy/nginx/data-platform.conf`](../../deploy/nginx/data-platform.conf)，
+> 由 `scripts/deploy-web.sh` 安装并 reload。下面只是**结构与意图的说明**，
+> 不要照抄去改线上配置（少了 TLS 段会让站点起不来）。
+
+要求：页面挂在 `https://<ip>/data/` 下，接口挂在 `https://<ip>/data/api/` 下；
 两者必须同源，否则需要额外处理跨域。
 
 ```nginx
-server {
-    listen 80;
-    server_name _;
+# 详见 deploy/nginx/data-platform.conf（这里只画结构）
+server {                       # :80 —— 只做探针与跳转
+    listen 80 default_server;
+    location = /data/healthz { return 200 "nginx ok\n"; }
+    location / { return 302 https://$host$request_uri; }
+}
 
-    # 前端静态资源：http://<ip>/data/
-    location /data/ {
-        alias /opt/data-platform/web/;
-        index index.html;
-        try_files $uri $uri/ /data/index.html;
-    }
+server {                       # :443 —— 业务入口
+    listen 443 ssl http2 default_server;   # 本项目 nginx 1.24.0 的写法
+    ssl_certificate     /etc/ssl/data-platform/server.crt;
+    ssl_certificate_key /etc/ssl/data-platform/server.key;
 
-    # 后端接口：http://<ip>/data/api/  →  后端 /data/api/
-    # 浏览器里 <meta name="api-base" content="/data/api"> 即指向这里
-    location /data/api/ {
-        proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host              $host;
-        proxy_set_header X-Real-IP         $remote_addr;
-        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_read_timeout 30s;
-    }
+    location /data/                { alias /opt/data-platform/services/web/; try_files $uri $uri/ /data/index.html; }
+    location /data/api/            { proxy_pass http://127.0.0.1:8000/; }
+    location = /data/api/query     { proxy_pass http://127.0.0.1:8000/query; }   # POST（Agent 专用）
+    location /data/agent/          { proxy_pass http://127.0.0.1:8100/; }
 }
 ```
+
+> `listen 443 ssl http2;` 而不是 `http2 on;`：后者是 nginx **1.25.1+** 的语法，
+> 在 1.24.0 上会让 `nginx -t` 报 `unknown directive`。详见
+> [`docs/sprint/SPRINT_6.md`](../../docs/sprint/SPRINT_6.md) 第 8.5 节。
 
 校验与重载：
 
@@ -183,11 +189,14 @@ sudo nginx -t && sudo systemctl reload nginx
 ### 3.3 部署后自检
 
 ```bash
-curl -I http://<ip>/data/                       # 期望 200，Content-Type: text/html
-curl -s http://<ip>/data/api/health             # 期望 {"data":{"status":"ok",...}}
+# 自签证书，本机自检加 -k
+curl -kI https://<ip>/data/                     # 期望 200，Content-Type: text/html
+curl -ks  https://<ip>/data/api/health          # 期望 {"data":{"status":"ok",...}}
+curl -s -o /dev/null -w '%{http_code}\n' http://<ip>/data/   # 期望 302（跳转到 HTTPS）
 ```
 
-浏览器打开 `http://<ip>/data/`，逐个切换左侧六个页面确认图表与表格有数据。
+浏览器打开 `https://<ip>/data/`，首次会提示证书不受信任，点「高级」→「继续前往」，
+然后逐个切换左侧页面确认图表与表格有数据。
 
 ### 3.4 常见问题
 
@@ -365,6 +374,6 @@ rankAxis       类目轴：名称靠右、超长截断（width + overflow:'trunc
     [...document.querySelectorAll('.chart')].filter(c => c.style.display !== 'none')
       .every(c => c.querySelector('canvas'))）
 [ ] 切换页面后图表实例被 dispose（开发者工具 Memory 面板不持续增长）
-[ ] Nginx 挂在 http://<ip>/data/ 下访问正常，接口走 /data/api/
+[ ] Nginx 挂在 https://<ip>/data/ 下访问正常，接口走 /data/api/；http 访问返回 302
 [ ] 窄屏（<1024px）侧栏抽屉可开可关，放大回桌面后不残留遮罩
 ```

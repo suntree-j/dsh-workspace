@@ -194,16 +194,22 @@ services/web/
 
 ```text
 scripts/install-web.sh    首次安装：apt 装 nginx → venv 装依赖 → 建 dpapi 用户
-                          → 建 Doris 只读账号 → 下载前端运行时 → 装 nginx/systemd → 自检
+                          → 建 Doris 只读账号 → 下载前端运行时 → 生成自签证书
+                          → 装 nginx/systemd → 自检
 scripts/deploy-web.sh     日常更新：检查前端文件与运行时 → 同步依赖 → 重载配置 → 重启服务 → 自检
+scripts/setup-tls.sh      生成自签证书（幂等；Sprint 7 期间引入，见第 8 节）
 scripts/verify-sprint-6.sh 验收：服务状态 / 前端文件 / Nginx 路径 / API 健康 /
                           指标对账 / 安全验证 / 自动化测试（7 步）
-deploy/nginx/data-platform.conf        站点配置（/data/ 静态 + /data/api/ 反代）
+deploy/nginx/data-platform.conf        站点配置（:443 业务 + :80 探针与跳转）
 deploy/systemd/data-platform-api.service 进程守护（专用用户 + 基础加固）
 ```
 
-访问地址（验收环境）：`http://36.151.150.140/data/`
-接口文档：`http://36.151.150.140/data/api/docs`
+访问地址（验收环境）：`https://36.151.150.140/data/`
+接口文档：`https://36.151.150.140/data/api/docs`
+
+> ⚠️ 首次访问浏览器会提示"证书不受信任"——站点按 IP 访问，
+> 受信任的 CA 不为裸 IP 签发证书，因此用的是**自签证书**。
+> 点「高级」→「继续前往」即可。原因见第 8 节。
 
 ---
 
@@ -217,6 +223,7 @@ deploy/systemd/data-platform-api.service 进程守护（专用用户 + 基础加
 - [x] 指标与 MySQL **精确对账一致**（API GMV == MySQL GMV，精确到分）
 - [x] 前端 6 个页面在真实浏览器中渲染正常（图表有 canvas、KPI 有值）
 - [x] `python -m pytest -m unit` 55 passed；`-m smoke tests/smoke/test_api.py` 17 passed
+      （Sprint 7 加入 `/query` 后为 74 / 21 —— 计数增长来自新增用例，Sprint 6 的用例未被删改）
 - [x] `bash scripts/verify-sprint-6.sh` 7/7 PASS
 - [x] 文档同步：本文件 + `DEVELOPMENT_LOG.md` + `README.md` + `AGENTS.md`
 - [x] 未引入 Sprint 7+ 的任何组件（无 LLM / 无 Agent / 无 RAG / 无 MCP / 无监控）
@@ -233,3 +240,70 @@ deploy/systemd/data-platform-api.service 进程守护（专用用户 + 基础加
 | 前端运行时需联网下载一次 | 内网离线环境首次安装会失败 | 可预先把两个 vendor 文件拷进 `services/web/vendor/` |
 | 看板只覆盖实时链路 | 还没有离线（Spark/Iceberg）结果可对比 | Sprint 2/3 完成后接同一 API |
 | Doris 前端（FE）仍是单点 | 查询层无高可用 | 开发环境定位，论文中说明生产差异 |
+
+---
+
+## 8. 后续变更：站点启用 HTTPS（Sprint 7 期间，2026-09-26）
+
+> 本节记录一次**在 Sprint 7 期间发现并解决的 Sprint 6 遗留问题**。
+> 放在这里而不是 SPRINT_7.md，是因为它改的是服务层入口本身，
+> 与 Agent 无关；SPRINT_7.md 第 9.7 节只做交叉引用。
+
+### 8.1 现象
+
+客户端经公网访问 `http://36.151.150.140/data/*`，约 **15~40%** 的请求返回 **502**。
+
+### 8.2 排查过程（每一步都在排除一种可能）
+
+| # | 观察 | 排除掉的假设 |
+| --- | --- | --- |
+| 1 | 该 502 **没有 `Server` 响应头、响应体为空** | **不是 nginx 发的** —— nginx 的 502 必然带 `Server: nginx/1.24.0` 与一段 HTML 错误页 |
+| 2 | TCP 80 十次连接全部成功（84 ms，`Test-NetConnection`） | 不是安全组 / 防火墙在丢 SYN |
+| 3 | 服务端本机 `curl` 十次全部 200 | 不是应用或数据库的问题 |
+| 4 | nginx 访问日志、error 日志里**没有任何 502** | 请求根本没进到 nginx |
+| 5 | `netstat -s`：`ListenOverflows = 0` | 不是 accept 队列溢出（backlog 打满会表现为"连得上但被丢"） |
+| 6 | 客户端本机跑着 VPN 代理（`iKuuuVPNCore`，监听 7890/7891） | 中间设备成了唯一剩下的解释 |
+
+**结论**：明文 HTTP 在传输途中被中间设备改写。这类设备通常**不碰加密流量**。
+
+> 排查方法比结论更值得记：**"这个 502 缺了什么"比"502 是什么"更有信息量**。
+> 一个响应头的有无，直接把嫌疑从"我们的服务"缩小到"链路中间"。
+
+### 8.3 处置
+
+`deploy/nginx/data-platform.conf` 改为双 server 块：
+
+```text
+:443  ← 业务入口。TLS 终止在此，后面 /data/ 静态、/data/api/ 只读服务、
+        /data/agent/ 问答 Agent 三个 location 与原来完全一致
+:80   ← 只保留 /data/healthz 探针（监控通常只探 80，强制跳转会让探针拿到 301），
+        其余一律 302 跳转到 HTTPS
+```
+
+证书由 `scripts/setup-tls.sh` 生成：自签、RSA 2048、有效期 3650 天，
+`subjectAltName = DNS:localhost, IP:127.0.0.1, IP:<服务器IP>`。
+
+> **为什么 SAN 必须包含 IP**：不含 IP 时浏览器报的是
+> "证书对此地址无效"（看起来像配错了），含 IP 时报的才是
+> "自签名证书"（看起来是预期的），两种提示对使用者的含义完全不同。
+
+### 8.4 结果
+
+```text
+✅ 公网 HTTPS 可靠性      8 个路径 × 8 次 = 64/64 全部 200（改动前约 40% 为 502）
+✅ HTTP 跳转              http://36.151.150.140/data/ → 302（10/10）
+✅ 回归                    verify-sprint-6.sh 7/7 PASS；verify-sprint-7.sh 49/49 通过
+✅ 真实浏览器（公网）       看板与问答页均完整渲染，图表 canvas 正常、取数正常
+✅ 端到端 Agent            公网 HTTPS 提问 6.8s 返回，附 tables / executed_sql / steps
+```
+
+### 8.5 踩坑记录
+
+| # | 坑 | 现象 | 处置 |
+| --- | --- | --- | --- |
+| 1 | **`http2 on;` 是 nginx 1.25.1+ 的语法** | 本项目钉 apt 的 **1.24.0**，写 `http2 on;` 会让 `nginx -t` 报 `unknown directive`，站点起不来 | 用 1.24.0 的写法：`listen 443 ssl http2;`，并在配置里写明**为什么不能照抄新写法** |
+| 2 | 80 改为 302 后，**验收脚本集体误报失败** | 脚本里硬编码 `http://127.0.0.1/data/...` 且不跟随跳转，期望 200 实得 302 | 新增 `lib/common.sh` 的 `site_base()` / `site_scheme()` / `curl_site()`：有证书走 https、无证书回落 http。**证书是机器状态，不该让它在脚本里变成硬依赖** |
+| 3 | 缺证书时 `nginx -t` 必失败，而配置**已经写进 sites-available** | 机器会停在"文件是坏的、进程还在跑旧的"状态，下次 nginx 重启直接起不来 | `deploy-web.sh` 改为：先确认/生成证书 → 备份站点文件 → 校验 → 失败自动还原；`install-web.sh` 首次安装时自动生成证书 |
+| 4 | 根路径 `/` 返回 302 到 `/data/`，但 `/data`（无斜杠）**不在规则内** | 页面里 `./app.js` 这类相对路径会解析到根目录而 404 | 显式加 `location = /data { return 301 /data/; }` |
+| 5 | 前后端脚本里打印的 URL 仍是 `http://` | 文档与终端输出会误导使用者（他复制过去会走明文那条有问题的路） | 统一改用 `site_scheme()` 拼装，不再手写协议 |
+

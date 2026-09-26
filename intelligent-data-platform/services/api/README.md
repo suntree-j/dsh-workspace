@@ -4,9 +4,15 @@
 以 HTTP 接口的形式提供给前端看板与（未来的）AI Agent。
 
 - 技术栈：FastAPI `0.141.1` + uvicorn `0.54.0` + mysql-connector-python `9.7.0`
-- 访问入口（对外）：`http://<服务器IP>/data/api/`（经 Nginx 反向代理）
-- 接口文档：`http://<服务器IP>/data/api/docs`
+- 访问入口（对外）：`https://<服务器IP>/data/api/`（经 Nginx 反向代理，TLS 终止在 Nginx）
+- 接口文档：`https://<服务器IP>/data/api/docs`
 - 部署方式：**宿主机 systemd**（`data-platform-api.service`），不进 Docker
+
+> ⚠️ 站点用**自签证书**（按 IP 访问，受信任的 CA 不为裸 IP 签证书），
+> 浏览器首次访问需点一次「高级」→「继续前往」。
+> 为什么要上 HTTPS：明文 HTTP 在公网链路上会被中间设备改写，
+> 约 40% 的请求变成"无 `Server` 头、空响应体"的 502。
+> 详见 [`docs/sprint/SPRINT_6.md`](../../docs/sprint/SPRINT_6.md) 第 8 节。
 
 ---
 

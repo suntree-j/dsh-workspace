@@ -12,12 +12,22 @@
 > 核心原则：**先工程，再智能。**
 > 数据可靠 → 数据准确 → 数据可查询 → 数据可治理 → Agent 使用数据。
 
-> 🖥 **在线数据大屏**：<http://36.151.150.140/data/>
-> 数据问答 Agent：<http://36.151.150.140/data/#/ask>
-> 接口文档：<http://36.151.150.140/data/api/docs> ｜
-> Agent 文档：<http://36.151.150.140/data/agent/docs>
+> 🖥 **在线数据大屏**：<https://36.151.150.140/data/>
+> 数据问答 Agent：<https://36.151.150.140/data/#/ask>
+> 接口文档：<https://36.151.150.140/data/api/docs> ｜
+> Agent 文档：<https://36.151.150.140/data/agent/docs>
 >
-> 架构：`浏览器 → Nginx(:80) → /data/ 静态看板 + /data/api/ 只读数据服务 + /data/agent/ 问答 Agent → Doris`
+> ⚠️ **首次访问会提示"证书不受信任"，这是预期的**：站点按 IP 访问，
+> 而受信任的 CA 不为裸 IP 签发证书，因此用的是**自签证书**。
+> 在浏览器里点「高级」→「继续前往 36.151.150.140（不安全）」即可，之后不再提示。
+> **为什么必须用 HTTPS**：明文 HTTP 在本项目的公网链路上会被中间设备改写，
+> 约 40% 的请求返回一个**没有 `Server` 响应头、响应体为空**的 502
+> （nginx 自己发的 502 必带 `Server: nginx/1.24.0` 与 HTML 错误页，所以那不是我们的服务发的）。
+> 加密后该现象消失：实测公网 HTTPS **64/64 全部 200**。
+> 详见 [`docs/sprint/SPRINT_6.md`](docs/sprint/SPRINT_6.md) 第 7 节。
+>
+> 架构：`浏览器 → Nginx(:443, TLS) → /data/ 静态看板 + /data/api/ 只读数据服务 + /data/agent/ 问答 Agent → Doris`
+> （`:80` 仅保留健康探针 `/data/healthz`，其余一律 302 跳转到 HTTPS）
 > 数据服务使用**专用只读账号**（`agent_ro`）+ SQL 安全守卫（仅 SELECT、强制 LIMIT），
 > 指标与 MySQL 事实源精确对账（GMV 51,890,375.77 元，精确到分）。
 > 看板含**实时链路**与**离线链路**两套视角，并展示两者的逐窗口对账结论
@@ -25,7 +35,7 @@
 > **Agent 进程里没有数据库凭据** —— 它只能经只读数据服务取数，
 > 回答附"用了哪些表 + 实际执行的 SQL"，可逐条核对。
 
-> ✅ **Sprint 0 / 1 / 2 / 6 验收结果**（腾讯云 36.151.150.140 / Ubuntu 24.04.2 LTS）
+> ✅ **Sprint 0 / 1 / 2 / 3 / 6 / 7 验收结果**（腾讯云 36.151.150.140 / Ubuntu 24.04.2 LTS）
 >
 > ```text
 > ✅ Sprint 0  docker compose up -d 5 个核心服务 healthy；health-check 5/5；pytest 51 passed
@@ -33,15 +43,21 @@
 >              pytest 74 passed；ADS 与 MySQL 精确对账（GMV 精确到分）
 > ✅ Sprint 2  Spark + Hive 离线链路；verify-sprint-2.sh 8/8 PASS；
 >              ODS 5 张表逐表与 MySQL 精确一致（1200/600/6000/5406/254）
+> ✅ Sprint 3  ODS→DWD→DWS→ADS 四层 + 批流交叉对账；verify-sprint-3.sh 8/8 PASS；
+>              11458 个分钟窗口逐条比对，不一致 0
 > ✅ Sprint 6  Nginx + systemd 直装上线；/data/ 看板可访问；API GMV == MySQL GMV；
->              只读账号写操作被 Doris 拒绝；pytest 55 单元 + 17 接口冒烟
+>              只读账号写操作被 Doris 拒绝；pytest 74 单元 + 21 接口冒烟
+> ✅ Sprint 7  数据问答 Agent；verify-sprint-7.sh 49/49 通过；
+>              四类攻击全拒、强制 LIMIT、端到端三问正确；公网 HTTPS 64/64 返回 200
 > ```
 >
 > 逐项证据见
 > [`docs/sprint/SPRINT_0_VERIFICATION_STATUS.md`](docs/sprint/SPRINT_0_VERIFICATION_STATUS.md)、
 > [`docs/sprint/SPRINT_1_VERIFICATION_STATUS.md`](docs/sprint/SPRINT_1_VERIFICATION_STATUS.md)、
 > [`docs/sprint/SPRINT_2.md`](docs/sprint/SPRINT_2.md)、
-> [`docs/sprint/SPRINT_6.md`](docs/sprint/SPRINT_6.md)。
+> [`docs/sprint/SPRINT_3.md`](docs/sprint/SPRINT_3.md)、
+> [`docs/sprint/SPRINT_6.md`](docs/sprint/SPRINT_6.md)、
+> [`docs/sprint/SPRINT_7.md`](docs/sprint/SPRINT_7.md)。
 
 ---
 
@@ -419,6 +435,22 @@ Kafka 使用**双监听器**，因为容器与宿主机能解析的地址不同�
 因为 Doris 的初始化脚本用正则严格校验 `FE_SERVERS=<name>:<IPv4>:<port>`，
 **不接受主机名**。详见
 [`docs/development-environment.md`](docs/development-environment.md) 第 4.5 节。
+
+### 7.3 服务层端口（宿主机直装，不进 Docker）
+
+Sprint 6 起，**服务层**（Nginx + FastAPI + 前端静态文件 + 问答 Agent）
+直接装在宿主机上，用 systemd 守护：
+
+| 服务 | 监听地址 | 对外 | 用途 |
+| --- | --- | --- | --- |
+| Nginx (HTTP) | `0.0.0.0:80` | ✅ 公网 | 仅 `/data/healthz` 健康探针；其余 **302 跳转到 HTTPS** |
+| Nginx (HTTPS) | `0.0.0.0:443` | ✅ 公网 | **唯一业务入口**：`https://<ip>/data/` |
+| 数据服务 | `127.0.0.1:8000` | ❌ 仅回环 | FastAPI 只读数据服务（`systemd: data-platform-api`） |
+| 问答 Agent | `127.0.0.1:8100` | ❌ 仅回环 | FastAPI + LLM 工具调用（`systemd: data-platform-agent`） |
+
+> **为什么 8000 / 8100 只绑回环**：它们只应由 Nginx 反代访问。
+> 直接暴露到公网既绕过了 Nginx 的方法限制（`limit_except`），
+> 也让"Agent 进程无数据库凭据、只能经只读服务取数"这道进程边界失去意义。
 
 ---
 
@@ -811,7 +843,8 @@ Sprint 1  ✅ Kafka → Flink → Doris 实时数仓
              8 个 Flink 作业 + 8 个 Routine Load，指标与 MySQL 精确对账
    ↓
 Sprint 6  ✅ 数据后台 + 前后端（**顺序前移**，先让数据可访问）
-             Nginx + FastAPI 只读 API + Vue 看板，访问 http://<ip>/data/
+             Nginx + FastAPI 只读 API + Vue 看板，访问 https://<ip>/data/
+             站点启用 TLS（自签证书），80 仅保留健康探针并跳转 HTTPS
    ↓
 Sprint 2  ✅ 离线链路：Spark + Hive + 湖仓存储（MinIO/S3A，HDFS 因内存不足暂缓）
              MySQL → Parquet(S3A) → Hive 外部表 ods_*，逐表与 MySQL 精确对账
@@ -882,13 +915,23 @@ bash scripts/deploy-agent.sh        # 部署（幂等；会一并重启数据服
 # 详见 services/agent/README.md
 ```
 
-> ⚠️ **公网访问偶发 502（已知，非应用问题）**：
-> 客户端经公网访问 `/data/*` 时约 15~40% 概率收到 502，
-> 但服务器 nginx 访问日志里**没有任何 502**、`ListenOverflows` 为 0、
-> 服务端自测全部 200 —— 请求在到达服务器之前就被中间链路拒绝了。
-> 演示或验收时建议走 SSH 隧道绕开抖动：
-> `ssh -N -L 18080:127.0.0.1:80 root@<ip>`，然后访问 `http://127.0.0.1:18080/data/`。
-> 排查证据见 [`docs/sprint/SPRINT_7.md`](docs/sprint/SPRINT_7.md) 第 9.7 节。
+站点启用 HTTPS（首次安装已自动完成；换机器或证书过期时手动执行）：
+
+```bash
+sudo SERVER_IP=<服务器IP> bash scripts/setup-tls.sh   # 生成自签证书（幂等）
+bash scripts/deploy-web.sh                            # 安装配置并 reload Nginx
+```
+
+> ✅ **公网偶发 502 已解决（2026-09-26）**：此前客户端经公网访问 `/data/*`
+> 约 15~40% 概率收到 502，而服务器 nginx 访问日志里**没有任何 502**、
+> `ListenOverflows` 为 0、服务端自测全部 200。
+> 关键判据是那个 502 **不带 `Server` 响应头、响应体为空** ——
+> nginx 自己发的 502 必然带 `Server: nginx/1.24.0` 和一段 HTML 错误页，
+> 所以它**不是我们的服务发的**，而是明文 HTTP 在传输途中被中间设备改写。
+> 上 HTTPS 后该现象消失：实测公网 **64/64 全部 200**。
+> 排查全过程与判据见 [`docs/sprint/SPRINT_6.md`](docs/sprint/SPRINT_6.md) 第 7 节。
+> 备用手段（网络受限时）：`ssh -N -L 18080:127.0.0.1:443 root@<ip>`，
+> 然后访问 `https://127.0.0.1:18080/data/`。
 
 ---
 

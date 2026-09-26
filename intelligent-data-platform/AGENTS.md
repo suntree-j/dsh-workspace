@@ -68,7 +68,7 @@
 | FastAPI + uvicorn | `0.141.1` / `0.54.0` | 只读数据服务（Sprint 6 引入） |
 | openai（SDK） | `2.54.0` | 调用 DeepSeek（OpenAI 兼容协议，Tool Calls）（Sprint 7 引入） |
 | DeepSeek API | `deepseek-flash`（模型名） | 数据问答 Agent 的 LLM（Sprint 7 引入） |
-| Nginx | `1.24.0`（apt） | 静态托管 + 反向代理（Sprint 6 引入） |
+| Nginx | `1.24.0`（apt） | 静态托管 + 反向代理 + **TLS 终止**（Sprint 6 引入，Sprint 7 启用 HTTPS） |
 | Vue + ECharts | `3.5.13` / `5.6.0`（本地 vendor，无构建步骤） | 数据看板（Sprint 6 引入） |
 | systemd | 系统自带 | 守护 `data-platform-api` / `data-platform-agent`（Sprint 6/7 引入） |
 | Python | 3.13 | 数据生成器 / 数据服务 |
@@ -484,13 +484,21 @@ bash scripts/setup-swap.sh                      # 配置 swap 兜底（内存事
 bash scripts/spark-sql.sh -e 'SELECT * FROM lakehouse.ads_reconcile_summary;'  # 对账结论
 
 # ---------- 服务层（Sprint 6：Nginx + FastAPI + 前端） ----------
-bash scripts/install-web.sh          # 首次安装（nginx/依赖/只读账号/systemd）
+bash scripts/install-web.sh          # 首次安装（nginx/依赖/只读账号/systemd/自签证书）
 bash scripts/deploy-web.sh           # 更新代码后同步配置并重启服务
 bash scripts/verify-sprint-6.sh      # 服务层验收（7 步：状态/路径/对账/安全/测试）
 systemctl status data-platform-api   # 数据服务状态
 journalctl -u data-platform-api -n 100 --no-pager   # 数据服务日志
 nginx -t && systemctl reload nginx   # 站点配置校验与重载
-curl -s http://127.0.0.1/data/api/health             # 接口健康检查
+curl -sk https://127.0.0.1/data/api/health           # 接口健康检查（自签证书需 -k）
+
+# ---------- 站点证书（HTTPS 入口） ----------
+# 为什么必须 HTTPS：明文 HTTP 在公网链路上会被中间设备改写，
+# 约 40% 的请求变成"无 Server 头、空响应体"的 502（那不是 nginx 发的）。
+sudo SERVER_IP=<服务器IP> bash scripts/setup-tls.sh  # 生成自签证书（幂等）
+openssl x509 -noout -dates -ext subjectAltName -in /etc/ssl/data-platform/server.crt
+# !! http2 的写法随 nginx 版本变化 !!：本项目钉 1.24.0，必须写
+#    `listen 443 ssl http2;`；`http2 on;` 是 1.25.1+ 的语法，会让 nginx -t 直接失败。
 
 # ---------- 数据问答 Agent（Sprint 7：LLM + Tool Calling） ----------
 bash scripts/deploy-agent.sh          # 部署（幂等；会一并重启数据服务）
@@ -601,11 +609,11 @@ docker compose exec doris-be mysql -h 172.28.0.10 -P 9030 -uroot -e "SHOW BACKEN
 
 ```text
 ✅ bash scripts/verify-sprint-6.sh   7/7 PASS
-✅ 访问地址                          http://36.151.150.140/data/
-✅ 接口文档                          http://36.151.150.140/data/api/docs
+✅ 访问地址                          https://36.151.150.140/data/   ← 见 15.7（HTTPS）
+✅ 接口文档                          https://36.151.150.140/data/api/docs
 ✅ 只读账号                          agent_ro（写操作被 Doris 拒绝：Access denied CREATE）
 ✅ 指标对账                          API GMV == MySQL GMV（51,890,375.77，精确到分）
-✅ 自动化测试                        pytest 55 单元（SQL 守卫 + 口径解析）+ 17 接口冒烟
+✅ 自动化测试                        pytest 74 单元（SQL 守卫 + 口径解析）+ 21 接口冒烟
 ✅ 真实浏览器验收                    6 个页面渲染正常，图表 canvas 正常
 ```
 
@@ -689,7 +697,52 @@ bash scripts/verify-sprint-2.sh`（详见
 （详见 [`docs/sprint/SPRINT_7.md`](docs/sprint/SPRINT_7.md)，
 含 7 条踩坑记录；配置操作见 [`services/agent/README.md`](services/agent/README.md)）。
 
-### 15.7 边界要求
+### 15.7 服务层入口改为 HTTPS（公网偶发 502 的根治）
+
+**现象**：客户端经公网访问 `http://<ip>/data/*`，约 15~40% 的请求返回 **502**。
+
+**判据（这一节的价值在于排查方法，不在于结论）**：
+
+```text
+1. 那个 502 **没有 `Server` 响应头、响应体为空**
+     → nginx 发出的 502 必然带 `Server: nginx/1.24.0` 与一段 HTML 错误页，
+       所以它**不是 nginx 发的**
+2. TCP 80 十次连接全部成功（84 ms） → 不是安全组/防火墙丢包
+3. 服务端本机 curl 十次全部 200；nginx 访问日志与 error 日志里没有任何 502
+4. 内核 ListenOverflows = 0 → 不是 accept 队列溢出
+结论：请求在**到达服务器之前**就被中间设备改写了（明文 HTTP 可被改写，
+      而这类设备通常不碰加密流量）
+```
+
+**处置**：站点在 80 之外监听 443，配置自签证书（按 IP 访问，
+受信任的 CA 不为裸 IP 签发证书）。
+
+```text
+✅ 公网实测                  https://36.151.150.140/data/ 等 8 个路径 × 8 次
+                            = **64/64 全部 200**（改动前约 40% 为 502）
+✅ HTTP 行为                 http://<ip>/data/ → 302 跳转到 HTTPS（10/10）
+✅ 回归                      verify-sprint-6.sh 7/7 PASS；verify-sprint-7.sh 49/49 通过
+✅ 真实浏览器                HTTPS 下看板与问答页均完整渲染，图表与取数正常
+✅ 端到端 Agent              公网 HTTPS 提问 6.8s 返回，附带 tables /
+                            executed_sql / steps
+```
+
+**硬规范（Sprint 7 起）**：
+
+> 1. **对外入口一律 HTTPS**。80 端口只保留 `/data/healthz` 探针，其余 302 跳转。
+>    证书由 `scripts/setup-tls.sh` 生成（幂等，复用未过期证书）。
+> 2. **验收脚本不得硬编码协议**。用 `lib/common.sh` 的 `site_base()` /
+>    `site_scheme()` / `curl_site()` 探测：有证书走 HTTPS，无证书回落 HTTP。
+>    理由：证书属于**机器状态**而非仓库内容，硬编码 https 会让未生成证书的
+>    机器上"环境缺失"被误报成"功能缺陷"。
+> 3. **`http2` 的写法随 nginx 版本变化**。本项目钉 `1.24.0`，必须写
+>    `listen 443 ssl http2;`；`http2 on;` 是 nginx **1.25.1+** 的语法，
+>    在 1.24.0 上会让 `nginx -t` 报 "unknown directive" 而站点起不来。
+> 4. **改 Nginx 配置必须可回滚**。`deploy-web.sh` 会先备份站点文件，
+>    `nginx -t` 失败时自动还原 —— 否则机器会停在"文件是坏的、
+>    进程还在跑旧的"这种最尴尬的状态，下一次 nginx 重启就直接起不来。
+
+### 15.8 边界要求
 
 > **Sprint 0 / 1 / 2 / 3 / 6 / 7 已稳定，下一层是 Sprint 4（Airflow 调度）。**
 > 禁止提前实现 Sprint 5 及以后的内容（Iceberg / LangGraph / RAG / MCP / 监控）。
