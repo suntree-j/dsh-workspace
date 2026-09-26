@@ -29,7 +29,7 @@
 #   ods 与 archive 是**两个互不依赖的取数源**（MySQL 业务库 / Kafka 事件流），
 #   理论上可并行；这里串行是为了内存 —— 本机可用内存只够一次一个 Spark 作业。
 #   两者都必须在 dwd 之前：dwd 要同时读交易域与流量域的 ODS。
-STAGES=(ods archive dwd dws ads reconcile load)
+STAGES=(ods archive dwd dws ads reconcile load iceberg-migrate)
 
 # shellcheck source=lib/common.sh
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
@@ -38,7 +38,7 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/spark-job.sh"
 # shellcheck source=lib/memory-guard.sh
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/memory-guard.sh"
 
-STAGES=(ods archive dwd dws ads reconcile load)
+STAGES=(ods archive dwd dws ads reconcile load iceberg-migrate)
 SELECTED=()
 SKIP_RECONCILE=0
 
@@ -76,14 +76,17 @@ parse_args() {
                 ;;
             --list)
                 printf '阶段顺序与依赖：\n'
-                printf '  %-10s %s\n' ods "MySQL → ODS（Spark JDBC 抽取，作业内逐表对账）"
-                printf '  %-10s %s\n' archive "Kafka 行为事件 → ODS（Sprint 4：补齐流量域离线源）"
-                printf '  %-10s %s\n' dwd "ODS → DWD（去重 / 清洗 / 维度补全）"
-                printf '  %-10s %s\n' dws "DWD → DWS（按天轻度聚合，只出可加指标）"
-                printf '  %-10s %s\n' ads "DWD → ADS（指标口径，1 分钟 + 1 天）"
-                printf '  %-10s %s\n' reconcile "实时 ADS ↔ 离线 ADS 逐窗口对账（差异不为 0 即失败）"
-                printf '  %-10s %s\n' load "ADS + 对账结果 → Doris（S3() TVF 直读 Parquet，供只读服务查询）"
+                printf '  %-15s %s\n' ods "MySQL → ODS（Spark JDBC 抽取，作业内逐表对账）"
+                printf '  %-15s %s\n' archive "Kafka 行为事件 → ODS（Sprint 4：补齐流量域离线源）"
+                printf '  %-15s %s\n' dwd "ODS → DWD（去重 / 清洗 / 维度补全）"
+                printf '  %-15s %s\n' dws "DWD → DWS（按天轻度聚合，只出可加指标）"
+                printf '  %-15s %s\n' ads "DWD → ADS（指标口径，1 分钟 + 1 天）"
+                printf '  %-15s %s\n' reconcile "实时 ADS ↔ 离线 ADS 逐窗口对账（差异不为 0 即失败）"
+                printf '  %-15s %s\n' load "ADS + 对账结果 → Doris（S3() TVF 直读 Parquet，供只读服务查询）"
+                printf '  %-15s %s\n' iceberg-migrate "Parquet → Iceberg 表格式迁移（Sprint 5，最后执行）"
                 printf '\n注意：reconcile 必须在 load 之前 —— load 要装载的表里包含对账结果表。\n'
+                printf '注意：iceberg-migrate 必须在最后 —— 它迁移的是"这一轮已经建完整"的湖仓，\n'
+                printf '      提前跑会把上一轮的 DWD/DWS/ADS 快照迁过去，得到一个半新半旧的 Iceberg 库。\n'
                 exit 0
                 ;;
             -h|--help)
@@ -152,6 +155,22 @@ run_stage() {
                 --conf "spark.doris.password=$(_spark_job_env_value API_DORIS_PASSWORD)"
             rc=$?
             ;;
+        iceberg-migrate)
+            # Parquet → Iceberg（Sprint 5）
+            #
+            # 为什么放在阶段序列的**最后**：
+            #   它迁移的是"这一轮已经建完整"的湖仓（ODS/DWD/DWS/ADS 全部落盘）。
+            #   插在中间会把上一轮的 DWD/DWS/ADS 快照迁过去，
+            #   得到一个半新半旧的 Iceberg 库 —— 而且行数核对还会通过，
+            #   因为两边各自都自洽。这类"检查不出错"的错误最难查。
+            #
+            # 为什么目标库是 lakehouse_iceberg 而不是原地换格式：
+            #   Parquet 库与 Iceberg 库**并存**，迁移结果可以逐表核对、可以回滚，
+            #   迁移失败也不影响已经在跑的实时链路与数据服务。
+            submit_spark_job "sprint5-migrate-parquet-to-iceberg" \
+                "infrastructure/spark/jobs/migrate_parquet_to_iceberg.py"
+            rc=$?
+            ;;
         # !! 兜底分支必须有，而且必须**失败** !!
         #
         #   实测踩坑（Sprint 4）：`archive` 已经加进了 STAGES 数组与 --list 输出，
@@ -167,7 +186,7 @@ run_stage() {
             log_error "阶段 ${stage} 没有对应的执行分支（run_stage 的 case 缺项）"
             log_error "  这是一个脚本缺陷，不是运行环境问题："
             log_error "  它在 STAGES 数组里，却没有在这里实现，于是会静默地什么都不做。"
-            printf '  已实现的阶段： ods archive dwd dws ads reconcile load\n'
+            printf '  已实现的阶段： ods archive dwd dws ads reconcile load iceberg-migrate\n'
             rc=1
             ;;
     esac
