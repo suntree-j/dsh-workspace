@@ -1,10 +1,14 @@
 # 部署脚本（Deployment）
 
-腾讯云服务器上的 Sprint 0 环境部署脚本。
+腾讯云服务器上的环境部署脚本（Sprint 0 + Sprint 1）。
 
 - 服务器：`36.151.150.140`（腾讯云轻量应用服务器，Ubuntu 24.04.2 LTS，4 核 / 16 GB / 100 GB SSD）
 - 登录：`ssh -i ~/.ssh/suntree.pem root@36.151.150.140`
 - 应用目录：`/opt/data-platform`
+
+> 本目录只承载「服务器环境准备」相关脚本。
+> **功能验收**（健康检查、冒烟测试、Sprint 验收）统一走
+> `intelligent-data-platform/scripts/` 下的正式脚本，不在这里重复实现。
 
 ---
 
@@ -53,7 +57,35 @@ docker.xuanyuan.me    需要付费（提示 free-vs-pro）
 | --- | --- |
 | `pull-doris-via-proxy.sh` | 通过 SSH 反向隧道代理拉取 Doris 镜像（镜像站过慢时使用） |
 
-### 2.1 `install-docker.sh` 写入的镜像配置
+### 2.1 Sprint 1 实时链路的部署与验收
+
+Sprint 1（Kafka → Flink → Doris）**不需要新增服务器端部署脚本**，
+全部通过仓库内的正式脚本完成：
+
+```bash
+# 1) 构建 Flink 镜像（内置 Kafka SQL connector）
+ssh -i ~/.ssh/suntree.pem root@36.151.150.140 \
+  "cd /opt/data-platform && docker compose build flink-jobmanager"
+
+# 2) 启动（flink-jobs 会自动提交全部 SQL 作业并保活 session）
+ssh -i ~/.ssh/suntree.pem root@36.151.150.140 \
+  "cd /opt/data-platform && docker compose up -d"
+
+# 3) 验收（就绪检查 + 健康检查 + 冒烟测试 + 与 MySQL 对账）
+ssh -i ~/.ssh/suntree.pem root@36.151.150.140 \
+  "cd /opt/data-platform && bash scripts/verify-sprint-1.sh"
+
+# 4) 需要重放数据时（会重建 12 个 topic 并清空下游派生数据）
+ssh -i ~/.ssh/suntree.pem root@36.151.150.140 \
+  "cd /opt/data-platform && bash scripts/verify-sprint-1.sh --replay"
+```
+
+> 排查期间一次性使用的诊断脚本（`diag-*` / `sprint1-*` / `check-*` 等）
+> 已在 Sprint 1 验收后清理，避免仓库里堆积调试残留。
+> 可复用的检查逻辑已固化进 `scripts/health-check.sh`（Sprint 1 六项）
+> 与 `scripts/verify-sprint-1.sh`。
+
+### 2.2 `install-docker.sh` 写入的镜像配置
 
 ```json
 {
@@ -145,8 +177,12 @@ ssh -i ~/.ssh/suntree.pem root@36.151.150.140 \
    ```
 2. **Doris 镜像较大**（FE 1.6 GB / BE 2.9 GB），在服务器上通过镜像站拉取
    实测速率约 1.5 MB/s，需要较长时间；建议耐心等待或改用代理。
-3. 服务器**未配置 SWAP**。Sprint 0 的 16 GB 内存足够；
-   后续同时运行 Flink/Spark 时建议增加 swap 或升级规格。
+3. 服务器**不能配置 SWAP**（实测结论）：Doris BE 的 `start_be.sh` 检测到 swap
+   会直接打印 `Disable swap memory before starting be` 并拒绝启动；
+   Sprint 0 期间加过 8 GB swap，直接导致 BE 起不来、tablet 副本损坏。
+   内存控制改用「限制各组件上限」：Doris FE `-Xmx1536m`、Flink TaskManager 3072m。
+   实测 Sprint 0 + Sprint 1 全量运行后可用内存约 3.2 GB。
+   **后续 Sprint 若内存不足，只能升级规格，不要加 swap。**
 4. **本地 `.ssh/config` 的 BOM 问题**：该文件曾带 UTF-8 BOM，
    导致 Git Bash 的 OpenSSH 报
    `Bad configuration option: \357\273\277host`。
