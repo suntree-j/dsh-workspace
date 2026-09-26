@@ -113,6 +113,19 @@ run_stage() {
                 --conf "spark.jobs.ddl=/opt/sql/hive/01_ods_tables.sql"
             rc=$?
             ;;
+        archive)
+            # Kafka 行为事件 → 湖仓 ODS（Sprint 4：补齐流量域离线源）
+            #
+            # !! Kafka 地址必须用容器服务名 !!
+            #   作业跑在 spark-submit 容器里，用 localhost:19092 会连到容器自己
+            #   （AGENTS.md 6.2：容器间禁止 localhost）。
+            #   .env 里的 KAFKA_BOOTSTRAP_SERVERS 是给宿主机 Python 用的。
+            submit_spark_job "sprint4-archive-behavior-events" \
+                "infrastructure/spark/jobs/archive_behavior_events.py" \
+                --conf "spark.jobs.ddl=/opt/sql/hive/01_ods_tables.sql" \
+                --conf "spark.jobs.kafkaBootstrap=${KAFKA_CONTAINER_BOOTSTRAP:-kafka:9092}"
+            rc=$?
+            ;;
         dwd)
             submit_spark_job "sprint3-build-dwd" "infrastructure/spark/jobs/build_dwd.py"
             rc=$?
@@ -138,6 +151,24 @@ run_stage() {
                 --conf "spark.doris.user=${DORIS_READONLY_USER:-agent_ro}" \
                 --conf "spark.doris.password=$(_spark_job_env_value API_DORIS_PASSWORD)"
             rc=$?
+            ;;
+        # !! 兜底分支必须有，而且必须**失败** !!
+        #
+        #   实测踩坑（Sprint 4）：`archive` 已经加进了 STAGES 数组与 --list 输出，
+        #   却漏加了这个 case 的分支。结果 case 直接穿透、rc 保持 0，
+        #   脚本打印「阶段 archive 完成」并返回成功 ——
+        #   **一个什么都没做的阶段，报告成功了**。
+        #   更糟的是 Airflow 也据此把任务标成 success，
+        #   于是"流量域归档"这件事看起来做完了，实际 ODS 表里 0 行。
+        #
+        #   没有兜底的 case 就是一个静默的 no-op 制造机。
+        #   现在任何未登记的阶段都会立刻大声失败。
+        *)
+            log_error "阶段 ${stage} 没有对应的执行分支（run_stage 的 case 缺项）"
+            log_error "  这是一个脚本缺陷，不是运行环境问题："
+            log_error "  它在 STAGES 数组里，却没有在这里实现，于是会静默地什么都不做。"
+            printf '  已实现的阶段： ods archive dwd dws ads reconcile load\n'
+            rc=1
             ;;
     esac
     return "${rc}"
