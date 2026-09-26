@@ -1,13 +1,18 @@
 # 数据来源设计（Data Source Design）
 
 > 项目：基于 Lakehouse 与 AI Agent 的批流一体智能数据分析平台
-> 版本：V1.0
+> 版本：V1.1（Sprint 1 实现后同步更新）
 > 更新日期：2026-09-26
 > 适用 Sprint：0 起
 >
 > 本文回答一个核心问题：**这个平台的数据是从哪来的，怎么保证它可靠、准确、可追溯。**
 > 这是「先工程，再智能」原则的落地说明 —— Agent 能问出正确答案的前提，
 > 是数据来源本身是可定义、可校验、可追溯的。
+>
+> 变更记录：
+> V1.0 建立数据来源分层与可靠性保证；
+> V1.1 按 Sprint 1 实际实现更新（ADS 表名、事件时间格式、维度来源、
+> 测试与健康检查项数、新增"重复生产会让指标累加"这一已知局限）。
 
 ---
 
@@ -67,9 +72,11 @@ Agent 只读 Doris（Sprint 7 起），且只允许 SELECT。
 ┌──────────────────────────────────────────────────────────────────────┐
 │ 第 3 层：统一查询与指标层 (Apache Doris)                              │
 │                                                                      │
-│   ADS  应用层   ads_realtime_gmv / ads_realtime_order / ads_user_*    │
-│   DWS  汇总层   dws_trade_* / dws_traffic_*                           │
-│   DWD  明细层   dwd_trade_order_detail / dwd_trade_payment_detail ... │
+│   ADS  应用层   ads_realtime_trade_1m / ads_realtime_traffic_1m /     │
+│                 ads_realtime_category_1m                             │
+│   DWS  汇总层   dws_traffic_overview_1m                               │
+│   DWD  明细层   dwd_trade_order_detail / dwd_trade_payment_detail /   │
+│                 dwd_trade_refund_detail / dwd_traffic_behavior_detail │
 │                                                                      │
 │   ← 对外唯一查询入口（Dashboard / Agent 都查这里）                     │
 └───────────────────────────────┬──────────────────────────────────────┘
@@ -155,7 +162,11 @@ MySQL 里真实存在的记录
 
 ### 4.4 为什么用统一时区与统一时间语义
 
-所有时间字段使用 `Asia/Shanghai`（+08:00），事件用 ISO-8601 带偏移。
+所有时间字段使用 `Asia/Shanghai`（+08:00）。
+事件时间字段格式为 `yyyy-MM-dd HH:mm:ss.SSS`
+—— 这是**实测后的选择**：Flink 的 JSON 格式解析器不接受 ISO-8601 带时区偏移
+（`2025-07-16T13:42:44+08:00` 会报 `Fail to deserialize at field: event_time`），
+因此统一改为 Flink 原生支持的无时区时间串。
 且保证时间因果链：
 
 ```text
@@ -169,27 +180,35 @@ register_time ≤ order.create_time ≤ order.pay_time ≤ refund.refund_time
 
 ## 5. 数据流的三条链路
 
-### 5.1 实时链路（Sprint 1 起）
+### 5.1 实时链路（Sprint 1 已实现）
 
 ```text
 generate_events
       │  JSON 事件（按 order_id / user_id 分区）
       ▼
-   Kafka (4 topics × 3 partitions)
+   Kafka (4 个事件 topic × 3 partitions)
       │
       ▼
-   Flink
-      ├── 解析 JSON、按 event_time 分配 watermark
-      ├── 订单/支付/退款流：窗口聚合 GMV、订单数、支付数
-      ├── 行为流：窗口去重 UV、漏斗计数
-      └── 维表关联（用户/商品，来自 MySQL 或 Doris）
+   Flink 1.20.1（SQL，session 集群 + SQL Gateway）
+      ├── 解析 JSON、按 event_time 分配 watermark（延迟 5 秒）
+      ├── 4 个 DWD 清洗作业：字段裁剪 + 维度冗余字段 → Kafka dwd_* topic
+      └── 4 个指标作业：1 分钟滚动窗口聚合 → Kafka dws_*/ads_* topic
       │
       ▼
-   Doris DWD / DWS / ADS
+   Doris Routine Load（8 个作业，UNIQUE KEY + merge-on-write 幂等）
       │
       ▼
-   实时指标：GMV / 订单量 / 支付量 / 退款额 / UV
+   DWD / DWS / ADS
+      │
+      ▼
+   实时指标：GMV / 订单量 / 支付 / 退款 / UV-PV / 类目销售
 ```
+
+**维度的来源（与最初设想不同）**：类目、会员等级、省份等维度**不做维表 join**，
+而是由生成器在写事件时冗余带上。理由是避免 Sprint 1 引入 Doris 外部依赖与启动时序问题，
+且冗余字段表达的是「事件发生时点」的维度值，语义比 lookup join 更准确
+（lookup join 拿到的是"现在"的值，存在缓慢变化维问题）。
+维表 join 能力留给 Sprint 3 的 DWS 层。
 
 ### 5.2 离线链路（Sprint 2 起）
 
@@ -235,9 +254,10 @@ MySQL (ecommerce)
 | 入库期 | 外键约束（MySQL FOREIGN KEY） | `sql/mysql/01_schema.sql` |
 | 入库期 | 写入后连表校验 | `generate_mysql_data` 的 `verify()` |
 | 测试期 | 24 个单元测试断言业务关系 | `tests/test_data_generator.py` |
-| 测试期 | 27 个冒烟测试断言落地内容 | `tests/smoke/test_infrastructure.py` |
-| 运行期 | 5 个服务健康检查 | `scripts/health-check.sh` |
+| 测试期 | 74 个冒烟测试断言落地内容 | `tests/smoke/test_infrastructure.py`（27）+ `test_realtime.py`（47） |
+| 运行期 | 11 项健康检查（含实时链路 6 项） | `scripts/health-check.sh` |
 | 运行期 | 事件与业务库一一对应 | `state/dataset_snapshot.json` |
+| 运行期 | 指标与 MySQL 精确对账 | `scripts/verify-sprint-1.sh` 第 7 步 |
 | 治理期 | 数据质量规则（完整性/一致性/及时性） | Sprint 11 |
 
 ---
@@ -249,9 +269,10 @@ MySQL (ecommerce)
 | 局限 | 说明 | 计划 |
 | --- | --- | --- |
 | 数据生成器是「业务系统替身」 | 没有真实电商后台，生成器同时扮演业务写入方与埋点方 | 论文中说明为仿真数据源 |
-| 无 CDC 实时同步 | MySQL → Kafka 目前靠生成器双写，未用 Flink CDC / Canal | Sprint 1 可评估，Sprint 3 后视需要引入 |
+| 无 CDC 实时同步 | MySQL → Kafka 目前靠生成器双写，未用 Flink CDC / Canal | Sprint 3 后视需要引入 |
 | 单机单副本 | Kafka 副本 1、Doris 单 BE，无高可用 | 明确为开发环境；论文中说明生产部署差异 |
 | 行为事件不落库 | 仅存在于 Kafka，未长期存储 | Sprint 2/5 由 Spark 落 Iceberg |
+| **重复生产事件会让窗口指标累加** | Flink source 用 `earliest-offset` 可重放历史；若把同一批事件重复写进源 topic，窗口聚合会把它们累加（实测 PV 翻倍） | 验收用 `verify-sprint-1.sh --replay` 构造"恰好一代事件"；根治方案是按 `event_id` 去重，见 `SPRINT_1.md` 第 11.1 节 |
 | 无数据质量校验任务 | 目前只有生成期与测试期校验 | Sprint 11 |
 | 无数据血缘 | 表级血缘尚未采集 | Sprint 9（MCP 元数据） |
 
@@ -261,7 +282,7 @@ MySQL (ecommerce)
 
 | Sprint | 新增数据来源 | 说明 |
 | --- | --- | --- |
-| 1 | Flink 计算结果 | Kafka → Doris 实时指标 |
+| 1 ✅ | Flink 计算结果 | Kafka → Doris 实时指标（已完成，8 张表 + 8 个 Routine Load） |
 | 2 | Spark 抽取结果 | MySQL → Iceberg/HDFS |
 | 3 | Hive 分层表 | ODS/DWD/DWS/ADS |
 | 4 | Airflow 调度元数据 | 任务依赖与运行记录 |
