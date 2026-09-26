@@ -197,9 +197,11 @@ gen_env_file() {
         log_ok "复用 .env 中已有的密钥"
     fi
 
-    # 公网访问地址：反代挂在 /airflow 子路径下，UI 生成的链接必须带这个前缀
-    local base_url
-    base_url="$(site_scheme)://$(public_ip)/airflow"
+    # 公网访问地址：反代挂在 /airflow 子路径下，UI 生成的链接必须带这个前缀。
+    # 把 path 单独留一个变量：执行 API 的完整路径也要用它（见下方 env 生成处）。
+    local base_path base_url
+    base_path="/airflow"
+    base_url="$(site_scheme)://$(public_ip)${base_path}"
 
     # 用 umask 保证文件一创建就是 600（避免"先 644 后 chmod"的窗口期）
     ( umask 077; : > "${AIRFLOW_ENV_FILE}" )
@@ -236,6 +238,44 @@ gen_env_file() {
         printf 'AIRFLOW__API__PORT=%s\n' "${API_PORT}"
         printf 'AIRFLOW__API__WORKERS=1\n'
         printf 'AIRFLOW__API__BASE_URL=%s\n' "${base_url}"
+        # !! 任务执行回调的地址：**回环 + 完整的 /airflow/execution/ 路径** !!
+        #
+        #   为什么需要它：Airflow 3 的任务（LocalExecutor 下由 scheduler fork）
+        #   要回调 API server 上报状态。默认地址在 base_executor.py 里算出来：
+        #       base_url = conf["api"]["base_url"]
+        #       default = f"{base_url.rstrip('/')}/execution/"
+        #   即**公网 base_url + /execution/** —— 任务能否执行会取决于
+        #   Nginx 与公网链路是否可用。改指回环可以去掉这层依赖。
+        #
+        #   实测连着踩了三个坑，每个都长得像"已经修好了"，完整记下来：
+        #
+        #   ① 把站点从 https 切回 http 后忘了重跑本脚本，
+        #      base_url 还停在 https://<ip>/airflow，而 443 已不再监听 →
+        #          httpx.ConnectError: [Errno 111] Connection refused
+        #      迷惑之处：**UI 打开完全正常**（走 80），
+        #      只有任务回调走那个已经没人听的 443。
+        #
+        #   ② 于是显式改成 http://127.0.0.1:8085，漏了 `/execution/` →
+        #      SDK 请求 /task-instances/{id}/run，落到 SPA 静态处理器 →
+        #          ServerResponseError: Method Not Allowed
+        #
+        #   ③ 再补成 http://127.0.0.1:8085/execution/，仍然 404 ——
+        #      因为**应用的 base path 也是对外 URL 的一部分**：
+        #      这个应用挂在 /airflow 下（root_path），
+        #      所以执行 API 的完整路径是 /airflow/execution/。
+        #
+        #   最后的判据（值得记，因为它一次就分清了 404 与路由存在）：
+        #       PATCH /execution/task-instances/{id}/run          → 404 Not Found
+        #       PATCH /airflow/execution/task-instances/{id}/run  → 401 Missing auth token
+        #      **401 说明路由存在**（只是没带 token），404 才是路径不对。
+        #      我先前用 `/airflow/execution/health` 探到 405 而误判了方向 ——
+        #      那个子路径本来就不存在，POST 落到了 SPA 的 GET-only 处理器上。
+        #      教训：探测路由要用**真实存在的端点**，别用猜出来的路径。
+        #
+        #   运维含义：**改 SITE_SCHEME 之后必须重跑本脚本**，
+        #   否则 base_url 会残留旧协议，任务执行会静默失效。
+        printf 'AIRFLOW__CORE__EXECUTION_API_SERVER_URL=http://127.0.0.1:%s%s/execution/\n' \
+            "${API_PORT}" "${base_path}"
         printf 'AIRFLOW__API__SECRET_KEY=%s\n' "${api_secret}"
         printf 'AIRFLOW__API_AUTH__JWT_SECRET=%s\n' "${jwt_secret}"
         printf 'AIRFLOW__LOGGING__BASE_LOG_FOLDER=%s/logs\n' "${AIRFLOW_HOME_DIR}"

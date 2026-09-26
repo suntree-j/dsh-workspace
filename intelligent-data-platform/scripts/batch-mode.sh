@@ -127,14 +127,36 @@ restore_realtime() {
         return 1
     fi
 
+    # !! 健康检查必须**重试**，不能等一个固定秒数就判死 !!
+    #   实测踩坑：原实现是 `sleep 25` 后只查一次。但 Flink 作业从 Kafka
+    #   已提交位点续跑、Routine Load 重新变 RUNNING，有时要 1 分钟以上。
+    #   于是出现最糟的一种失败形态：**链路其实正在恢复，任务却被判失败** ——
+    #   而这时 DAG 已经结束，没有后续任务再来确认，
+    #   实时链路就停在一个没人看的状态里。Sprint 4 实测遇到过。
+    #
+    #   恢复本质上是"最终一致"的过程，判据应该是"等它好"，
+    #   而不是"立刻就好"。
     printf '  等待作业恢复（Flink 从 Kafka 已提交位点继续消费）...\n'
-    sleep 25
+    local hc_deadline=$(( SECONDS + 180 ))
+    local hc_ok=0
+    while [ "${SECONDS}" -lt "${hc_deadline}" ]; do
+        if bash "${REPO_ROOT}/scripts/health-check.sh" >/dev/null 2>&1; then
+            hc_ok=1
+            break
+        fi
+        printf '\r  健康检查未通过，重试中 ... 剩余 %ss' "$(( hc_deadline - SECONDS ))"
+        sleep 15
+    done
+    printf '\r\033[K'
 
     printf '\n'
-    if bash "${REPO_ROOT}/scripts/health-check.sh"; then
+    if [ "${hc_ok}" -eq 1 ]; then
         log_ok "实时链路已恢复并通过健康检查"
         return 0
     fi
+
+    # 超时后把真实输出打出来（重试期间被丢掉了），否则只剩一句"未通过"
+    bash "${REPO_ROOT}/scripts/health-check.sh" || true
     log_error "实时链路恢复后健康检查未通过，请人工确认"
     printf '  排查： bash scripts/verify-sprint-1.sh\n'
     return 1
