@@ -63,6 +63,8 @@
 | Apache Doris | `4.1.4`（FE + BE） | OLAP 查询与指标 |
 | Apache Flink | `1.20.1`（SQL + SQL Gateway） | 实时清洗与窗口聚合（Sprint 1 引入） |
 | flink-sql-connector-kafka | `3.4.0-1.20` | Flink 读写 Kafka |
+| Apache Spark | `3.5.7` | 离线计算（Sprint 2 引入） |
+| Apache Hive Metastore | `3.1.3` | 湖仓表目录（Sprint 2 引入，只跑 Metastore） |
 | FastAPI + uvicorn | `0.141.1` / `0.54.0` | 只读数据服务（Sprint 6 引入） |
 | Nginx | `1.24.0`（apt） | 静态托管 + 反向代理（Sprint 6 引入） |
 | Vue + ECharts | `3.5.13` / `5.6.0`（本地 vendor，无构建步骤） | 数据看板（Sprint 6 引入） |
@@ -78,7 +80,7 @@
 
 ### 2.2 后续 Sprint 引入
 
-Spark + Hive + HDFS（S2）、Airflow（S4）、Iceberg（S5）、
+Airflow（S4）、Iceberg（S5）、
 LLM + Tool Calling（S7）、LangGraph（S8）、RAG（S9）、MCP（S10）、
 Prometheus + Grafana（S11）。
 
@@ -462,6 +464,11 @@ bash scripts/verify-sprint-1.sh      # Sprint 1 实时链路验收（就绪+heal
 bash scripts/verify-sprint-1.sh --replay   # 重建链路并重放数据后再验收
 bash scripts/cancel-flink-jobs.sh    # 取消全部 Flink 作业（重新提交作业前必跑）
 
+# ---------- 离线链路（Sprint 2：Spark + Hive + 湖仓） ----------
+bash scripts/init-lakehouse.sh       # 初始化（元数据库/镜像/服务/Metastore schema/湖仓目录）
+bash scripts/submit-offline-job.sh   # 抽取 MySQL → Parquet(S3A) → Hive 外部表（作业内自带逐表对账）
+bash scripts/verify-sprint-2.sh      # 离线链路验收（8 步）
+bash scripts/spark-sql.sh -e 'SHOW TABLES IN lakehouse;'   # 用一次性容器查湖仓表
 # ---------- 服务层（Sprint 6：Nginx + FastAPI + 前端） ----------
 bash scripts/install-web.sh          # 首次安装（nginx/依赖/只读账号/systemd）
 bash scripts/deploy-web.sh           # 更新代码后同步配置并重启服务
@@ -517,8 +524,8 @@ docker compose exec doris-be mysql -h 172.28.0.10 -P 9030 -uroot -e "SHOW BACKEN
 | **0** | **项目初始化与基础数据环境** | ✅ **已完成并验收通过** |
 | **1** | **Kafka + Flink + Doris 实时数仓** | ✅ **已完成并验收通过** |
 | **6** | **数据后台 + 前后端（服务层）** | ✅ **已完成并验收通过**（顺序前移，见 2.2 节说明） |
-| 2 | Spark + Hive + HDFS | ⏳ 下一步 |
-| 3 | ODS / DWD / DWS / ADS | 未开始 |
+| **2** | **Spark + Hive + 湖仓存储（离线链路）** | ✅ **已完成并验收通过**（HDFS 因内存不足改用 S3A，见 SPRINT_2.md 2.2） |
+| 3 | ODS / DWD / DWS / ADS（离线分层 + 交叉对账） | ⏳ 下一步 |
 | 4 | Airflow | 未开始 |
 | 5 | Iceberg Lakehouse | 未开始 |
 | 7 | LLM + Tool Calling | 未开始 |
@@ -575,10 +582,29 @@ docker compose exec doris-be mysql -h 172.28.0.10 -P 9030 -uroot -e "SHOW BACKEN
 ✅ 真实浏览器验收                    6 个页面渲染正常，图表 canvas 正常
 ```
 
-### 15.4 边界要求
+### 15.4 Sprint 2 验收结果（离线链路）
 
-> **Sprint 0 / 1 / 6 已稳定，下一层是 Sprint 2（Spark + Hive + HDFS）。**
-> 禁止提前实现 Sprint 7 及以后的内容（LLM / Agent / RAG / MCP / 监控）。
+Spark + Hive 直接以容器形式接入既有编排（湖仓存储用 MinIO/S3A）：
+
+```text
+✅ bash scripts/verify-sprint-2.sh   8/8 PASS
+    服务状态 / Spark 集群 / ODS 表 / 行数对账 / 存储落地 / 类型正确性 / 幂等性 / 回归
+✅ 逐表对账                          ods_user 1200 / product 600 / orders 6000
+                                    payment 5406 / refund 254 —— 与 MySQL 精确一致
+✅ 存储落地                          25 个 Parquet 对象位于 s3a://lakehouse/warehouse/ods
+✅ 类型正确                          amount = decimal(18,2)，ODS 层无 double/float
+✅ 幂等                              重跑抽取作业后行数不变
+✅ 回归                              实时链路 health-check 11/11、数据服务 /health 正常
+```
+
+一键复现：`bash scripts/init-lakehouse.sh && bash scripts/submit-offline-job.sh &&
+bash scripts/verify-sprint-2.sh`（详见
+[`docs/sprint/SPRINT_2.md`](docs/sprint/SPRINT_2.md)，含 11 条版本/时序踩坑记录）。
+
+### 15.5 边界要求
+
+> **Sprint 0 / 1 / 2 / 6 已稳定，下一层是 Sprint 3（离线分层建模 + 与实时指标交叉对账）。**
+> 禁止提前实现 Sprint 4 及以后的内容（Airflow / Iceberg / LLM / Agent / RAG / MCP / 监控）。
 > 指标口径以 [`sql/metadata/metrics.md`](sql/metadata/metrics.md) 为唯一权威，
 > 离线链路（Sprint 3 起）必须产生同名同口径指标并与实时链路交叉对账；
 > 服务层接口（`services/api`）同样只能引用该口径，不得自建第二份定义。

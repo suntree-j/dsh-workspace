@@ -18,6 +18,10 @@
  *
  * 4. 比率为 null 表示"分母为 0，无法计算"，必须显示 —；
  *    可加指标后端已补 0，直接显示 0。两者不能混为一谈。
+ *
+ * 5. 图表样式（网格线 / 坐标轴 / 图例 / 提示框 / 调色板）集中在 CHART_THEME，
+ *    六个页面只描述"画什么"，不再各写一套颜色与描边 —— 与 styles.css 的
+ *    设计令牌一一对应（同一含义不出现两种色值）。
  * ============================================================ */
 
 (function () {
@@ -69,34 +73,218 @@
     return (value && value.trim()) || './api';
   })();
 
-  // 图表配色：深色大屏下保持低饱和、高区分度，不使用渐变与动效
+  // 与 styles.css 的设计令牌对应：深色底、低饱和、高区分度
   var C = {
-    gmv: '#2f81f7',
-    pay: '#3fb950',
-    order: '#8b949e',
-    pv: '#2f81f7',
-    uv: '#d29922',
-    view: '#8b949e',
-    accent: '#58a6ff',
-    warn: '#d29922',
-    danger: '#f85149',
-    grid: 'rgba(148,163,184,0.16)',
-    axis: '#8b949e',
-    series: ['#2f81f7', '#3fb950', '#d29922', '#a371f7', '#f85149', '#39c5cf', '#db6d28', '#8b949e']
-  };
-
-  var COMMON_TIP = {
-    backgroundColor: 'rgba(15,23,42,0.94)',
-    borderColor: 'rgba(148,163,184,0.3)',
-    borderWidth: 1,
-    padding: [10, 12],
-    textStyle: { color: '#e6edf3', fontSize: 12 },
-    extraCssText: 'box-shadow:0 8px 24px rgba(2,6,23,0.6);border-radius:8px;'
+    text: '#eef3f9',
+    text2: '#c3cddb',
+    axis: '#94a2b6',                                        // --text-3
+    grid: 'rgba(148,163,184,0.12)',                         // --line-subtle
+    surface: '#101725',                                     // --surface-1（环形图缝隙）
+    trade: '#5b9cff',                                       // --domain-trade
+    traffic: '#22c9b6',                                     // --domain-traffic
+    category: '#a884ff',                                    // --domain-category
+    pos: '#46c46a',                                         // --pos
+    neg: '#ff7a72',                                         // --neg
+    warn: '#e2b04a',                                        // --warning
+    neutral: '#8b9bb4',
+    series: ['#5b9cff', '#22c9b6', '#a884ff', '#e2b04a', '#ff7a72', '#4fd1e0', '#f0883e', '#8b9bb4']
   };
 
   // 类目页「全部」选项：窗口上限取一个足够大的值，语义等价于"不限窗口"
   var ALL_WINDOWS = 1000000;
   var PAGE_SIZE = 20;
+  var TRADE_WINDOW_LIMIT = 200;
+
+  // 顶栏数据源标识：由接口信封的 source 字段刷新（见 apiGet），
+  // 未拿到时显示启动文案而不是空白。
+  var sourceLabel = ref('实时链路');
+  var sourceDetail = ref('');
+
+  // ============================================================
+  // ---------- ECharts 主题（集中一处配置） ----------
+  // ============================================================
+  // 六个页面共享同一套网格线 / 坐标轴 / 图例 / 提示框样式：
+  //   - 去掉 ECharts 默认的粗重描边与高饱和配色；
+  //   - 网格线用极低对比虚线，坐标轴线基本隐去，让数据本身成为主角；
+  //   - 提示框与下拉、弹窗共用同一表面色与圆角，视觉上"同一个产品"。
+  var AXIS_LABEL = { color: C.axis, fontSize: 11 };
+  var CHART_THEME = {
+    backgroundColor: 'transparent',
+    animation: false,             // 数据看板以"读数"为目的，动画只干扰刷新时的对比
+    textStyle: { color: C.text2, fontSize: 12 },
+    color: C.series,
+    grid: { left: 10, right: 14, top: 42, bottom: 6, containLabel: true },
+    tooltip: {
+      trigger: 'axis',
+      confine: true,
+      backgroundColor: '#1b2739',
+      borderColor: 'rgba(148,163,184,0.26)',
+      borderWidth: 1,
+      padding: [10, 12],
+      textStyle: { color: C.text, fontSize: 12 },
+      extraCssText: 'box-shadow:0 20px 48px rgba(3,6,12,0.6);border-radius:10px;'
+    },
+    legend: {
+      right: 4,
+      top: 0,
+      icon: 'roundRect',
+      itemWidth: 10,
+      itemHeight: 10,
+      itemGap: 14,
+      textStyle: { color: C.axis, fontSize: 11 }
+    }
+  };
+
+  function merge(target, source) {
+    var out = {};
+    var key;
+    for (key in target) { if (Object.prototype.hasOwnProperty.call(target, key)) out[key] = target[key]; }
+    for (key in source) {
+      if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
+      out[key] = (source[key] && typeof source[key] === 'object' && !Array.isArray(source[key]) &&
+        target[key] && typeof target[key] === 'object' && !Array.isArray(target[key]))
+        ? merge(target[key], source[key])
+        : source[key];
+    }
+    return out;
+  }
+
+  // 坐标轴工厂：value 轴显示极浅虚线网格，category 轴不要网格
+  function makeAxis(kind, opts) {
+    var base = {
+      type: kind,
+      axisLine: { show: false },
+      axisTick: { show: false },
+      axisLabel: Object.assign({}, AXIS_LABEL),
+      splitLine: kind === 'value'
+        ? { show: true, lineStyle: { color: C.grid, type: 'dashed', width: 1 } }
+        : { show: false }
+    };
+    return merge(base, opts || {});
+  }
+
+  // 折线：细描边 + 圆头，配一层自上而下渐隐的面积色（不用动画，静态也成立）
+  function makeLine(name, data, color, yIndex) {
+    var smooth = data.filter(function (v) { return v !== null && v !== undefined; }).length >= 5;
+    return {
+      name: name,
+      type: 'line',
+      yAxisIndex: yIndex || 0,
+      data: data,
+      smooth: smooth,
+      smoothMonotone: 'x',
+      showSymbol: false,
+      symbol: 'circle',
+      symbolSize: 5,
+      connectNulls: false,
+      lineStyle: { width: 1.8, color: color, cap: 'round', join: 'round' },
+      itemStyle: { color: color, borderColor: C.surface, borderWidth: 1 },
+      areaStyle: {
+        // 面积只做"提示量级"的辅助，透明度压到很低：
+        // 否则单窗口尖峰会把整片绘图区涂满，反而看不清折线本身。
+        color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+          { offset: 0, color: withAlpha(color, 0.18) },
+          { offset: 1, color: withAlpha(color, 0.02) }
+        ])
+      },
+      emphasis: { focus: 'series', scale: 1.2 }
+    };
+  }
+
+  // 柱状：圆角 + 收窄宽度（深色大屏上细柱比粗柱更"轻"）
+  function makeBar(name, data, color, opts) {
+    var base = {
+      name: name,
+      type: 'bar',
+      data: data,
+      barMaxWidth: 16,
+      barCategoryGap: '55%',
+      itemStyle: {
+        color: color,
+        borderRadius: [3, 3, 0, 0],
+        opacity: 0.92
+      },
+      emphasis: { itemStyle: { opacity: 1 }, focus: 'series' }
+    };
+    return merge(base, opts || {});
+  }
+
+  // 横向条形（类目排行）：右侧留白给数值标签，四角圆角只保留外端
+  function makeRankBar(name, data, color) {
+    return {
+      name: name,
+      type: 'bar',
+      data: data,
+      barMaxWidth: 18,
+      itemStyle: {
+        borderRadius: [0, 4, 4, 0],
+        color: new echarts.graphic.LinearGradient(0, 0, 1, 0, [
+          { offset: 0, color: withAlpha(color, 0.55) },
+          { offset: 1, color: withAlpha(color, 1) }
+        ])
+      },
+      emphasis: { focus: 'series' },
+      label: {
+        show: true,
+        position: 'right',
+        distance: 6,
+        color: C.text2,
+        fontSize: 11,
+        formatter: function (p) { return formatMoney(p.value); }
+      }
+    };
+  }
+
+  // 类目轴（横向条形的 Y 轴）：名称靠右对齐，长名称自动截断，避免侵占绘图区
+  function rankAxis(names) {
+    return makeAxis('category', {
+      data: names,
+      axisLabel: {
+        color: C.text2,
+        fontSize: 12,
+        width: 116,
+        overflow: 'truncate',
+        margin: 10
+      }
+    });
+  }
+
+  function timeAxis(labels) {
+    return makeAxis('category', {
+      data: labels,
+      boundaryGap: true,
+      axisLabel: Object.assign({}, AXIS_LABEL, { hideOverlap: true })
+    });
+  }
+
+  // 金额轴刻度：只保留整数千分位。
+  // 刻度标签带 ".00" 会挤掉绘图区宽度，而精确到分的信息在 tooltip 与表格里已有。
+  function moneyAxis(extra) {
+    return makeAxis('value', merge({
+      splitNumber: 4,
+      axisLabel: Object.assign({}, AXIS_LABEL, {
+        formatter: function (v) { return formatIntGroup(v); }
+      })
+    }, extra || {}));
+  }
+
+  function intAxis(extra) {
+    return makeAxis('value', merge({
+      splitNumber: 4,
+      axisLabel: Object.assign({}, AXIS_LABEL, {
+        formatter: function (v) { return formatIntGroup(v); }
+      })
+    }, extra || {}));
+  }
+
+  // 把 #rrggbb + alpha 合成 rgba()，用于面积渐变与柱状渐变
+  function withAlpha(hex, alpha) {
+    var s = String(hex || '').replace('#', '');
+    if (s.length === 3) s = s.charAt(0) + s.charAt(0) + s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2);
+    var n = parseInt(s, 16);
+    if (!isFinite(n)) return hex;
+    return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + alpha + ')';
+  }
 
   // ============================================================
   // ---------- 工具函数 ----------
@@ -166,6 +354,14 @@
     return seen ? total : null;
   }
 
+  // 千分位整数（不保留小数），用于坐标轴刻度这类"只需要量级感"的位置
+  function formatIntGroup(v) {
+    if (isMissing(v)) return '';
+    var n = numberOrNull(v);
+    if (n === null) return '';
+    return Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  }
+
   function formatInt(v) {
     if (isMissing(v)) return '—';
     var n = numberOrNull(v);
@@ -215,15 +411,40 @@
     return Math.min(Math.max(Math.round(n), min), max);
   }
 
-  // ECharts 不接受 Vue 的响应式代理对象：深拷贝成纯对象再渲染，
-  // 同时也能避免图表内部持有代理引用导致的内存滞留。
-  function toPlain(value) {
-    return JSON.parse(JSON.stringify(value === undefined ? null : value));
-  }
-
-  function joinText(list, sep) {
-    if (!list || !list.length) return '—';
-    return list.join(sep || '、');
+  /**
+   * 环比增量描述：只比较"最近两个窗口"，且两个窗口都必须有非零取值。
+   * 之所以加这道门槛：实时链路里最新窗口常常尚未写满（甚至为 0），
+   * 直接算环比会得到 -100% 这种"看起来像事故"的假信号 —— 宁可显示"待下一窗口"。
+   */
+  function buildDelta(rows, field, mode, unit) {
+    var list = rows || [];
+    if (list.length < 2) return null;
+    var last = numberOrNull(list[list.length - 1] && list[list.length - 1][field]);
+    var prev = numberOrNull(list[list.length - 2] && list[list.length - 2][field]);
+    if (last === null || prev === null) return null;
+    if (isMissing(list[list.length - 1] && list[list.length - 1].window_start)) return null;
+    if (last === 0 || prev === 0) {
+      return {
+        text: '待下一窗口',
+        glyph: '·',
+        tone: 'flat',
+        a11y: '最近一个窗口取值为 0，暂不计算环比',
+        title: '最近一个窗口取值为 0（实时链路可能尚未写满），因此不展示环比'
+      };
+    }
+    var pct = ((last - prev) / Math.abs(prev)) * 100;
+    var up = pct > 0.05;
+    var down = pct < -0.05;
+    var text = (up ? '+' : '') + pct.toFixed(1) + '%';
+    var shown = (mode === 'money') ? formatMoney(last) : formatInt(last);
+    return {
+      text: text,
+      glyph: up ? '▲' : (down ? '▼' : '—'),
+      tone: up ? 'up' : (down ? 'down' : 'flat'),
+      a11y: '最近窗口较上一窗口' + (up ? '上升' : (down ? '下降' : '基本持平')) + Math.abs(pct).toFixed(1) + '%',
+      title: '环比：' + formatTime(list[list.length - 1].window_start) + ' 窗口 ' + shown + (unit || '') +
+        '，对比上一个窗口 ' + ((mode === 'money') ? formatMoney(prev) : formatInt(prev)) + (unit || '')
+    };
   }
 
   // ============================================================
@@ -255,6 +476,28 @@
   }
 
   /**
+   * 信封里的 source 字段是"数据来源说明"，各接口形态不一：
+   *   - 字符串：直接就是说明文本；
+   *   - 对象：{ tables, metric_definitions, time_range, note }（本项目后端实际返回）。
+   * 看板必须能自证"这份数据来自哪张表、可不可信"，所以这里做兼容解析：
+   * 顶栏徽标显示短标签（note），鼠标悬停给出涉及的 ADS 表清单。
+   */
+  function resolveSource(source) {
+    if (typeof source === 'string') {
+      var text = source.trim();
+      return text ? { label: text, detail: '' } : null;
+    }
+    if (source && typeof source === 'object') {
+      var note = typeof source.note === 'string' ? source.note.trim() : '';
+      var tables = Array.isArray(source.tables) ? source.tables.filter(Boolean) : [];
+      var detail = tables.length ? ('数据表：' + tables.join('、')) : '';
+      if (!note && !detail) return null;
+      return { label: note || ('来源表 ' + tables.length + ' 张'), detail: detail };
+    }
+    return null;
+  }
+
+  /**
    * 统一 GET：拼 query → 解析信封 → 出错时抛出带中文 message 的 ApiError。
    * 返回信封中的 data 字段（业务代码不再关心信封结构）。
    */
@@ -280,6 +523,11 @@
         }
         if (!body || typeof body !== 'object' || !('data' in body)) {
           throw new ApiError('接口返回格式不符合约定（缺少 data 字段）', 'BAD_ENVELOPE', '', resp.status);
+        }
+        var src = resolveSource(body.source);
+        if (src) {
+          sourceLabel.value = src.label;
+          sourceDetail.value = src.detail;
         }
         return body.data;
       });
@@ -374,12 +622,12 @@
   // 统一的图表渲染封装：所有图表都必须经过这里。
   //   - 已存在实例则复用（不重复 init，避免泄漏）；
   //   - 先 clear 再 setOption(notMerge)：数据条数变化时不残留上一次的 series；
-  //   - 统一关闭动画：数据大屏以"读数"为目的，动画只会干扰刷新时的对比。
+  //   - 主题（坐标轴 / 图例 / 提示框 / 无动画）来自 CHART_THEME，页面只传差异。
   function renderChart(el, option) {
     if (!el || !option || !window.echarts) return null;
     var instance = echarts.getInstanceByDom(el) || echarts.init(el, null, { renderer: 'canvas' });
     instance.clear();
-    instance.setOption(Object.assign({ animation: false, backgroundColor: 'transparent' }, option), true);
+    instance.setOption(merge(CHART_THEME, option), true);
     return instance;
   }
 
@@ -540,63 +788,6 @@
     return { draw: scheduleDraw, dispose: teardown };
   }
 
-  // axis / series 的小工厂：六个页面共用同一套坐标轴样式，避免样式漂移
-  function makeAxis(kind, opts) {
-    var base = {
-      type: kind,
-      axisLine: { lineStyle: { color: C.grid } },
-      axisTick: { show: false },
-      axisLabel: { color: C.axis, fontSize: 11 },
-      splitLine: { show: kind === 'value', lineStyle: { color: C.grid, type: 'dashed' } }
-    };
-    return Object.assign(base, opts || {});
-  }
-
-  function makeLine(name, data, color, yIndex) {
-    return {
-      name: name,
-      type: 'line',
-      yAxisIndex: yIndex || 0,
-      data: data,
-      showSymbol: false,
-      smooth: false,
-      connectNulls: false,
-      lineStyle: { width: 2, color: color },
-      itemStyle: { color: color },
-      emphasis: { focus: 'series' }
-    };
-  }
-
-  // 图表使用的时间轴配置：X 轴只显示 HH:MM（要求：不展示完整日期）
-  function timeAxis(labels) {
-    return makeAxis('category', {
-      data: labels,
-      boundaryGap: true,
-      splitLine: { show: false },
-      axisLabel: { color: C.axis, fontSize: 11, hideOverlap: true }
-    });
-  }
-
-  function moneyAxis() {
-    return makeAxis('value', {
-      axisLabel: {
-        color: C.axis,
-        fontSize: 11,
-        formatter: function (v) { return formatMoney(v); }
-      }
-    });
-  }
-
-  function intAxis() {
-    return makeAxis('value', {
-      axisLabel: {
-        color: C.axis,
-        fontSize: 11,
-        formatter: function (v) { return formatInt(v); }
-      }
-    });
-  }
-
   // ============================================================
   // ---------- 页面通用状态（加载 / 错误 / 更新时间） ----------
   // ============================================================
@@ -709,13 +900,21 @@
   var Icon = {
     name: 'Icon',
     template: '#tpl-icon',
-    props: { name: { type: String, default: '' } }
+    props: {
+      name: { type: String, default: '' },
+      // 图标尺寸由调用方决定，避免满屏同一个 18px
+      size: { type: [Number, String], default: 18 }
+    }
   };
 
   var Skeleton = {
     name: 'Skeleton',
     template: '#tpl-skeleton',
-    props: { rows: { type: Number, default: 4 } },
+    props: {
+      rows: { type: Number, default: 4 },
+      // 'kpi' 时按指标卡形状占位，避免加载完成时的布局跳动
+      variant: { type: String, default: 'text' }
+    },
     methods: {
       // 让骨架条的宽度呈不规则分布，视觉上更接近真实内容
       barWidth: function (n) {
@@ -730,7 +929,9 @@
     template: '#tpl-empty',
     props: {
       text: { type: String, default: '' },
-      hint: { type: String, default: '' }
+      hint: { type: String, default: '' },
+      // 图表位空态：给一个与图表等高（--chart-md）的容器，避免页面高度塌陷
+      chart: { type: Boolean, default: false }
     }
   };
 
@@ -742,7 +943,11 @@
       value: { default: null },
       unit: { type: String, default: '' },
       sub: { type: String, default: '' },
-      tip: { type: String, default: '' }
+      tip: { type: String, default: '' },
+      // 域语义色：trade / traffic / category，对应卡片顶部细线
+      domain: { type: String, default: '' },
+      // 环比：{ text, glyph, tone, a11y, title }
+      delta: { type: Object, default: null }
     },
     computed: {
       // 面板传入的要么是已格式化字符串，要么是原始值；null 一律显示 —
@@ -752,6 +957,17 @@
       },
       valueClass: function () {
         return this.displayValue === '—' ? 'is-missing' : '';
+      },
+      // 颜色之外用箭头字符与 title 文案做冗余表达（不依赖颜色单独传达涨跌）
+      deltaClass: function () {
+        var tone = this.delta && this.delta.tone;
+        return tone === 'up' ? 'is-up' : (tone === 'down' ? 'is-down' : 'is-flat');
+      },
+      deltaGlyph: function () {
+        return (this.delta && this.delta.glyph) || '';
+      },
+      deltaTitle: function () {
+        return (this.delta && this.delta.title) || '';
       }
     }
   };
@@ -762,7 +978,8 @@
     template: '#tpl-select',
     props: {
       modelValue: { default: '' },
-      options: { type: Array, default: function () { return []; } }
+      options: { type: Array, default: function () { return []; } },
+      ariaLabel: { type: String, default: '下拉选择' }
     },
     emits: ['update:modelValue'],
     setup: function (props, ctx) {
@@ -781,6 +998,8 @@
         open.value = false;
       }
 
+      function toggle() { open.value = !open.value; }
+
       function onDocClick(event) {
         if (root.value && !root.value.contains(event.target)) open.value = false;
       }
@@ -788,7 +1007,7 @@
       onMounted(function () { document.addEventListener('click', onDocClick); });
       onBeforeUnmount(function () { document.removeEventListener('click', onDocClick); });
 
-      return { open: open, root: root, selectedLabel: selectedLabel, pick: pick };
+      return { open: open, root: root, selectedLabel: selectedLabel, pick: pick, toggle: toggle };
     }
   };
 
@@ -835,6 +1054,7 @@
       onMounted(load);
 
       // —— KPI 卡片：GMV / 订单量 / 支付笔数 / 退款笔数 / UV / PV ——
+      // 环比取"最近两个窗口"，两个窗口都非零时才展示（见 buildDelta 的说明）。
       var kpiCards = computed(function () {
         var data = overview.value;
         if (!data) return [];
@@ -846,52 +1066,53 @@
 
         return [
           {
-            label: 'GMV（下单金额）', value: formatMoney(kpi.gmv), unit: '元',
-            sub: countText, tip: definitionOf('gmv')
+            label: 'GMV（下单金额）', value: formatMoney(kpi.gmv), unit: '元', domain: 'trade',
+            sub: countText, tip: definitionOf('gmv'),
+            delta: buildDelta(trade.value, 'gmv', 'money', ' 元')
           },
           {
-            label: '订单量', value: formatInt(kpi.order_cnt), unit: '笔',
-            sub: '下单用户 ' + formatInt(kpi.order_user_cnt) + ' 人', tip: definitionOf('order_cnt')
+            label: '订单量', value: formatInt(kpi.order_cnt), unit: '笔', domain: 'trade',
+            sub: '下单用户 ' + formatInt(kpi.order_user_cnt) + ' 人', tip: definitionOf('order_cnt'),
+            delta: buildDelta(trade.value, 'order_cnt', 'int', ' 笔')
           },
           {
-            label: '支付笔数', value: formatInt(kpi.payment_cnt), unit: '笔',
+            label: '支付笔数', value: formatInt(kpi.payment_cnt), unit: '笔', domain: 'trade',
             sub: latest ? '当前窗口 ' + formatInt(latest.payment_cnt) + ' 笔' : windowText,
-            tip: definitionOf('payment_cnt')
+            tip: definitionOf('payment_cnt'),
+            delta: buildDelta(trade.value, 'payment_cnt', 'int', ' 笔')
           },
           {
-            label: '退款笔数', value: formatInt(kpi.refund_cnt), unit: '笔',
-            sub: '退款金额 ' + formatMoney(kpi.refund_amount) + ' 元', tip: definitionOf('refund_cnt')
+            label: '退款笔数', value: formatInt(kpi.refund_cnt), unit: '笔', domain: 'trade',
+            sub: '退款金额 ' + formatMoney(kpi.refund_amount) + ' 元', tip: definitionOf('refund_cnt'),
+            delta: buildDelta(trade.value, 'refund_cnt', 'int', ' 笔')
           },
           {
-            label: 'UV（去重用户）', value: formatInt(kpi.uv), unit: '人',
+            label: 'UV（去重用户）', value: formatInt(kpi.uv), unit: '人', domain: 'traffic',
             sub: '最近 ' + formatInt(windows.traffic) + ' 个流量窗口', tip: definitionOf('uv')
           },
           {
-            label: 'PV（行为事件）', value: formatInt(kpi.pv), unit: '次',
+            label: 'PV（行为事件）', value: formatInt(kpi.pv), unit: '次', domain: 'traffic',
             sub: windowText || '行为事件总数', tip: definitionOf('pv')
           }
         ];
       });
 
-      // —— 交易趋势：GMV 折线 + 订单量柱 ——
+      // —— 交易趋势：GMV 折线（带渐隐面积） + 订单量柱 ——
       bindChart(function () { return tradeEl.value; }, function () {
         var rows = trade.value;
         if (!rows.length) return null;
         var labels = rows.map(function (r) { return shortTime(r.window_start); });
         return {
-          color: [C.gmv, C.order],
-          tooltip: Object.assign({ trigger: 'axis', axisPointer: { type: 'cross', label: { backgroundColor: '#1f2937' } } }, COMMON_TIP),
-          legend: { data: ['GMV', '订单量'], right: 8, top: 0, textStyle: { color: C.axis, fontSize: 11 }, itemWidth: 14, itemHeight: 8 },
-          grid: { left: 8, right: 8, top: 40, bottom: 4, containLabel: true },
+          color: [C.trade, C.neutral],
+          tooltip: {
+            axisPointer: { type: 'cross', label: { backgroundColor: '#1b2739', color: C.text2 }, crossStyle: { color: C.grid } }
+          },
+          legend: { data: ['GMV', '订单量'] },
           xAxis: timeAxis(labels),
-          yAxis: [moneyAxis(), intAxis()],
+          yAxis: [moneyAxis(), intAxis({ splitLine: { show: false } })],
           series: [
-            makeLine('GMV', rows.map(function (r) { return numberOrNull(r.gmv); }), C.gmv, 0),
-            {
-              name: '订单量', type: 'bar', yAxisIndex: 1,
-              data: rows.map(function (r) { return numberOrNull(r.order_cnt); }),
-              barMaxWidth: 14, itemStyle: { color: 'rgba(139,148,158,0.55)', borderRadius: [2, 2, 0, 0] }
-            }
+            makeLine('GMV', rows.map(function (r) { return numberOrNull(r.gmv); }), C.trade, 0),
+            makeBar('订单量', rows.map(function (r) { return numberOrNull(r.order_cnt); }), withAlpha(C.neutral, 0.75), { yAxisIndex: 1 })
           ]
         };
       });
@@ -902,49 +1123,33 @@
         if (!rows.length) return null;
         var labels = rows.map(function (r) { return shortTime(r.window_start); });
         return {
-          color: [C.pv, C.uv],
-          tooltip: Object.assign({ trigger: 'axis' }, COMMON_TIP),
-          legend: { data: ['PV', 'UV'], right: 8, top: 0, textStyle: { color: C.axis, fontSize: 11 }, itemWidth: 14, itemHeight: 8 },
-          grid: { left: 8, right: 8, top: 40, bottom: 4, containLabel: true },
+          color: [C.traffic, C.warn],
+          legend: { data: ['PV', 'UV'] },
           xAxis: timeAxis(labels),
           yAxis: [intAxis()],
           series: [
-            makeLine('PV', rows.map(function (r) { return numberOrNull(r.pv); }), C.pv, 0),
-            makeLine('UV', rows.map(function (r) { return numberOrNull(r.uv); }), C.uv, 0)
+            makeLine('PV', rows.map(function (r) { return numberOrNull(r.pv); }), C.traffic, 0),
+            makeLine('UV', rows.map(function (r) { return numberOrNull(r.uv); }), C.warn, 0)
           ]
         };
       });
 
-      // —— 类目 Top5：横向条形图（GMV 降序，ECharts 类目轴自下而上，故需反转） ——
+      // —— 类目 Top5：横向条形（GMV 降序，ECharts 类目轴自下而上，故需反转） ——
       bindChart(function () { return categoryEl.value; }, function () {
         var rows = categoryTop.value.slice(0, 5);
         if (!rows.length) return null;
         var ordered = rows.slice().reverse();
         return {
-          color: [C.accent],
-          tooltip: Object.assign({
+          color: [C.category],
+          tooltip: {
             trigger: 'axis',
-            axisPointer: { type: 'shadow' },
+            axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(148,163,184,0.08)' } },
             valueFormatter: function (v) { return formatMoney(v) + ' 元'; }
-          }, COMMON_TIP),
-          grid: { left: 8, right: 56, top: 12, bottom: 4, containLabel: true },
-          xAxis: moneyAxis(),
-          yAxis: makeAxis('category', {
-            data: ordered.map(function (r) { return r.category_name; }),
-            splitLine: { show: false },
-            axisLabel: { color: '#c9d1d9', fontSize: 12 }
-          }),
-          series: [{
-            name: 'GMV',
-            type: 'bar',
-            data: ordered.map(function (r) { return numberOrNull(r.gmv); }),
-            barMaxWidth: 18,
-            itemStyle: { color: C.accent, borderRadius: [0, 3, 3, 0] },
-            label: {
-              show: true, position: 'right', color: '#c9d1d9', fontSize: 11,
-              formatter: function (p) { return formatMoney(p.value); }
-            }
-          }]
+          },
+          grid: { left: 6, right: 104, top: 14, bottom: 4, containLabel: true },
+          xAxis: moneyAxis({ splitLine: { show: false }, axisLabel: { show: false } }),
+          yAxis: rankAxis(ordered.map(function (r) { return r.category_name; })),
+          series: [makeRankBar('GMV', ordered.map(function (r) { return numberOrNull(r.gmv); }), C.category)]
         };
       });
 
@@ -978,13 +1183,11 @@
       var series = ref([]);
       var page = ref(1);
       var chartEl = ref(null);
-
-      // 最近 200 个窗口（后端一次最多返回 200 行，超出部分不在这里拼页请求）
-      var WINDOW_LIMIT = 200;
+      var pageSize = PAGE_SIZE;
 
       function load() {
         return panel.run(function () {
-          return api.trade(WINDOW_LIMIT).then(function (rows) {
+          return api.trade(TRADE_WINDOW_LIMIT).then(function (rows) {
             series.value = rows || [];
             page.value = 1;
             return series.value;
@@ -997,12 +1200,46 @@
       // 接口按 window_start 升序返回（便于画折线），表格展示则倒序更符合阅读习惯
       var rowsDesc = computed(function () { return series.value.slice().reverse(); });
       var pageCount = computed(function () {
-        return Math.max(1, Math.ceil(rowsDesc.value.length / PAGE_SIZE));
+        return Math.max(1, Math.ceil(rowsDesc.value.length / pageSize));
       });
       var pagedRows = computed(function () {
-        var start = (page.value - 1) * PAGE_SIZE;
-        return rowsDesc.value.slice(start, start + PAGE_SIZE);
+        var start = (page.value - 1) * pageSize;
+        return rowsDesc.value.slice(start, start + pageSize);
       });
+
+      // 页码按钮：首尾恒显 + 当前页 ±1，中间用省略号（页数多时不做无意义的 200 个按钮）
+      var pageList = computed(function () {
+        var total = pageCount.value;
+        var cur = page.value;
+        var items = [];
+        var push = function (p) {
+          items.push({ key: 'p' + p, page: p, label: String(p), current: p === cur, gap: false });
+        };
+        var pages = [];
+        if (total <= 7) {
+          for (var i = 1; i <= total; i++) pages.push(i);
+        } else {
+          pages.push(1);
+          for (var j = cur - 1; j <= cur + 1; j++) { if (j > 1 && j < total) pages.push(j); }
+          pages.push(total);
+        }
+        var prev = 0;
+        pages.forEach(function (p) {
+          if (prev && p - prev > 1) {
+            items.push({ key: 'gap' + p, page: prev, label: '…', current: false, gap: true });
+          }
+          push(p);
+          prev = p;
+        });
+        return items;
+      });
+
+      function goPage(target) {
+        var next = clamp(target, 1, pageCount.value);
+        if (next === page.value) return;
+        page.value = next;
+      }
+
       watch(pageCount, function (total) {
         if (page.value > total) page.value = total;
       });
@@ -1044,10 +1281,24 @@
           : '暂无窗口';
 
         return [
-          { label: 'GMV 合计', value: formatCents(t.gmvCents), unit: '元', sub: span, tip: definitionOf('gmv') },
-          { label: '客单价', value: formatCents(avgCents), unit: '元', sub: 'GMV ÷ 订单量 ' + formatInt(t.orders) + ' 笔', tip: definitionOf('avg_order_amount') },
-          { label: '支付成功率', value: formatRate(successRate), unit: '', sub: '成功 ' + formatInt(t.payCnt) + ' / 失败 ' + formatInt(t.payFail), tip: definitionOf('payment_success_rate') },
-          { label: '退款率（金额口径）', value: formatRate(refundRate), unit: '', sub: '退款 ' + formatCents(t.refundCents) + ' / 支付 ' + formatCents(t.payCents), tip: definitionOf('refund_rate') }
+          {
+            label: 'GMV 合计', value: formatCents(t.gmvCents), unit: '元', domain: 'trade',
+            sub: span, tip: definitionOf('gmv'),
+            delta: buildDelta(series.value, 'gmv', 'money', ' 元')
+          },
+          {
+            label: '客单价', value: formatCents(avgCents), unit: '元', domain: 'trade',
+            sub: 'GMV ÷ 订单量 ' + formatInt(t.orders) + ' 笔', tip: definitionOf('avg_order_amount'),
+            delta: buildDelta(series.value, 'avg_order_amount', 'money', ' 元')
+          },
+          {
+            label: '支付成功率', value: formatRate(successRate), unit: '', domain: 'trade',
+            sub: '成功 ' + formatInt(t.payCnt) + ' / 失败 ' + formatInt(t.payFail), tip: definitionOf('payment_success_rate')
+          },
+          {
+            label: '退款率（金额口径）', value: formatRate(refundRate), unit: '', domain: 'trade',
+            sub: '退款 ' + formatCents(t.refundCents) + ' / 支付 ' + formatCents(t.payCents), tip: definitionOf('refund_rate')
+          }
         ];
       });
 
@@ -1057,19 +1308,16 @@
         if (!rows.length) return null;
         var labels = rows.map(function (r) { return shortTime(r.window_start); });
         return {
-          color: [C.gmv, C.pay],
-          tooltip: Object.assign({
-            trigger: 'axis',
-            axisPointer: { type: 'line', lineStyle: { color: C.grid } },
+          color: [C.trade, C.pos],
+          tooltip: {
             valueFormatter: function (v) { return formatMoney(v) + ' 元'; }
-          }, COMMON_TIP),
-          legend: { data: ['GMV', '支付金额'], right: 8, top: 0, textStyle: { color: C.axis, fontSize: 11 }, itemWidth: 14, itemHeight: 8 },
-          grid: { left: 8, right: 8, top: 40, bottom: 4, containLabel: true },
+          },
+          legend: { data: ['GMV', '支付金额'] },
           xAxis: timeAxis(labels),
-          yAxis: [moneyAxis(), moneyAxis()],
+          yAxis: [moneyAxis(), moneyAxis({ splitLine: { show: false } })],
           series: [
-            makeLine('GMV', rows.map(function (r) { return numberOrNull(r.gmv); }), C.gmv, 0),
-            makeLine('支付金额', rows.map(function (r) { return numberOrNull(r.payment_amount); }), C.pay, 1)
+            makeLine('GMV', rows.map(function (r) { return numberOrNull(r.gmv); }), C.trade, 0),
+            makeLine('支付金额', rows.map(function (r) { return numberOrNull(r.payment_amount); }), C.pos, 1)
           ]
         };
       });
@@ -1082,6 +1330,9 @@
         cards: cards,
         page: page,
         pageCount: pageCount,
+        pageSize: pageSize,
+        pageList: pageList,
+        goPage: goPage,
         pagedRows: pagedRows,
         fmtMoney: formatMoney,
         fmtInt: formatInt,
@@ -1144,20 +1395,20 @@
         var s = sizeTotals.value;
         var f = funnelTotal.value;
         return [
-          { label: 'UV（单窗口峰值）', value: formatInt(s.uv), unit: '人', sub: '去重用户不可跨窗口相加', tip: definitionOf('uv') },
-          { label: 'PV 合计', value: formatInt(s.pv), unit: '次', sub: '全部行为事件数', tip: definitionOf('pv') },
-          { label: '浏览次数', value: formatInt(f.view_cnt), unit: '次', sub: '漏斗第一层', tip: definitionOf('view_cnt') },
-          { label: '购买次数', value: formatInt(f.buy_cnt), unit: '次', sub: '收藏 ' + formatInt(s.favorite) + ' 次', tip: definitionOf('buy_cnt') }
+          { label: 'UV（单窗口峰值）', value: formatInt(s.uv), unit: '人', domain: 'traffic', sub: '去重用户不可跨窗口相加', tip: definitionOf('uv') },
+          { label: 'PV 合计', value: formatInt(s.pv), unit: '次', domain: 'traffic', sub: '全部行为事件数', tip: definitionOf('pv') },
+          { label: '浏览次数', value: formatInt(f.view_cnt), unit: '次', domain: 'traffic', sub: '漏斗第一层', tip: definitionOf('view_cnt') },
+          { label: '购买次数', value: formatInt(f.buy_cnt), unit: '次', domain: 'traffic', sub: '收藏 ' + formatInt(s.favorite) + ' 次', tip: definitionOf('buy_cnt') }
         ];
       });
 
       var rateCards = computed(function () {
         var f = funnelTotal.value;
         return [
-          { label: '点击率', value: formatRate(ratioOf(f.click_cnt, f.view_cnt)), unit: '', sub: '点击 ÷ 浏览', tip: definitionOf('click_rate') },
-          { label: '加购率', value: formatRate(ratioOf(f.cart_cnt, f.click_cnt)), unit: '', sub: '加购 ÷ 点击', tip: definitionOf('cart_rate') },
-          { label: '购买转化率', value: formatRate(ratioOf(f.buy_cnt, f.cart_cnt)), unit: '', sub: '购买 ÷ 加购', tip: definitionOf('buy_rate') },
-          { label: '整体转化率', value: formatRate(ratioOf(f.buy_cnt, f.view_cnt)), unit: '', sub: '购买 ÷ 浏览（端到端）', tip: '端到端转化率 = buy_cnt / view_cnt，用于衡量整条链路的漏损。' }
+          { label: '点击率', value: formatRate(ratioOf(f.click_cnt, f.view_cnt)), unit: '', domain: 'traffic', sub: '点击 ÷ 浏览', tip: definitionOf('click_rate') },
+          { label: '加购率', value: formatRate(ratioOf(f.cart_cnt, f.click_cnt)), unit: '', domain: 'traffic', sub: '加购 ÷ 点击', tip: definitionOf('cart_rate') },
+          { label: '购买转化率', value: formatRate(ratioOf(f.buy_cnt, f.cart_cnt)), unit: '', domain: 'traffic', sub: '购买 ÷ 加购', tip: definitionOf('buy_rate') },
+          { label: '整体转化率', value: formatRate(ratioOf(f.buy_cnt, f.view_cnt)), unit: '', domain: 'traffic', sub: '购买 ÷ 浏览（端到端）', tip: '端到端转化率 = buy_cnt / view_cnt，用于衡量整条链路的漏损。' }
         ];
       });
 
@@ -1173,33 +1424,37 @@
         });
       });
 
-      // —— 漏斗图：使用 ECharts funnel，标签显示层名与累计值 ——
+      // —— 漏斗图：ECharts funnel，标签显示层名与累计值 ——
       bindChart(function () { return funnelEl.value; }, function () {
         var f = funnelTotal.value;
         if (!f.view_cnt) return null;
+        var funnelColors = [C.traffic, withAlpha(C.traffic, 0.78), withAlpha(C.traffic, 0.58), C.trade];
         return {
-          color: [C.series[0], C.series[5], C.series[2], C.series[1]],
-          tooltip: Object.assign({
+          color: funnelColors,
+          // 漏斗没有坐标轴，图例与网格按需关掉，标签直接落在色块上
+          legend: { show: false },
+          grid: { left: 0, right: 0, top: 0, bottom: 0, containLabel: false },
+          tooltip: {
             trigger: 'item',
             formatter: function (p) {
               var total = funnelTotal.value.view_cnt;
               var share = total ? ((p.value / total) * 100).toFixed(2) + '%' : '—';
               return p.name + '<br/>数量：' + formatInt(p.value) + '<br/>占浏览：' + share;
             }
-          }, COMMON_TIP),
+          },
           series: [{
             type: 'funnel',
-            left: '6%',
-            right: '6%',
+            left: '5%',
+            right: '5%',
             top: 16,
             bottom: 16,
-            minSize: '28%',
+            minSize: '26%',
             sort: 'descending',
-            gap: 2,
-            label: { color: '#c9d1d9', fontSize: 12, formatter: '{b}  {c}' },
-            labelLine: { length: 12, lineStyle: { color: C.grid } },
-            itemStyle: { borderColor: 'transparent', borderWidth: 0, opacity: 0.92 },
-            emphasis: { label: { color: '#ffffff', fontWeight: 'bold' } },
+            gap: 3,
+            label: { color: C.text2, fontSize: 12, formatter: '{b}  {c}' },
+            labelLine: { length: 10, lineStyle: { color: C.grid } },
+            itemStyle: { borderColor: 'transparent', borderWidth: 0, opacity: 0.9 },
+            emphasis: { label: { color: C.text, fontWeight: 'bold' } },
             data: [
               { name: '浏览', value: f.view_cnt },
               { name: '点击', value: f.click_cnt },
@@ -1216,16 +1471,14 @@
         if (!rows.length) return null;
         var labels = rows.map(function (r) { return shortTime(r.window_start); });
         return {
-          color: [C.pv, C.uv, C.view],
-          tooltip: Object.assign({ trigger: 'axis' }, COMMON_TIP),
-          legend: { data: ['PV', 'UV', '浏览次数'], right: 8, top: 0, textStyle: { color: C.axis, fontSize: 11 }, itemWidth: 14, itemHeight: 8 },
-          grid: { left: 8, right: 8, top: 40, bottom: 4, containLabel: true },
+          color: [C.traffic, C.warn, C.neutral],
+          legend: { data: ['PV', 'UV', '浏览次数'] },
           xAxis: timeAxis(labels),
           yAxis: [intAxis()],
           series: [
-            makeLine('PV', rows.map(function (r) { return numberOrNull(r.pv); }), C.pv, 0),
-            makeLine('UV', rows.map(function (r) { return numberOrNull(r.uv); }), C.uv, 0),
-            makeLine('浏览次数', rows.map(function (r) { return numberOrNull(r.view_cnt); }), C.view, 0)
+            makeLine('PV', rows.map(function (r) { return numberOrNull(r.pv); }), C.traffic, 0),
+            makeLine('UV', rows.map(function (r) { return numberOrNull(r.uv); }), C.warn, 0),
+            makeLine('浏览次数', rows.map(function (r) { return numberOrNull(r.view_cnt); }), C.neutral, 0)
           ]
         };
       });
@@ -1314,36 +1567,22 @@
         if (!items.length) return null;
         var ordered = items.slice().reverse();
         return {
-          color: [C.series[0]],
-          tooltip: Object.assign({
+          color: [C.category],
+          tooltip: {
             trigger: 'axis',
-            axisPointer: { type: 'shadow' },
+            axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(148,163,184,0.08)' } },
             formatter: function (params) {
-              var p = params[0];
+              var p = Array.isArray(params) ? params[0] : params;
               var row = ordered[p.dataIndex] || {};
               return row.category_name + '<br/>GMV：' + formatMoney(row.gmv) + ' 元' +
                 '<br/>订单量：' + formatInt(row.order_cnt) + ' 笔' +
                 '<br/>客单价：' + formatMoney(row.avg_order_amount) + ' 元';
             }
-          }, COMMON_TIP),
-          grid: { left: 8, right: 80, top: 12, bottom: 4, containLabel: true },
-          xAxis: moneyAxis(),
-          yAxis: makeAxis('category', {
-            data: ordered.map(function (r) { return r.category_name; }),
-            splitLine: { show: false },
-            axisLabel: { color: '#c9d1d9', fontSize: 12 }
-          }),
-          series: [{
-            name: 'GMV',
-            type: 'bar',
-            data: ordered.map(function (r) { return numberOrNull(r.gmv); }),
-            barMaxWidth: 18,
-            itemStyle: { color: C.series[0], borderRadius: [0, 3, 3, 0] },
-            label: {
-              show: true, position: 'right', color: '#c9d1d9', fontSize: 11,
-              formatter: function (p) { return formatMoney(p.value); }
-            }
-          }]
+          },
+          grid: { left: 6, right: 104, top: 14, bottom: 4, containLabel: true },
+          xAxis: moneyAxis({ splitLine: { show: false }, axisLabel: { show: false } }),
+          yAxis: rankAxis(ordered.map(function (r) { return r.category_name; })),
+          series: [makeRankBar('GMV', ordered.map(function (r) { return numberOrNull(r.gmv); }), C.category)]
         };
       });
 
@@ -1353,21 +1592,31 @@
         if (!items.length) return null;
         return {
           color: C.series,
-          tooltip: Object.assign({
+          legend: {
+            bottom: 0,
+            left: 'center',
+            icon: 'circle',
+            itemWidth: 8,
+            itemHeight: 8,
+            itemGap: 12,
+            textStyle: { color: C.axis, fontSize: 11 }
+          },
+          tooltip: {
             trigger: 'item',
             formatter: function (p) {
               return p.name + '<br/>GMV：' + formatMoney(p.value) + ' 元<br/>占比：' + p.percent + '%';
             }
-          }, COMMON_TIP),
-          legend: { bottom: 0, left: 'center', textStyle: { color: C.axis, fontSize: 11 }, itemWidth: 12, itemHeight: 8 },
+          },
           series: [{
             type: 'pie',
-            radius: ['42%', '68%'],
-            center: ['50%', '44%'],
+            radius: ['46%', '70%'],
+            center: ['50%', '45%'],
             avoidLabelOverlap: true,
-            itemStyle: { borderColor: '#0f172a', borderWidth: 2 },
-            label: { color: '#c9d1d9', fontSize: 11, formatter: '{b} {d}%' },
+            // 用面板底色描边形成缝隙，比白色描边更贴合深色主题
+            itemStyle: { borderColor: C.surface, borderWidth: 2 },
+            label: { color: C.text2, fontSize: 11, formatter: '{b} {d}%' },
             labelLine: { length: 8, length2: 8, lineStyle: { color: C.grid } },
+            emphasis: { scale: true, scaleSize: 4, label: { color: C.text } },
             data: items.map(function (r) {
               return { name: r.category_name, value: numberOrNull(r.gmv) };
             })
@@ -1409,6 +1658,7 @@
       var endDate = ref('');
       var offset = ref(0);
       var categoryOptions = ref([]);
+      var modalEl = ref(null);
 
       var detailOpen = ref(false);
       var detailId = ref('');
@@ -1420,6 +1670,19 @@
       var pageCount = computed(function () {
         var total = result.value ? numberOrNull(result.value.total) || 0 : 0;
         return Math.max(1, Math.ceil(total / PAGE_SIZE));
+      });
+
+      // 自绘下拉需要 { label, value } 结构；空值用 '' 表示"全部类目"
+      var categorySelectOptions = computed(function () {
+        var opts = [{ label: '全部类目', value: '' }];
+        categoryOptions.value.forEach(function (name) {
+          opts.push({ label: name, value: name });
+        });
+        return opts;
+      });
+
+      var dateRangeInvalid = computed(function () {
+        return !!(startDate.value && endDate.value && startDate.value > endDate.value);
       });
 
       var filterSummary = computed(function () {
@@ -1483,8 +1746,12 @@
         load();
       }
 
+      // 弹窗打开时把焦点移入面板（键盘与读屏用户不会"丢失焦点"），关闭时归还给触发它的行
+      var lastFocused = null;
+
       function openDetail(orderId) {
         if (detailLoading.value) return;
+        if (!detailOpen.value) lastFocused = document.activeElement;
         detailOpen.value = true;
         detailId.value = orderId;
         detail.value = null;
@@ -1501,6 +1768,9 @@
           detailError.value = (cause && cause.message) || '订单详情加载失败';
         }).then(function () {
           detailLoading.value = false;
+          Vue.nextTick(function () {
+            if (modalEl.value) modalEl.value.focus();
+          });
         });
       }
 
@@ -1508,6 +1778,10 @@
         detailOpen.value = false;
         detail.value = null;
         detailError.value = '';
+        Vue.nextTick(function () {
+          if (lastFocused && typeof lastFocused.focus === 'function') lastFocused.focus();
+          lastFocused = null;
+        });
       }
 
       function onEsc(event) {
@@ -1524,11 +1798,14 @@
         startDate: startDate,
         endDate: endDate,
         categoryOptions: categoryOptions,
+        categorySelectOptions: categorySelectOptions,
+        dateRangeInvalid: dateRangeInvalid,
         filterSummary: filterSummary,
         page: page,
         pageCount: pageCount,
         offset: offset,
         limit: PAGE_SIZE,
+        modalEl: modalEl,
         applyFilters: applyFilters,
         resetFilters: resetFilters,
         turnPage: turnPage,
@@ -1623,12 +1900,48 @@
   // ---------- 根组件 ----------
   // ============================================================
 
+  // 窄屏（<1024px）时侧栏是抽屉：折叠按钮无意义，改由顶栏的菜单按钮控制。
+  var narrowQuery = typeof window.matchMedia === 'function'
+    ? window.matchMedia('(max-width: 1023px)')
+    : null;
+
   var App = {
     name: 'App',
     setup: function () {
       var page = currentPage;
       var collapsed = ref(false);
+      var navOpen = ref(false);
+      var isNarrow = ref(narrowQuery ? narrowQuery.matches : false);
       setupRoute();
+
+      function syncNarrow(event) {
+        isNarrow.value = event.matches;
+        if (!event.matches) navOpen.value = false;   // 放大回桌面时收起抽屉
+      }
+
+      onMounted(function () {
+        if (!narrowQuery) return;
+        if (typeof narrowQuery.addEventListener === 'function') {
+          narrowQuery.addEventListener('change', syncNarrow);
+        } else if (typeof narrowQuery.addListener === 'function') {
+          narrowQuery.addListener(syncNarrow);
+        }
+      });
+      onBeforeUnmount(function () {
+        if (!narrowQuery) return;
+        if (typeof narrowQuery.removeEventListener === 'function') {
+          narrowQuery.removeEventListener('change', syncNarrow);
+        } else if (typeof narrowQuery.removeListener === 'function') {
+          narrowQuery.removeListener(syncNarrow);
+        }
+      });
+
+      // 抽屉打开时按 Esc 关闭
+      function onEsc(event) {
+        if (event.key === 'Escape' && navOpen.value) navOpen.value = false;
+      }
+      onMounted(function () { document.addEventListener('keydown', onEsc); });
+      onBeforeUnmount(function () { document.removeEventListener('keydown', onEsc); });
 
       var route = computed(function () {
         var key = page.value;
@@ -1639,8 +1952,13 @@
       });
 
       var anyLoading = computed(function () { return refreshing.value > 0; });
-      var updatedText = computed(function () { return latestStamp.value || '—'; });
+      var updatedText = computed(function () { return latestStamp.value || '尚未加载'; });
       var errorText = computed(function () { return globalError.value; });
+      var apiBase = API_BASE;
+      var statusText = computed(function () {
+        if (errorText.value) return '数据加载失败：' + errorText.value;
+        return anyLoading.value ? '正在加载数据' : '数据已就绪';
+      });
 
       // 刷新：逐个调用已登记的面板 reload；面板内部有 loading 互斥，重复点击无副作用
       function refreshAll() {
@@ -1652,6 +1970,15 @@
         });
       }
 
+      // 窄屏下"折叠"即关闭抽屉，桌面下才是真正的收起侧栏
+      function toggleCollapsed() {
+        if (isNarrow.value) {
+          navOpen.value = false;
+          return;
+        }
+        collapsed.value = !collapsed.value;
+      }
+
       onMounted(function () { preloadDefinitions(); });
 
       return {
@@ -1659,9 +1986,16 @@
         page: page,
         route: route,
         collapsed: collapsed,
+        navOpen: navOpen,
+        isNarrow: isNarrow,
+        toggleCollapsed: toggleCollapsed,
         anyLoading: anyLoading,
         updatedText: updatedText,
         errorText: errorText,
+        statusText: statusText,
+        apiBase: apiBase,
+        sourceLabel: sourceLabel,
+        sourceDetail: sourceDetail,
         refreshAll: refreshAll
       };
     }

@@ -4,8 +4,8 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="color-scheme" content="dark" />
-  <!-- 主题色，让移动端浏览器地址栏与深色大屏一致 -->
-  <meta name="theme-color" content="#0b1220" />
+  <!-- 主题色，让移动端浏览器地址栏与深色大屏一致（与 styles.css 的 --bg-side 同值） -->
+  <meta name="theme-color" content="#0a101c" />
   <!--
     API 基址集中在此声明（而不是写死在 JS 里）：
     部署脚本或 Nginx 反向代理调整路径时，只需改这一行。
@@ -22,7 +22,7 @@
        依赖未就绪时的兜底提示
        Vue / ECharts 由 scripts/install-web.sh 下载到 ./vendor/。
        该脚本未执行时下面的 script 标签会 404，app.js 检测到全局变量缺失
-       就会把 #app 替换成"请先执行安装脚本"的中文提示，避免白屏。
+       就会把 #boot 替换成"请先执行安装脚本"的中文提示，避免白屏。
        ============================================================ -->
   <div class="boot" id="boot">
     <p class="boot__text">正在加载前端依赖与看板…</p>
@@ -43,7 +43,7 @@
 
   <!-- 内联 SVG 图标：不引入任何图标字体或外部图片，避免外网依赖 -->
   <script type="text/x-template" id="tpl-icon">
-    <svg class="icon" viewBox="0 0 24 24" width="18" height="18" fill="none"
+    <svg class="icon" :width="size" :height="size" viewBox="0 0 24 24" fill="none"
          stroke="currentColor" stroke-width="1.6" stroke-linecap="round"
          stroke-linejoin="round" aria-hidden="true" focusable="false">
       <template v-if="name === 'overview'">
@@ -86,26 +86,55 @@
       <template v-else-if="name === 'chevron'">
         <path d="M8.5 5.5l6.8 6.5-6.8 6.5"></path>
       </template>
+      <template v-else-if="name === 'chevron-left'">
+        <path d="M14.5 5.5l-6.8 6.5 6.8 6.5"></path>
+      </template>
       <template v-else-if="name === 'close'">
         <path d="M6.5 6.5l11 11"></path>
         <path d="M17.5 6.5l-11 11"></path>
       </template>
+      <template v-else-if="name === 'menu'">
+        <path d="M3.5 6.5h17"></path>
+        <path d="M3.5 12h17"></path>
+        <path d="M3.5 17.5h17"></path>
+      </template>
+      <template v-else-if="name === 'up'">
+        <path d="M12 19.5v-15"></path>
+        <path d="M5.8 10.7L12 4.5l6.2 6.2"></path>
+      </template>
+      <template v-else-if="name === 'down'">
+        <path d="M12 4.5v15"></path>
+        <path d="M18.2 13.3L12 19.5l-6.2-6.2"></path>
+      </template>
+      <template v-else-if="name === 'empty'">
+        <path d="M3.5 8.5h17v11a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5z"></path>
+        <path d="M3.5 8.5L5.8 3.6A1.5 1.5 0 0 1 7.1 3h9.8a1.5 1.5 0 0 1 1.3.6l2.3 4.9"></path>
+        <path d="M9.6 12.6h4.8"></path>
+      </template>
     </svg>
   </script>
 
-  <!-- 骨架屏：加载中占位，避免"空白窗口"造成的等待焦虑 -->
+  <!-- 骨架屏：加载中占位，避免"空白窗口"造成的等待焦虑；variant="kpi" 时占位成指标卡形状 -->
   <script type="text/x-template" id="tpl-skeleton">
-    <div class="skeleton">
-      <div class="skeleton__row" v-for="n in rows" :key="n">
-        <div class="skeleton__bar" :style="{ width: barWidth(n) }"></div>
-      </div>
+    <div class="skeleton" :class="variant === 'kpi' ? 'skeleton--kpi' : ''" aria-hidden="true">
+      <template v-if="variant === 'kpi'">
+        <div class="skeleton__card" v-for="n in rows" :key="n">
+          <div class="skeleton__bar"></div>
+          <div class="skeleton__bar"></div>
+        </div>
+      </template>
+      <template v-else>
+        <div class="skeleton__row" v-for="n in rows" :key="n">
+          <div class="skeleton__bar" :style="{ width: barWidth(n) }"></div>
+        </div>
+      </template>
     </div>
   </script>
 
-  <!-- 空数据提示：与"加载中"、"出错"三态区分开 -->
+  <!-- 空数据提示：与"加载中"、"出错"三态区分开（图标 + 说明 + 可选建议） -->
   <script type="text/x-template" id="tpl-empty">
-    <div class="empty">
-      <span class="empty__mark" aria-hidden="true">∅</span>
+    <div class="empty" :class="{ 'empty--chart': chart }" role="status">
+      <icon name="empty" :size="26" class="empty__icon"></icon>
       <p class="empty__text">{{ text || '当前筛选条件下暂无数据' }}</p>
       <p class="empty__hint" v-if="hint">{{ hint }}</p>
     </div>
@@ -113,13 +142,21 @@
 
   <!-- 指标卡：value 为 null 时统一显示 —，与后端"比率分母为 0 返回 null"的约定对齐 -->
   <script type="text/x-template" id="tpl-kpi">
-    <div class="kpi">
+    <div class="kpi" :class="domain ? ('kpi--' + domain) : null">
       <div class="kpi__label">
         <span>{{ label }}</span>
-        <span class="tip" v-if="tip" :data-tip="tip" tabindex="0" role="note" aria-label="指标口径">?</span>
+        <span class="tip" v-if="tip" :data-tip="tip" tabindex="0" role="note" aria-label="查看指标口径">?</span>
       </div>
-      <div class="kpi__value" :class="valueClass">{{ displayValue }}<span class="kpi__unit" v-if="unit && displayValue !== '—'">{{ unit }}</span></div>
+      <div class="kpi__value" :class="valueClass">
+        {{ displayValue }}<span class="kpi__unit" v-if="unit && displayValue !== '—'">{{ unit }}</span>
+      </div>
       <div class="kpi__sub" v-if="sub">{{ sub }}</div>
+      <div class="kpi__foot" v-if="delta">
+        <span class="kpi__delta" :class="deltaClass" :title="deltaTitle">
+          <span aria-hidden="true">{{ deltaGlyph }}</span>
+          <span>{{ delta.text }}<span class="sr-only">，{{ delta.a11y }}</span></span>
+        </span>
+      </div>
     </div>
   </script>
 
@@ -128,20 +165,20 @@
     <div class="select" ref="root">
       <button type="button" class="select__button" :class="{ 'is-open': open }"
               :aria-expanded="open ? 'true' : 'false'" aria-haspopup="listbox"
-              @click="toggle" @keydown.escape.prevent="open = false">
+              :aria-label="ariaLabel" @click="toggle" @keydown.escape.prevent="open = false">
         <span class="select__value">{{ selectedLabel }}</span>
         <svg class="icon select__arrow" viewBox="0 0 24 24" width="14" height="14" fill="none"
              stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
           <path d="M6.5 9.5l5.5 5.5 5.5-5.5"></path>
         </svg>
       </button>
-      <ul class="select__list" role="listbox" v-if="open">
+      <ul class="select__list" role="listbox" :aria-label="ariaLabel" v-if="open">
         <li v-for="opt in options" :key="String(opt.value)" role="option"
             :aria-selected="opt.value === modelValue ? 'true' : 'false'"
             class="select__item" :class="{ 'is-active': opt.value === modelValue }"
             @click="pick(opt)">
           <span>{{ opt.label }}</span>
-          <span class="select__check" v-if="opt.value === modelValue">✓</span>
+          <span class="select__check" v-if="opt.value === modelValue" aria-hidden="true">✓</span>
         </li>
       </ul>
     </div>
@@ -153,66 +190,71 @@
       <section class="panel">
         <div class="panel__head">
           <div>
-            <h3 class="panel__title">核心指标</h3>
-            <p class="panel__desc">指标口径来自 <code>/api/meta/metrics</code>，可左键悬停「?」查看定义。</p>
+            <h2 class="panel__title">核心指标</h2>
+            <p class="panel__desc">指标口径来自 <code>/api/meta/metrics</code>，悬停或聚焦「?」可查看定义。</p>
           </div>
           <p class="panel__meta" v-if="overview">数据窗口 {{ fmtTime(overview.earliest_window) }} ~ {{ fmtTime(overview.latest_window) }}</p>
         </div>
-        <skeleton v-if="loading && !overview" :rows="3"></skeleton>
+        <skeleton v-if="loading && !overview" variant="kpi" :rows="6"></skeleton>
         <div class="kpi-grid" v-else-if="overview">
           <kpi v-for="card in kpiCards" :key="card.label" :label="card.label" :value="card.value"
-               :unit="card.unit" :sub="card.sub" :tip="card.tip"></kpi>
+               :unit="card.unit" :sub="card.sub" :tip="card.tip" :domain="card.domain"
+               :delta="card.delta"></kpi>
         </div>
       </section>
 
       <section class="panel">
         <div class="panel__head">
-          <h3 class="panel__title">交易趋势</h3>
-          <p class="panel__meta">GMV 折线（左轴，元） / 订单量柱状（右轴，笔）</p>
+          <h2 class="panel__title">交易趋势</h2>
+          <p class="panel__meta">左轴 GMV（元） / 右轴 订单量（笔）</p>
         </div>
-        <div class="chart chart--md" ref="tradeEl" v-show="trade.length"></div>
+        <div class="chart chart--md" ref="tradeEl" v-show="trade.length"
+             role="img" aria-label="交易趋势折柱混合图：GMV 折线与订单量柱状按时间窗口排列"></div>
         <skeleton v-if="loading && !trade.length" :rows="5"></skeleton>
-        <empty v-else-if="!trade.length" text="所选窗口内没有交易数据"></empty>
+        <empty v-else-if="!trade.length" chart text="所选窗口内没有交易数据" hint="可点击右上角「刷新」重试，或确认 Flink 作业是否在写入 ADS 层"></empty>
       </section>
 
       <div class="grid grid--2">
         <section class="panel">
           <div class="panel__head">
-            <h3 class="panel__title">流量趋势</h3>
-            <p class="panel__meta">PV / UV（左轴，次）</p>
+            <h2 class="panel__title">流量趋势</h2>
+            <p class="panel__meta">左轴 PV / UV（次 / 人）</p>
           </div>
-          <div class="chart chart--md" ref="trafficEl" v-show="traffic.length"></div>
+          <div class="chart chart--md" ref="trafficEl" v-show="traffic.length"
+               role="img" aria-label="流量趋势折线图：PV 与 UV 按时间窗口排列"></div>
           <skeleton v-if="loading && !traffic.length" :rows="5"></skeleton>
-          <empty v-else-if="!traffic.length" text="所选窗口内没有流量数据"></empty>
+          <empty v-else-if="!traffic.length" chart text="所选窗口内没有流量数据" hint="行为事件由 Kafka 写入，窗口内无事件时此图为空"></empty>
         </section>
 
         <section class="panel">
           <div class="panel__head">
-            <h3 class="panel__title">类目销售 Top5</h3>
+            <h2 class="panel__title">类目销售 Top5</h2>
             <p class="panel__meta">按 GMV 降序</p>
           </div>
-          <div class="chart chart--md" ref="categoryEl" v-show="categoryTop.length"></div>
+          <div class="chart chart--md" ref="categoryEl" v-show="categoryTop.length"
+               role="img" aria-label="类目 GMV 排行条形图：取前五名类目的 GMV"></div>
           <skeleton v-if="loading && !categoryTop.length" :rows="5"></skeleton>
-          <empty v-else-if="!categoryTop.length" text="所选窗口内没有类目销售数据"></empty>
+          <empty v-else-if="!categoryTop.length" chart text="所选窗口内没有类目销售数据"></empty>
         </section>
       </div>
 
       <section class="panel">
         <div class="panel__head">
-          <h3 class="panel__title">明细快照</h3>
+          <h2 class="panel__title">明细快照</h2>
           <p class="panel__meta">最近一个窗口的类目聚合结果</p>
         </div>
-        <div class="table-wrap">
+        <div class="table-wrap" v-if="categoryTop.length">
           <table class="table">
+            <caption class="sr-only">最近一个窗口各类目的订单量、GMV、件数与客单价</caption>
             <thead>
               <tr>
-                <th>类目</th><th class="num">订单量（笔）</th><th class="num">GMV（元）</th>
-                <th class="num">件数</th><th class="num">客单价（元）</th>
+                <th scope="col">类目</th><th scope="col" class="num">订单量（笔）</th><th scope="col" class="num">GMV（元）</th>
+                <th scope="col" class="num">件数</th><th scope="col" class="num">客单价（元）</th>
               </tr>
             </thead>
             <tbody>
               <tr v-for="row in categoryTop" :key="row.category_name">
-                <td>{{ row.category_name }}</td>
+                <td>{{ row.category_name || '—' }}</td>
                 <td class="num">{{ fmtInt(row.order_cnt) }}</td>
                 <td class="num">{{ fmtMoney(row.gmv) }}</td>
                 <td class="num">{{ fmtInt(row.total_quantity) }}</td>
@@ -221,6 +263,7 @@
             </tbody>
           </table>
         </div>
+        <empty v-else text="所选窗口内没有类目聚合数据"></empty>
       </section>
     </div>
   </script>
@@ -230,33 +273,36 @@
     <div class="page">
       <section class="panel">
         <div class="panel__head">
-          <h3 class="panel__title">交易指标</h3>
-          <p class="panel__desc">客单价按整数分口径重算：SUM(GMV) ÷ SUM(订单量)，不使用浮点累加。</p>
+          <div>
+            <h2 class="panel__title">交易指标</h2>
+            <p class="panel__desc">客单价按整数分口径重算：SUM(GMV) ÷ SUM(订单量)，不使用浮点累加。</p>
+          </div>
+          <p class="panel__meta" v-if="series.length">最近 {{ series.length }} 个窗口累计</p>
         </div>
-        <skeleton v-if="loading && !series.length" :rows="3"></skeleton>
+        <skeleton v-if="loading && !series.length" variant="kpi" :rows="4"></skeleton>
         <div class="kpi-grid kpi-grid--4" v-else>
           <kpi v-for="card in cards" :key="card.label" :label="card.label" :value="card.value"
-               :unit="card.unit" :sub="card.sub" :tip="card.tip"></kpi>
+               :unit="card.unit" :sub="card.sub" :tip="card.tip" :domain="card.domain"
+               :delta="card.delta"></kpi>
         </div>
       </section>
 
       <section class="panel">
         <div class="panel__head">
-          <h3 class="panel__title">GMV 与支付金额趋势</h3>
-          <p class="panel__meta">双轴折线：左轴 GMV，右轴支付金额；X 轴仅显示 HH:MM</p>
+          <h2 class="panel__title">GMV 与支付金额趋势</h2>
+          <p class="panel__meta">双轴折线：左轴 GMV / 右轴支付金额，X 轴为 HH:MM</p>
         </div>
-        <div class="chart chart--lg" ref="chartEl" v-show="series.length"></div>
+        <div class="chart chart--lg" ref="chartEl" v-show="series.length"
+             role="img" aria-label="双轴折线图：GMV 与支付金额按时间窗口排列"></div>
         <skeleton v-if="loading && !series.length" :rows="6"></skeleton>
-        <empty v-else-if="!series.length" text="所选窗口内没有交易数据"></empty>
+        <empty v-else-if="!series.length" chart text="所选窗口内没有交易数据" hint="接口按 window_start 升序返回，最多 200 个窗口"></empty>
       </section>
 
       <section class="panel">
         <div class="panel__head">
           <div>
-            <h3 class="panel__title">窗口明细</h3>
-            <p class="panel__desc">
-              接口按 window_start 升序返回，表格按时间倒序展示；最多保留最近 200 个窗口，每页 20 行。
-            </p>
+            <h2 class="panel__title">窗口明细</h2>
+            <p class="panel__desc">接口按 window_start 升序返回，表格按时间倒序展示；最多保留最近 200 个窗口。</p>
           </div>
           <p class="panel__meta" v-if="series.length">共 {{ series.length }} 个窗口</p>
         </div>
@@ -264,13 +310,14 @@
         <template v-else-if="series.length">
           <div class="table-wrap">
             <table class="table table--compact">
+              <caption class="sr-only">按时间倒序的交易窗口明细，含 GMV、订单量、支付与退款指标</caption>
               <thead>
                 <tr>
-                  <th>窗口</th><th class="num">GMV（元）</th><th class="num">订单量</th>
-                  <th class="num">下单用户</th><th class="num">客单价（元）</th>
-                  <th class="num">支付笔数</th><th class="num">支付金额（元）</th>
-                  <th class="num">支付失败</th><th class="num">支付成功率</th>
-                  <th class="num">退款笔数</th><th class="num">退款金额（元）</th><th class="num">退款率</th>
+                  <th scope="col">窗口</th><th scope="col" class="num">GMV（元）</th><th scope="col" class="num">订单量</th>
+                  <th scope="col" class="num">下单用户</th><th scope="col" class="num">客单价（元）</th>
+                  <th scope="col" class="num">支付笔数</th><th scope="col" class="num">支付金额（元）</th>
+                  <th scope="col" class="num">支付失败</th><th scope="col" class="num">支付成功率</th>
+                  <th scope="col" class="num">退款笔数</th><th scope="col" class="num">退款金额（元）</th><th scope="col" class="num">退款率</th>
                 </tr>
               </thead>
               <tbody>
@@ -291,12 +338,24 @@
               </tbody>
             </table>
           </div>
-          <div class="pager">
-            <button type="button" class="btn btn--ghost" :disabled="page <= 1" @click="page = page - 1">上一页</button>
-            <span class="pager__info">第 {{ page }} / {{ pageCount }} 页</span>
-            <button type="button" class="btn btn--ghost" :disabled="page >= pageCount" @click="page = page + 1">下一页</button>
-          </div>
+          <nav class="pager" aria-label="窗口明细分页">
+            <span class="pager__info">第 {{ page }} / {{ pageCount }} 页 · 每页 {{ pageSize }} 行</span>
+            <button type="button" class="pager__btn" :disabled="page <= 1"
+                    aria-label="上一页" @click="goPage(page - 1)">
+              <icon name="chevron-left" :size="14"></icon>
+            </button>
+            <button type="button" class="pager__btn" v-for="p in pageList" :key="p.key"
+                    :class="{ 'is-current': p.current }" :disabled="p.gap"
+                    :aria-current="p.current ? 'page' : null"
+                    :aria-label="p.gap ? '更多页码' : ('第 ' + p.page + ' 页')"
+                    @click="goPage(p.page)">{{ p.label }}</button>
+            <button type="button" class="pager__btn" :disabled="page >= pageCount"
+                    aria-label="下一页" @click="goPage(page + 1)">
+              <icon name="chevron" :size="14"></icon>
+            </button>
+          </nav>
         </template>
+        <empty v-else text="所选窗口内没有交易数据"></empty>
       </section>
     </div>
   </script>
@@ -306,36 +365,40 @@
     <div class="page">
       <section class="panel">
         <div class="panel__head">
-          <h3 class="panel__title">流量规模</h3>
-          <p class="panel__desc">PV 口径为窗口内全部行为事件数（含 VIEW/CLICK/CART/FAVORITE/BUY），非狭义页面浏览。</p>
+          <div>
+            <h2 class="panel__title">流量规模</h2>
+            <p class="panel__desc">PV 口径为窗口内全部行为事件数（含 VIEW / CLICK / CART / FAVORITE / BUY），非狭义页面浏览。</p>
+          </div>
+          <p class="panel__meta" v-if="series.length">最近 {{ series.length }} 个窗口</p>
         </div>
-        <skeleton v-if="loading && !series.length" :rows="3"></skeleton>
+        <skeleton v-if="loading && !series.length" variant="kpi" :rows="4"></skeleton>
         <div class="kpi-grid kpi-grid--4" v-else>
           <kpi v-for="card in sizeCards" :key="card.label" :label="card.label" :value="card.value"
-               :unit="card.unit" :sub="card.sub" :tip="card.tip"></kpi>
+               :unit="card.unit" :sub="card.sub" :tip="card.tip" :domain="card.domain"></kpi>
         </div>
       </section>
 
       <div class="grid grid--funnel">
         <section class="panel">
           <div class="panel__head">
-            <h3 class="panel__title">行为漏斗</h3>
+            <h2 class="panel__title">行为漏斗</h2>
             <p class="panel__meta">浏览 → 点击 → 加购 → 购买（所选窗口累计）</p>
           </div>
-          <div class="chart chart--md" ref="funnelEl" v-show="funnelTotal.view_cnt"></div>
+          <div class="chart chart--md" ref="funnelEl" v-show="funnelTotal.view_cnt"
+               role="img" aria-label="行为转化漏斗图：浏览、点击、加购、购买四层累计量"></div>
           <skeleton v-if="loading && !series.length" :rows="5"></skeleton>
-          <empty v-else-if="!funnelTotal.view_cnt" text="所选窗口内没有行为事件"></empty>
+          <empty v-else-if="!funnelTotal.view_cnt" chart text="所选窗口内没有行为事件" hint="漏斗第一层为 VIEW 事件数，为 0 时无法计算转化率"></empty>
         </section>
 
         <section class="panel">
           <div class="panel__head">
-            <h3 class="panel__title">转化率</h3>
+            <h2 class="panel__title">转化率</h2>
             <p class="panel__desc">按所选窗口累计分子分母重算，分母为 0 时显示 —。</p>
           </div>
-          <skeleton v-if="loading && !series.length" :rows="3"></skeleton>
+          <skeleton v-if="loading && !series.length" variant="kpi" :rows="4"></skeleton>
           <div class="kpi-grid kpi-grid--2" v-else>
             <kpi v-for="card in rateCards" :key="card.label" :label="card.label" :value="card.value"
-                 :unit="card.unit" :sub="card.sub" :tip="card.tip"></kpi>
+                 :unit="card.unit" :sub="card.sub" :tip="card.tip" :domain="card.domain"></kpi>
           </div>
           <ul class="steps" v-if="steps.length">
             <li class="steps__item" v-for="s in steps" :key="s.label">
@@ -349,12 +412,13 @@
 
       <section class="panel">
         <div class="panel__head">
-          <h3 class="panel__title">流量趋势</h3>
-          <p class="panel__meta">PV / UV / 浏览次数（左轴，次）</p>
+          <h2 class="panel__title">流量趋势</h2>
+          <p class="panel__meta">左轴 PV / UV / 浏览次数</p>
         </div>
-        <div class="chart chart--lg" ref="chartEl" v-show="series.length"></div>
+        <div class="chart chart--lg" ref="chartEl" v-show="series.length"
+             role="img" aria-label="流量趋势折线图：PV、UV 与浏览次数按时间窗口排列"></div>
         <skeleton v-if="loading && !series.length" :rows="6"></skeleton>
-        <empty v-else-if="!series.length" text="所选窗口内没有流量数据"></empty>
+        <empty v-else-if="!series.length" chart text="所选窗口内没有流量数据"></empty>
       </section>
     </div>
   </script>
@@ -365,47 +429,54 @@
       <section class="panel">
         <div class="panel__head">
           <div>
-            <h3 class="panel__title">类目 GMV 排行</h3>
+            <h2 class="panel__title">类目 GMV 排行</h2>
             <p class="panel__desc">按 GMV 降序；切换时间范围会重新请求 <code>/api/metrics/category</code>。</p>
           </div>
           <div class="toolbar">
             <div class="seg" role="group" aria-label="时间范围">
               <button type="button" class="seg__btn" :class="{ 'is-active': windowLimit === 60 }"
+                      :aria-pressed="windowLimit === 60 ? 'true' : 'false'"
                       @click="setWindow(60)">最近 60 分钟</button>
               <button type="button" class="seg__btn" :class="{ 'is-active': windowLimit === ALL_WINDOWS }"
+                      :aria-pressed="windowLimit === ALL_WINDOWS ? 'true' : 'false'"
                       @click="setWindow(ALL_WINDOWS)">全部</button>
             </div>
             <label class="field">
-              <span class="field__label">条数</span>
-              <input class="input input--sm" type="number" min="3" max="50" step="1" v-model="topN" />
+              <span class="field__label">条数（3 ~ 50）</span>
+              <input class="input input--sm input--num" type="number" min="3" max="50" step="1"
+                     v-model="topN" aria-label="排行条数，取值 3 到 50" />
             </label>
           </div>
         </div>
-        <skeleton v-if="loading && !rows.length" :rows="6"></skeleton>
+        <skeleton v-if="loading && !rows.length" variant="kpi" :rows="6"></skeleton>
         <template v-else-if="rows.length">
-          <div class="chart chart--md" ref="barEl"></div>
+          <div class="chart chart--md" ref="barEl"
+               role="img" aria-label="类目 GMV 排行横向条形图，条形右侧标注金额"></div>
         </template>
-        <empty v-else text="所选时间范围内没有类目销售数据"></empty>
+        <empty v-else chart text="所选时间范围内没有类目销售数据" hint="可切换到「全部」窗口，或确认类目维度表是否已关联"></empty>
       </section>
 
       <div class="grid grid--2">
         <section class="panel">
           <div class="panel__head">
-            <h3 class="panel__title">GMV 占比</h3>
+            <h2 class="panel__title">GMV 占比</h2>
             <p class="panel__meta">按排行条数取前 {{ list.length }} 个类目</p>
           </div>
-          <div class="chart chart--md" ref="pieEl" v-show="list.length"></div>
-          <empty v-if="!list.length" text="没有可用于绘制占比的数据"></empty>
+          <div class="chart chart--md" ref="pieEl" v-show="list.length"
+               role="img" aria-label="类目 GMV 占比环形图"></div>
+          <empty v-if="!list.length" chart text="没有可用于绘制占比的数据"></empty>
         </section>
 
         <section class="panel">
           <div class="panel__head">
-            <h3 class="panel__title">合计</h3>
+            <h2 class="panel__title">合计</h2>
             <p class="panel__desc">合计金额用整数分累加后再格式化，避免浮点误差。</p>
           </div>
-          <div class="kpi-grid kpi-grid--2" v-if="list.length">
-            <kpi label="类目 GMV 合计" :value="totalGmv" unit="元" :sub="'覆盖 ' + list.length + ' 个类目'"></kpi>
-            <kpi label="类目订单合计" :value="totalOrders" unit="笔" :tip="'SUM(该类目订单量)'"></kpi>
+          <div class="kpi-grid kpi-grid--2 kpi-grid--wide" v-if="list.length">
+            <kpi label="类目 GMV 合计" :value="totalGmv" unit="元" domain="category"
+                 :sub="'覆盖 ' + list.length + ' 个类目'"></kpi>
+            <kpi label="类目订单合计" :value="totalOrders" unit="笔" domain="category"
+                 tip="SUM(该类目订单量)"></kpi>
           </div>
           <empty v-else text="没有可统计的类目数据"></empty>
         </section>
@@ -413,22 +484,23 @@
 
       <section class="panel">
         <div class="panel__head">
-          <h3 class="panel__title">类目明细</h3>
+          <h2 class="panel__title">类目明细</h2>
           <p class="panel__meta">客单价由类目 GMV ÷ 订单量重算</p>
         </div>
         <skeleton v-if="loading && !rows.length" :rows="5"></skeleton>
         <div class="table-wrap" v-else-if="rows.length">
           <table class="table">
+            <caption class="sr-only">类目销售明细，按 GMV 降序排列</caption>
             <thead>
               <tr>
-                <th>排名</th><th>类目</th><th class="num">GMV（元）</th>
-                <th class="num">订单量（笔）</th><th class="num">件数</th><th class="num">客单价（元）</th>
+                <th scope="col">排名</th><th scope="col">类目</th><th scope="col" class="num">GMV（元）</th>
+                <th scope="col" class="num">订单量（笔）</th><th scope="col" class="num">件数</th><th scope="col" class="num">客单价（元）</th>
               </tr>
             </thead>
             <tbody>
               <tr v-for="(row, index) in list" :key="row.category_name">
                 <td class="mono">{{ index + 1 }}</td>
-                <td>{{ row.category_name }}</td>
+                <td>{{ row.category_name || '—' }}</td>
                 <td class="num">{{ fmtMoney(row.gmv) }}</td>
                 <td class="num">{{ fmtInt(row.order_cnt) }}</td>
                 <td class="num">{{ fmtInt(row.total_quantity) }}</td>
@@ -447,38 +519,39 @@
     <div class="page">
       <section class="panel">
         <div class="panel__head">
-          <h3 class="panel__title">订单筛选</h3>
-          <p class="panel__desc">三个条件均可留空；日期为闭区间，按订单事件时间过滤。</p>
+          <h2 class="panel__title">订单筛选</h2>
+          <p class="panel__meta">三个条件均可留空；日期为闭区间，按订单事件时间过滤</p>
         </div>
         <div class="filters">
           <label class="field">
             <span class="field__label">商品类目</span>
-            <select class="input" v-model="category">
-              <option value="">全部类目</option>
-              <option v-for="name in categoryOptions" :key="name" :value="name">{{ name }}</option>
-            </select>
+            <select-box v-model="category" :options="categorySelectOptions"
+                        aria-label="按商品类目筛选"></select-box>
           </label>
           <label class="field">
             <span class="field__label">开始日期</span>
-            <input class="input" type="date" v-model="startDate" />
+            <input class="input" type="date" v-model="startDate" aria-label="开始日期（闭区间）" />
           </label>
           <label class="field">
             <span class="field__label">结束日期</span>
-            <input class="input" type="date" v-model="endDate" />
+            <input class="input" type="date" v-model="endDate" aria-label="结束日期（闭区间）" />
           </label>
           <div class="filters__actions">
-            <button type="button" class="btn btn--primary" @click="applyFilters">查询</button>
-            <button type="button" class="btn btn--ghost" @click="resetFilters">重置</button>
+            <button type="button" class="btn btn--primary" :disabled="loading" @click="applyFilters">查询</button>
+            <button type="button" class="btn btn--ghost" :disabled="loading" @click="resetFilters">重置</button>
           </div>
         </div>
-        <p class="filters__note" v-if="filterSummary">{{ filterSummary }}</p>
+        <p class="filters__note" v-if="filterSummary">
+          {{ filterSummary }}
+          <span v-if="dateRangeInvalid">　⚠ 开始日期晚于结束日期，接口可能返回空结果</span>
+        </p>
       </section>
 
       <section class="panel">
         <div class="panel__head">
           <div>
-            <h3 class="panel__title">订单列表</h3>
-            <p class="panel__desc">点击任意一行查看该订单的支付与退款记录。</p>
+            <h2 class="panel__title">订单列表</h2>
+            <p class="panel__desc">点击任意一行（或聚焦后按回车）查看该订单的支付与退款记录。</p>
           </div>
           <p class="panel__meta" v-if="result">共 {{ fmtInt(result.total) }} 条</p>
         </div>
@@ -486,14 +559,17 @@
         <template v-else-if="result && result.items.length">
           <div class="table-wrap">
             <table class="table table--clickable">
+              <caption class="sr-only">订单列表，每行可展开查看支付与退款明细</caption>
               <thead>
                 <tr>
-                  <th>订单号</th><th>用户</th><th>商品</th><th>类目</th><th>会员等级</th>
-                  <th>省份</th><th class="num">数量</th><th class="num">金额（元）</th><th>下单时间</th>
+                  <th scope="col">订单号</th><th scope="col">用户</th><th scope="col">商品</th><th scope="col">类目</th>
+                  <th scope="col">会员等级</th><th scope="col">省份</th><th scope="col" class="num">数量</th>
+                  <th scope="col" class="num">金额（元）</th><th scope="col">下单时间</th>
                 </tr>
               </thead>
               <tbody>
                 <tr v-for="row in result.items" :key="row.order_id" tabindex="0"
+                    :aria-label="'查看订单 ' + row.order_id + ' 详情'"
                     @click="openDetail(row.order_id)" @keydown.enter.prevent="openDetail(row.order_id)">
                   <td class="mono link">{{ row.order_id }}</td>
                   <td class="mono">{{ fmtInt(row.user_id) }}</td>
@@ -508,20 +584,26 @@
               </tbody>
             </table>
           </div>
-          <div class="pager">
-            <button type="button" class="btn btn--ghost" :disabled="offset <= 0" @click="turnPage(-1)">上一页</button>
-            <span class="pager__info">第 {{ page }} / {{ pageCount }} 页</span>
-            <button type="button" class="btn btn--ghost" :disabled="offset + limit >= result.total" @click="turnPage(1)">下一页</button>
-          </div>
+          <nav class="pager" aria-label="订单列表分页">
+            <span class="pager__info">第 {{ page }} / {{ pageCount }} 页 · 每页 {{ limit }} 条</span>
+            <button type="button" class="pager__btn" :disabled="offset <= 0" aria-label="上一页" @click="turnPage(-1)">
+              <icon name="chevron-left" :size="14"></icon>
+            </button>
+            <button type="button" class="pager__btn" :disabled="offset + limit >= result.total"
+                    aria-label="下一页" @click="turnPage(1)">
+              <icon name="chevron" :size="14"></icon>
+            </button>
+          </nav>
         </template>
         <empty v-else text="没有符合条件的订单" hint="可尝试放宽日期范围或清空类目筛选"></empty>
       </section>
 
       <div class="modal" v-if="detailOpen" @click.self="closeDetail">
-        <div class="modal__panel" role="dialog" aria-modal="true" aria-label="订单详情">
+        <div class="modal__panel" ref="modalEl" role="dialog" aria-modal="true"
+             aria-labelledby="order-detail-title" tabindex="-1">
           <div class="modal__head">
-            <h3 class="modal__title">订单详情 · <span class="mono">{{ detailId }}</span></h3>
-            <button type="button" class="btn btn--icon" aria-label="关闭" @click="closeDetail">
+            <h3 class="modal__title" id="order-detail-title">订单详情 · <span class="mono">{{ detailId }}</span></h3>
+            <button type="button" class="btn btn--icon" aria-label="关闭订单详情" @click="closeDetail">
               <icon name="close"></icon>
             </button>
           </div>
@@ -541,7 +623,8 @@
               <h4 class="modal__subtitle">支付记录（{{ detail.payments.length }}）</h4>
               <div class="table-wrap" v-if="detail.payments.length">
                 <table class="table table--compact">
-                  <thead><tr><th>支付号</th><th class="num">金额（元）</th><th>方式</th><th>状态</th><th>时间</th></tr></thead>
+                  <caption class="sr-only">该订单的支付记录</caption>
+                  <thead><tr><th scope="col">支付号</th><th scope="col" class="num">金额（元）</th><th scope="col">方式</th><th scope="col">状态</th><th scope="col">时间</th></tr></thead>
                   <tbody>
                     <tr v-for="p in detail.payments" :key="p.payment_id">
                       <td class="mono">{{ p.payment_id }}</td>
@@ -558,7 +641,8 @@
               <h4 class="modal__subtitle">退款记录（{{ detail.refunds.length }}）</h4>
               <div class="table-wrap" v-if="detail.refunds.length">
                 <table class="table table--compact">
-                  <thead><tr><th>退款号</th><th class="num">金额（元）</th><th>状态</th><th>时间</th></tr></thead>
+                  <caption class="sr-only">该订单的退款记录</caption>
+                  <thead><tr><th scope="col">退款号</th><th scope="col" class="num">金额（元）</th><th scope="col">状态</th><th scope="col">时间</th></tr></thead>
                   <tbody>
                     <tr v-for="r in detail.refunds" :key="r.refund_id">
                       <td class="mono">{{ r.refund_id }}</td>
@@ -571,6 +655,14 @@
               </div>
               <p class="modal__none" v-else>该订单暂无退款记录。</p>
             </template>
+            <div class="errorbar" v-else-if="detailError" role="alert">
+              <span class="errorbar__icon" aria-hidden="true">!</span>
+              <div class="errorbar__body">
+                <strong>订单详情加载失败</strong>
+                <p>{{ detailError }}</p>
+              </div>
+              <button type="button" class="btn btn--ghost" @click="openDetail(detailId)">重试</button>
+            </div>
           </div>
         </div>
       </div>
@@ -581,7 +673,7 @@
   <script type="text/x-template" id="tpl-metrics">
     <div class="page">
       <section class="panel panel--notice">
-        <h3 class="panel__title">口径来源声明</h3>
+        <h2 class="panel__title">口径来源声明</h2>
         <p class="notice__text">
           本页是 Agent 回答问题时<strong>必须引用</strong>的口径来源。指标字典与表结构均来自后端元数据接口，
           与 <code>sql/metadata/metrics.md</code> 保持同源；任何口径变更都先改该文档，再改 Flink / Spark 作业。
@@ -595,22 +687,24 @@
       <section class="panel">
         <div class="panel__head">
           <div>
-            <h3 class="panel__title">指标字典</h3>
-            <p class="panel__desc">来源：<code>/api/meta/metrics</code>，共 {{ metrics.length }} 条定义。</p>
+            <h2 class="panel__title">指标字典</h2>
+            <p class="panel__desc">来源：<code>/api/meta/metrics</code>，共 {{ metrics.length }} 条定义<span v-if="keyword.trim()">，筛选出 {{ filteredMetrics.length }} 条</span>。</p>
           </div>
           <label class="field field--inline">
             <icon name="search"></icon>
-            <input class="input input--sm" type="search" v-model="keyword" placeholder="按域 / 指标 / 字段 / 表筛选" />
+            <input class="input input--sm" type="search" v-model="keyword"
+                   placeholder="按域 / 指标 / 字段 / 表筛选" aria-label="筛选指标字典" />
           </label>
         </div>
         <skeleton v-if="loading && !metrics.length" :rows="8"></skeleton>
         <template v-else-if="filteredMetrics.length">
           <div class="table-wrap">
             <table class="table table--compact">
+              <caption class="sr-only">指标字典：域、指标、字段、所在表、口径说明、计算方式与空值约定</caption>
               <thead>
                 <tr>
-                  <th>域</th><th>指标</th><th>字段</th><th>所在表</th>
-                  <th>口径说明</th><th>计算方式</th><th>空值约定</th>
+                  <th scope="col">域</th><th scope="col">指标</th><th scope="col">字段</th><th scope="col">所在表</th>
+                  <th scope="col">口径说明</th><th scope="col">计算方式</th><th scope="col">空值约定</th>
                 </tr>
               </thead>
               <tbody>
@@ -633,10 +727,11 @@
       <section class="panel">
         <div class="panel__head">
           <div>
-            <h3 class="panel__title">表结构</h3>
+            <h2 class="panel__title">表结构</h2>
             <p class="panel__desc">来源：<code>/api/meta/tables</code>，共 {{ tables.length }} 张表。点击表头行展开字段清单。</p>
           </div>
-          <button type="button" class="btn btn--ghost" @click="toggleAll">
+          <button type="button" class="btn btn--ghost" @click="toggleAll"
+                  :aria-label="allOpen ? '折叠全部表结构' : '展开全部表结构'">
             {{ allOpen ? '全部折叠' : '全部展开' }}
           </button>
         </div>
@@ -644,8 +739,9 @@
         <div class="accordion" v-else-if="tables.length">
           <div class="accordion__item" v-for="item in tables" :key="item.table">
             <button type="button" class="accordion__head" :aria-expanded="isOpen(item.table) ? 'true' : 'false'"
+                    :aria-label="(isOpen(item.table) ? '折叠表 ' : '展开表 ') + item.table"
                     @click="toggle(item.table)">
-              <span class="accordion__arrow" :class="{ 'is-open': isOpen(item.table) }">
+              <span class="accordion__arrow" :class="{ 'is-open': isOpen(item.table) }" aria-hidden="true">
                 <icon name="chevron"></icon>
               </span>
               <span class="accordion__table mono">{{ item.table }}</span>
@@ -655,7 +751,8 @@
             </button>
             <div class="accordion__body" v-if="isOpen(item.table)">
               <table class="table table--compact">
-                <thead><tr><th>字段</th><th>类型</th><th>说明</th></tr></thead>
+                <caption class="sr-only">{{ item.table }} 的字段清单</caption>
+                <thead><tr><th scope="col">字段</th><th scope="col">类型</th><th scope="col">说明</th></tr></thead>
                 <tbody>
                   <tr v-for="col in item.columns" :key="col.name">
                     <td class="mono">{{ col.name }}</td>
@@ -676,47 +773,82 @@
        应用挂载点
        ============================================================ -->
   <div id="app" v-cloak>
+    <a class="skip-link" href="#main-content">跳转到主内容</a>
+
     <div class="shell" v-if="route">
-      <aside class="sidebar" :class="{ 'is-collapsed': collapsed }">
+      <aside class="sidebar" id="side-nav"
+             :class="{ 'is-collapsed': collapsed && !isNarrow, 'is-open': navOpen }"
+             aria-label="侧边导航">
         <div class="sidebar__brand">
           <span class="sidebar__logo" aria-hidden="true">批</span>
-          <div class="sidebar__titles" v-show="!collapsed">
+          <div class="sidebar__titles" v-show="!collapsed || isNarrow">
             <strong class="sidebar__name">批流一体智能数据分析平台</strong>
             <span class="sidebar__sub">实时链路 · 1 分钟窗口</span>
           </div>
         </div>
-        <nav class="sidebar__nav" aria-label="主导航">
+
+        <p class="sidebar__section" v-show="!collapsed || isNarrow">数据看板</p>
+        <nav class="sidebar__nav">
           <a v-for="item in routes" :key="item.key" class="nav-item"
              :class="{ 'is-active': item.key === page }" :href="'#/' + item.key"
-             :title="collapsed ? item.title : null">
+             :aria-current="item.key === page ? 'page' : null"
+             :title="(collapsed && !isNarrow) ? item.title : null" @click="navOpen = false">
             <icon :name="item.key"></icon>
-            <span class="nav-item__text" v-show="!collapsed">{{ item.title }}</span>
+            <span class="nav-item__text" v-show="!collapsed || isNarrow">{{ item.title }}</span>
           </a>
         </nav>
+
         <div class="sidebar__foot">
-          <button type="button" class="btn btn--ghost btn--block" @click="collapsed = !collapsed">
-            {{ collapsed ? '展开导航' : '折叠导航' }}
+          <button type="button" class="btn btn--ghost btn--block"
+                  :aria-label="collapsed ? '展开侧边导航' : '折叠侧边导航'"
+                  :aria-expanded="collapsed ? 'false' : 'true'" aria-controls="side-nav"
+                  @click="toggleCollapsed">
+            <icon :name="collapsed ? 'chevron' : 'chevron-left'" :size="14"></icon>
+            <span v-show="!collapsed || isNarrow">{{ collapsed ? '展开导航' : '折叠导航' }}</span>
           </button>
-          <p class="sidebar__hint" v-show="!collapsed">
+          <p class="sidebar__hint" v-show="!collapsed || isNarrow">
             数据直接读取实时数仓 ADS 层（Doris），不做二次缓存。
           </p>
         </div>
       </aside>
 
-      <main class="main">
+      <button type="button" class="scrim" v-if="navOpen" aria-label="关闭导航" @click="navOpen = false"></button>
+
+      <main class="main" id="main-content" tabindex="-1">
         <header class="topbar">
           <div class="topbar__left">
+            <p class="topbar__crumbs">
+              <span>数据看板</span>
+              <span class="topbar__crumb-sep" aria-hidden="true">/</span>
+              <span>{{ route.title }}</span>
+            </p>
             <h1 class="topbar__title">{{ route.title }}</h1>
             <p class="topbar__subtitle">{{ route.subtitle }}</p>
           </div>
+
           <div class="topbar__right">
-            <span class="topbar__time">最后更新：{{ updatedText }}</span>
-            <button type="button" class="btn btn--primary" :disabled="anyLoading" @click="refreshAll">
+            <button type="button" class="btn btn--icon nav-toggle" aria-label="打开导航菜单"
+                    aria-controls="side-nav" :aria-expanded="navOpen ? 'true' : 'false'"
+                    @click="navOpen = !navOpen">
+              <icon name="menu" :size="20"></icon>
+            </button>
+            <span class="src-badge" :title="'接口基址：' + apiBase + (sourceDetail ? '\n' + sourceDetail : '')">
+              <span class="src-badge__dot" aria-hidden="true"></span>
+              <span class="sr-only">数据来源：</span>{{ sourceLabel }}
+            </span>
+            <span class="topbar__stamp">
+              <span class="topbar__stamp-label">数据时间</span>
+              <span class="topbar__time">{{ updatedText }}</span>
+            </span>
+            <button type="button" class="btn btn--primary" :disabled="anyLoading" @click="refreshAll"
+                    :aria-label="anyLoading ? '正在刷新数据' : '刷新全部数据'">
               <icon name="refresh" :class="{ spin: anyLoading }"></icon>
               <span>{{ anyLoading ? '加载中…' : '刷新' }}</span>
             </button>
           </div>
         </header>
+
+        <p class="sr-only" role="status" aria-live="polite">{{ statusText }}</p>
 
         <div class="errorbar" role="alert" v-if="errorText">
           <span class="errorbar__icon" aria-hidden="true">!</span>
@@ -724,7 +856,7 @@
             <strong>数据加载失败</strong>
             <p>{{ errorText }}</p>
           </div>
-          <button type="button" class="btn btn--ghost" @click="refreshAll">重试</button>
+          <button type="button" class="btn btn--ghost" :disabled="anyLoading" @click="refreshAll">重试</button>
         </div>
 
         <!-- 用 key 强制卸载旧页面：组件销毁时统一 dispose 图表实例，避免内存泄漏 -->

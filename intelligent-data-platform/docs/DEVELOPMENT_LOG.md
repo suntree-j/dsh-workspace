@@ -347,6 +347,132 @@ scripts/verify-sprint-6.sh  7 步验收（状态/文件/Nginx 路径/健康/对�
 
 ---
 
+## 2026-09-26 Sprint 2（离线链路）
+
+**主题**：Spark + Hive + 湖仓存储（MySQL 全量抽取 → Parquet on S3A → Hive 外部表）
+**状态**：✅ 已实现并验收通过（8/8 PASS）
+**设计文档**：[`docs/sprint/SPRINT_2.md`](sprint/SPRINT_2.md)（含 11 条踩坑记录）
+
+### 阶段 1：先算内存，再决定装什么
+
+上新组件前先做资源侦察，结论直接改变了方案：
+
+```text
+宿主机 15.99 GB，但实测**可用只有 2.0 GB**：
+  Doris FE 容器 7.27 GB（含页缓存）／Flink 三容器 2.46 GB／Kafka 1.13 GB
+若再加 Spark(≈2.5 GB) + Hive(≈0.8 GB) + HDFS(≈1.3 GB) → 必然 OOM，
+而 OOM 会连带打挂已经验收过的实时链路与看板 —— 这个代价不可接受。
+```
+
+于是做了两件事：**先降配，再上新组件**。
+
+| 组件 | 原值 | 新值 | 说明 |
+| --- | --- | --- | --- |
+| Kafka | `-Xmx1G` | `-Xmx512m` | 只有 12 个 topic、每个 3 分区 |
+| Flink TaskManager | 3072m | 2048m | 8 个作业各 1 slot |
+| Flink JobManager | 1024m | 768m | — |
+| Doris FE | `-Xmx1536m` | `-Xmx1024m` | 只服务看板的只读查询 |
+
+**效果：可用内存 2.0 GB → 9.0 GB**，且降配后实时链路回归验证全部通过
+（health-check 11/11、数据服务 GMV 一字不差）。
+
+### 阶段 2：存储层从 HDFS 换成 S3A（记录在案的偏差）
+
+设计目标架构写的是 `Iceberg on HDFS/S3`，本次选 **S3A(MinIO)**：
+MinIO 在 Sprint 0 就是为湖仓准备的（bucket 名 `lakehouse`），
+而 HDFS 要多占 1.3 GB 且与"保实时链路"冲突。
+补回 HDFS 的路径（加两个服务 + 改 `fs.defaultFS`）已写进 SPRINT_2.md 第 2.2 节。
+
+### 阶段 3：离线链路的实现
+
+```text
+MySQL（唯一事实源）
+   └─ Spark JDBC（按主键 range 并行读，显式 schema 转换型）
+        └─ Parquet（snappy）→ s3a://lakehouse/warehouse/ods/<表>/
+             └─ Hive Metastore 目录 → lakehouse.ods_*（EXTERNAL TABLE，DROP 不删数据）
+                  └─ 作业内自带逐表对账（不一致就退出码非 0）
+```
+
+产物：`docker-compose.yml` 新增 4 个服务（metastore/master/worker + 按需 submit）、
+`infrastructure/spark`（Dockerfile + spark-defaults + 抽取作业）、
+`infrastructure/hive`（hive-site.xml）、`sql/hive/01_ods_tables.sql`、
+3 个脚本（init-lakehouse / submit-offline-job / spark-sql）+ verify-sprint-2。
+
+### 阶段 4：踩坑与修复（本 Sprint 的主要工作量，共 11 条）
+
+最难的是 **Hive 客户端与服务端的版本契约**，试了三种组合才找到可用解：
+
+| 尝试 | 结果 |
+| --- | --- |
+| Metastore 4.0.1 + Spark 内置客户端 2.3.9 | ❌ `Invalid method name: 'get_table'`（Hive 4 删了旧 thrift 方法） |
+| 让 Spark 用 Hive 4 客户端（jars=path） | ❌ Spark 对 `metastore.version` 有白名单（≤3.1.3）；`jars.path` 在 `fs.defaultFS=s3a` 下还被当成 S3 路径 |
+| 声明 `metastore.version=3.1.3` + 内置客户端 | ❌ `Builtin jars can only be used when hive execution version == hive metastore version` |
+| **Metastore 3.1.3 + 不声明版本（内置 2.3.9 客户端）** | ✅ 成功 |
+
+其余 10 条（XML 注释里的双连字符、entrypoint 每次 initSchema 导致崩溃重启、
+entrypoint 忽略命令行参数拿 Derby 脚本初始化 MySQL、Metastore 缺 S3A 类、
+spark-work 卷属主 root、MasterUI 只绑主机名、`set -e` 下 grep 无匹配静默退出、
+Spark `/json/` 美化输出导致解析失败、`compose run` 容器名不可解析、
+S3 上没有"目录"导致事件日志目录校验失败）逐条记在 SPRINT_2.md 第 6 节，
+每条都写了根因与修法，避免后人重踩。
+
+### 阶段 5：验收结果
+
+```text
+✅ bash scripts/verify-sprint-2.sh      8/8 PASS
+✅ 逐表对账                              ods_user 1200 / product 600 / orders 6000
+                                        payment 5406 / refund 254 —— 与 MySQL 精确一致
+✅ 存储落地                              25 个 Parquet 对象在 s3a://lakehouse/warehouse/ods
+✅ 类型正确                              amount decimal(18,2)，ODS 无 double/float
+✅ 幂等                                  重跑抽取作业后行数不变
+✅ 回归                                  实时链路 11/11 健康、数据服务正常
+```
+
+### 决策记录
+
+| 决策 | 选择 | 理由 |
+| --- | --- | --- |
+| 是否上 HDFS | 不上，用 S3A(MinIO) | 内存实测只够一个；且 MinIO 本就是为湖仓准备的，Sprint 5 的 Iceberg 同时支持两者 |
+| 是否上 HiveServer2 | 不上，只跑 Metastore | Spark 直接访问 Metastore 即可；HS2 要多一个数 GB 的进程 |
+| Hive 版本 | 3.1.3（不是最新的 4.0.1） | 与 Spark 内置客户端兼容；「最新」不等于「可用」 |
+| 抽取方式 | JDBC 分区读 + 显式 schema + 作业内对账 | 数据量小但方法要可复制；对账放作业里，每次运行自带证据 |
+| 表类型 | EXTERNAL TABLE | DROP 只删元数据，重跑不会误删数据 |
+| 端口/资源 | 每个新服务显式 `mem_limit` | 宁可单容器 OOM 也不拖垮宿主机 |
+
+### 待办
+
+- [ ] `tests/smoke/test_offline.py` 随下一次全量冒烟执行确认
+- [ ] Sprint 3：在 `ods_*` 上建 DWD/DWS/ADS，并与实时指标交叉对账
+
+---
+
+## 2026-09-26 看板 UI 设计升级（Sprint 6 增强）
+
+**背景**：Sprint 6 的看板功能可用，但设计偏"能跑就行"。本次做一次整体设计升级。
+
+**做法**：把 UI 当成有设计系统的产品来做，而不是堆样式：
+
+1. **设计令牌化**：色板 / 间距刻度 / 圆角 / 阴影 / 字号阶梯 / 过渡时长全部收敛到
+   `:root` 变量，后续规则只引用变量 —— 这是"设计系统"最小可讲的形态。
+2. **信息层级**：顶栏（面包屑 + 页面标题 + 数据源徽标 + 数据时间 + 刷新）、
+   左侧导航、内容区；KPI 数字用独立字号令牌当视觉主角，口径说明收进提示。
+3. **诚实的数据表达**：KPI 环比徽标只在**最近两个窗口都有非零值**时显示，
+   否则显示"待下一窗口" —— 实时链路没写满时不该给出 -100% 这种假信号。
+4. **图表统一主题**：新增 `CHART_THEME`，网格/坐标轴/图例/提示框/调色板集中一处；
+   折线带渐隐面积、柱状圆角、类目条形带数值标签；空数据显示"图标 + 说明 + 建议"。
+5. **可达性**：skip-link、`aria-current`、图标按钮 `aria-label`、
+   弹窗焦点归位、涨跌除颜色外还有 ▲/▼ 与 sr-only 文案、`prefers-reduced-motion` 关动画。
+6. **一个实测出来的取舍**：KPI 卡片固定 **≤3 张一行**。
+   1600px 视口下内容区 1220px，4 列时每卡内容宽 374px，而
+   `1,283,809.29 元` 在该字号下需 373px —— 刚好卡在临界点，换个数据就折行。
+   于是字号改成"按一行几张卡给定"并加 `nowrap`：宁可字号小一点，也不让金额折行。
+
+**验证**：真实浏览器逐页检查（CDP）：6 个页面全部渲染，每个 `.chart` 容器
+`canvas ≥ 1`（总览 3/3、交易 1/1、流量 2/2、类目 2/2），无 JS 异常；
+另在本地用桩数据验证了空态、错误态、骨架屏与窄屏抽屉布局。
+
+---
+
 ## 待办与下一步
 
 ### 当前阻塞 / 需人工处理
