@@ -23,6 +23,31 @@ COPY lib/mysql-connector-j-8.4.0.jar /opt/spark/jars/
 COPY lib/hadoop-aws-3.3.4.jar /opt/spark/jars/
 COPY lib/aws-java-sdk-bundle-1.12.262.jar /opt/spark/jars/
 
+# 结构化流读 Kafka 的连接器（Sprint 4 引入）
+#
+# !! 官方镜像**不带** Kafka 连接器，实测确认 !!
+#   $ docker run --rm --entrypoint bash apache/spark:3.5.7 \
+#         -c 'ls /opt/spark/jars/ | grep -i kafka'
+#   （无输出）
+#   缺了会报：AnalysisException: Failed to find data source: kafka.
+#
+# 四个 jar 缺一不可：
+#   spark-sql-kafka-0-10              数据源实现
+#   spark-token-provider-kafka-0-10   凭据委派（官方部署文档要求一起带上）
+#   kafka-clients                     Kafka 客户端
+#   commons-pool2                     kafka-clients 的运行时依赖
+#
+# 获取方式：infrastructure/spark/lib/download-connector.sh
+#   （与 Sprint 1 给 Flink 补 Kafka 连接器同一思路：JAR 固化进镜像，
+#     不在提交作业时用 --packages 联网解析）
+#
+# 版本对齐：两个 spark-* jar 严格等于 Spark 版本 3.5.7；
+#   kafka-clients 3.4.1 是其配套版本。升级 Spark 时这几行都要复核。
+COPY lib/spark-sql-kafka-0-10_2.12-3.5.7.jar /opt/spark/jars/
+COPY lib/spark-token-provider-kafka-0-10_2.12-3.5.7.jar /opt/spark/jars/
+COPY lib/kafka-clients-3.4.1.jar /opt/spark/jars/
+COPY lib/commons-pool2-2.12.0.jar /opt/spark/jars/
+
 # 项目统一的 Spark 默认配置（Metastore 地址、S3A、内存与并行度）
 COPY conf/spark-defaults.conf /opt/spark/conf/spark-defaults.conf
 
