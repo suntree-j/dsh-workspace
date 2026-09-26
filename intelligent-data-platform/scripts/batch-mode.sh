@@ -162,23 +162,40 @@ restore_realtime() {
         return 1
     fi
 
-    # !! 健康检查必须**重试**，不能等一个固定秒数就判死 !!
-    #   实测踩坑：原实现是 `sleep 25` 后只查一次。但 Flink 作业从 Kafka
-    #   已提交位点续跑、Routine Load 重新变 RUNNING，有时要 1 分钟以上。
-    #   于是出现最糟的一种失败形态：**链路其实正在恢复，任务却被判失败** ——
-    #   而这时 DAG 已经结束，没有后续任务再来确认，
-    #   实时链路就停在一个没人看的状态里。Sprint 4 实测遇到过。
+    # !! 健康检查要**重试**，还要**自愈** !!
     #
-    #   恢复本质上是"最终一致"的过程，判据应该是"等它好"，
-    #   而不是"立刻就好"。
+    #   重试的理由（Sprint 4）：Flink 作业从 Kafka 已提交位点续跑、
+    #   Routine Load 重新变 RUNNING，有时要 1 分钟以上。
+    #   原来 `sleep 25` 只查一次，会出现最糟的失败形态：
+    #   **链路其实正在恢复，任务却被判失败** —— 而这时 DAG 已经结束，
+    #   没有后续任务再来确认，实时链路就停在一个没人看的状态里。
+    #
+    #   自愈的理由（Sprint 5 阶段 4 实测）：
+    #   有一种情况**怎么等都不会好，因为它不是"慢"，是"死"**：
+    #   jobmanager 先起、taskmanager 后起（相差 5 分钟），
+    #   `flink-jobs` 容器在资源就绪前就提交了全部 SQL，
+    #   部分作业因拿不到资源直接 FAILED —— 而 FAILED 的作业不会自动重试。
+    #   此时唯一的出路是"取消 + 重新提交"。
+    #   （症状与"还在恢复"完全一样，只有主动做一次才知道是哪种。）
     printf '  等待作业恢复（Flink 从 Kafka 已提交位点继续消费）...\n'
     local hc_deadline=$(( SECONDS + 180 ))
     local hc_ok=0
+    local hc_healed=0
     while [ "${SECONDS}" -lt "${hc_deadline}" ]; do
         if bash "${REPO_ROOT}/scripts/health-check.sh" >/dev/null 2>&1; then
             hc_ok=1
             break
         fi
+
+        # 等到一半还不好，就不再干等：取消失败作业并重新提交（每次恢复最多做一次）
+        if [ "${hc_healed}" -eq 0 ] && [ "$(( hc_deadline - SECONDS ))" -le 120 ]; then
+            hc_healed=1
+            printf '\r\033[K  健康检查迟迟不通过 → 取消作业并重新提交（自愈）...\n'
+            bash "${REPO_ROOT}/scripts/cancel-flink-jobs.sh" >/dev/null 2>&1 || true
+            compose restart flink-jobs >/dev/null 2>&1 || true
+            sleep 20
+        fi
+
         printf '\r  健康检查未通过，重试中 ... 剩余 %ss' "$(( hc_deadline - SECONDS ))"
         sleep 15
     done
