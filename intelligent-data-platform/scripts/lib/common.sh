@@ -191,13 +191,23 @@ public_ip() {
 TLS_CERT_PATH="/etc/ssl/data-platform/server.crt"
 TLS_KEY_PATH="/etc/ssl/data-platform/server.key"
 
-# 站点协议：有证书 → https，否则 http
+# 站点协议：由 .env 的 SITE_SCHEME 决定，默认 http
+#
+# !! 为什么不再"证书存在就用 https" !!
+#   Sprint 7 期间曾按"证书存在即走 https"实现（当时的理由是明文 HTTP
+#   在公网链路上被中间设备改写，约 40% 请求变成空 502）。
+#   后来项目负责人决定**暂不使用 TLS**：按 IP 访问只能自签，
+#   浏览器每个会话都要点一次"继续前往"，演示观感不好；
+#   等注册域名、申请证书、完成备案之后再启用。
+#
+#   实测支持这个决定：把客户端 VPN 关掉后重测，明文 HTTP **30/30 正常**，
+#   说明当初改写响应的中间设备在 VPN 出口路径上，而不在这条 IP 直连路径上。
+#
+#   于是把判断依据从"机器状态"改成"显式配置"：
+#   **配置表达意图，证书只是产物** —— 机器上有证书，不等于"现在想用 https"。
+#   启用 TLS 时只需在 .env 里把 SITE_SCHEME 改成 https。
 site_scheme() {
-    if [ -s "${TLS_CERT_PATH}" ] && [ -s "${TLS_KEY_PATH}" ]; then
-        printf 'https'
-    else
-        printf 'http'
-    fi
+    printf '%s' "${SITE_SCHEME:-http}"
 }
 
 # 站点根地址，例如 https://127.0.0.1 或 http://127.0.0.1

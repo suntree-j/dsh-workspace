@@ -274,20 +274,11 @@ install_frontend_vendor() {
 install_nginx_site() {
     log_step "6/7 安装 Nginx 站点与 systemd 单元"
 
-    # 先备证书：站点配置里的 443 段引用了它。
-    # setup-tls.sh 是幂等的（证书已存在且未过期就复用），
-    # 放在这里是为了让"首次安装"一条命令就能跑完，而不是让使用者
-    # 撞上 nginx -t 的证书报错再回来补 —— 那时站点配置已经写进
-    # sites-available，机器会停在"配置已换、nginx 起不来"的状态。
-    if [ ! -s "${TLS_CERT_PATH}" ] || [ ! -s "${TLS_KEY_PATH}" ]; then
-        log_info "未找到 TLS 证书，先生成自签证书（HTTPS 入口所需）"
-        bash "${REPO_ROOT}/scripts/setup-tls.sh" || {
-            log_error "证书生成失败；HTTPS 无法启用"
-            exit 1
-        }
-    else
-        log_ok "TLS 证书已存在，复用"
-    fi
+    # 关于 TLS：站点当前是**明文 HTTP**（项目负责人决定暂不做证书，
+    # 等注册域名、申请证书、完成备案之后再启用），因此这里不再生成证书。
+    # scripts/setup-tls.sh 保留在仓库里，届时直接执行即可；
+    # 曾经的"必须先生成证书否则 nginx -t 失败"的约束已随 443 段一起移除
+    # （历史实现见 commit 347dfdd）。
 
     install -m 644 "${REPO_ROOT}/deploy/nginx/data-platform.conf" "${NGINX_SITE}"
     ln -sf "${NGINX_SITE}" /etc/nginx/sites-enabled/data-platform.conf

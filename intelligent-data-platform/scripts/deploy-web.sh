@@ -75,25 +75,12 @@ update_python_deps() {
 reload_services() {
     step "4/5 重新加载配置并重启服务"
 
-    # 证书是 HTTPS 站点的前置条件。缺证书时 `nginx -t` 必然失败，
-    # 而那时新配置已经写进 sites-available —— 机器会停在
-    # "配置已换、nginx 却起不来"的状态。所以先补齐证书再动配置。
-    local tls_ok=1
-    if [ ! -s "${TLS_CERT_PATH}" ] || [ ! -s "${TLS_KEY_PATH}" ]; then
-        log_warn "未找到 TLS 证书，尝试生成（scripts/setup-tls.sh）"
-        if [ "$(id -u)" -eq 0 ] && bash "${REPO_ROOT}/scripts/setup-tls.sh" >/dev/null 2>&1; then
-            log_ok "TLS 证书已就绪"
-        else
-            log_error "证书不可用：请先执行 sudo bash scripts/setup-tls.sh"
-            FAILED=1
-            tls_ok=0
-        fi
-    fi
-
     # Nginx 配置有变化才 reload（避免无意义的中断）
-    if [ "${tls_ok}" -eq 0 ]; then
-        log_error "跳过 Nginx 配置更新（证书缺失，强行更新会让 nginx 无法重载）"
-    elif ! diff -q "${REPO_ROOT}/deploy/nginx/data-platform.conf" "${NGINX_SITE}" >/dev/null 2>&1; then
+    # 关于 TLS：站点当前是明文 HTTP（项目负责人决定暂不做证书，
+    # 等注册域名与备案之后再启用），因此这里**不再**做"证书是否存在"的
+    # 前置检查 —— 配置里已经不引用证书了。
+    # 历史实现（requires TLS）见 commit 347dfdd。
+    if ! diff -q "${REPO_ROOT}/deploy/nginx/data-platform.conf" "${NGINX_SITE}" >/dev/null 2>&1; then
         # 先备份：`nginx -t` 失败时新配置已经落在磁盘上，
         # 若不还原，机器会停在"文件是坏的、进程还在跑旧的"这种
         # 最尴尬的状态 —— 下一次 nginx 重启就直接起不来。
@@ -147,17 +134,21 @@ verify() {
     [ "${code}" = "200" ] && log_ok "前端：${site}/data/ → 200" \
                           || { log_error "前端返回 ${code}"; FAILED=1; }
 
-    # HTTP 应当跳转到 HTTPS；否则说明 80 上还挂着旧配置，
-    # 用户仍会走到"明文被中间设备改写"那条路上（偶发空 502）。
-    if [ "${site}" = "https://127.0.0.1" ]; then
+    # 明文 HTTP 是当前形态：80 应当**直接返回内容**（200），
+    # 而不是 302 跳转。
+    # 如果这里拿到 302，说明磁盘上还是"跳转 HTTPS"的旧配置 ——
+    # 而那个 443 已经不在配置里了，用户会跳到一个连不上的地址。
+    if [ "${site}" = "http://127.0.0.1" ]; then
         code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1/data/)"
-        [ "${code}" = "302" ] && log_ok "HTTP 跳转：http://127.0.0.1/data/ → 302" \
-                              || { log_error "HTTP 未跳转（返回 ${code}），请检查证书与 Nginx 配置"; FAILED=1; }
+        [ "${code}" = "200" ] && log_ok "明文入口：http://127.0.0.1/data/ → 200" \
+                              || { log_error "HTTP 入口返回 ${code}（期望 200；若是 302 说明残留了 HTTPS 跳转配置）"; FAILED=1; }
     fi
 
     printf '\n'
     if [ "${FAILED}" -eq 0 ]; then
-        log_ok "对外访问： https://${ip}/data/"
+        # 注意用 site_scheme 而不是 ${site}：
+        # ${site} 已经是完整基址（如 http://127.0.0.1），再拼 :// 会拼错。
+        log_ok "对外访问： $(site_scheme)://${ip}/data/"
     fi
 }
 
