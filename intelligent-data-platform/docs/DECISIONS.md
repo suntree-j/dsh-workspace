@@ -155,6 +155,8 @@
 | 不要直接改框架的元数据库 | 我用 SQL 删 `dag_run` 行，导致两个 run 并发、内存闸门误判 |
 | 版本差异要实测 | `http2 on;` 是 nginx 1.25.1+ 语法，本项目钉 1.24.0 |
 | 沙箱加固会咬到子进程 | `ProtectHome=yes` 让 docker 读不到 `$HOME/.docker`，`docker compose` 直接失效 |
+| **不要覆盖正在运行的 shell 脚本** | bash 是**边读边执行**脚本文件的。覆盖它会让正在运行的实例按旧偏移读到新内容 → 引号错乱报 "unexpected EOF"。实测：`reconcile` 对账**已经成功**（11458 窗口零差异），却因我在它运行期间覆盖了 `run-batch-pipeline.sh` 而被判失败 —— 一个纯粹的假故障 |
+| **不要在 DAG run 进行中修改 DAG 文件** | dag-processor 会重新解析，并**把新增任务注入到正在运行的 run 里**。实测：`archive_behavior` 因此在该 run 中被提前执行，而当时服务器上的脚本还是旧版，报"未知阶段" |
 
 ---
 
