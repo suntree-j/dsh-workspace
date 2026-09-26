@@ -79,9 +79,24 @@ docker.xuanyuan.me    需要付费（提示 free-vs-pro）
 # 本地：把本地 7890 代理暴露到服务器
 ssh -i ~/.ssh/suntree.pem -N -R 127.0.0.1:7890:127.0.0.1:7890 root@36.151.150.140
 
-# 服务器：执行
+# 服务器：执行（脚本会自动写入 docker 代理配置并拉取）
 bash pull-doris-via-proxy.sh
 ```
+
+> ⚠️ **代理用完务必清理**：该脚本会写入
+> `/etc/systemd/system/docker.service.d/http-proxy.conf` 让 docker 走隧道。
+> 隧道断开后若不清除配置，**后续所有镜像拉取都会失败**（因为代理指向已断开的隧道）。
+>
+> 清理方法（服务器上执行）：
+>
+> ```bash
+> rm -f /etc/systemd/system/docker.service.d/http-proxy.conf
+> systemctl daemon-reload && systemctl restart docker
+> docker info --format '{{.RegistryConfig.Mirrors}}'   # 应只剩镜像站
+> ```
+>
+> 服务器当前状态：**已清理代理配置，仅依赖 registry mirror**，
+> 不再依赖本地隧道（已实测服务与数据在 daemon 重启后完全正常）。
 
 ---
 
