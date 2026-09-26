@@ -20,7 +20,16 @@ from typing import Any
 
 from .doris import DorisClient
 
-__all__ = ["Repository"]
+__all__ = ["Repository", "BATCH_DATABASE"]
+
+# 离线（批处理）指标所在库 —— 由 Sprint 3 的 load-batch-to-doris.sh 装载。
+#
+# 为什么单独一个库而不是塞进 ecommerce：
+#   ecommerce 里是**实时链路**的表（Flink → Kafka → Routine Load）。
+#   两套链路写同一个库、表名还高度相似，会让"这个数到底是实时的还是离线的"
+#   变成需要靠记忆判断的事 —— 这正是数据口径事故的温床。
+#   分库之后：库名即链路来源。
+BATCH_DATABASE = "lakehouse_ads"
 
 
 class Repository:
@@ -338,6 +347,150 @@ class Repository:
         return where, params
 
     # ========================================================
+    # 离线链路（Sprint 3）：批处理算出来的同名同口径指标
+    #
+    # 与上面的实时方法一一对应，**公式逐字相同** —— 这正是"同名同口径"的落地方式：
+    #   实时 trade_kpi()        ↔  离线 batch_trade_kpi()
+    #   实时 trade_series()     ↔  离线 batch_trade_series()
+    #   实时 category_top()     ↔  离线 batch_category_top()
+    # 如果哪天有人"顺手优化"了其中一侧的公式，对账（reconcile）会立刻报警，
+    # 因为 lakehouse.ads_reconcile_trade_1m 会记下每一分钟的差异。
+    # ========================================================
+    def batch_trade_kpi(self) -> tuple[dict[str, Any], list[str], list[str]]:
+        """离线链路交易域全量 KPI（与 trade_kpi 同公式、同粒度）。"""
+        sql = f"""
+            SELECT
+                SUM(gmv)                            AS gmv,
+                SUM(order_cnt)                      AS order_cnt,
+                SUM(payment_cnt)                    AS payment_cnt,
+                SUM(payment_amount)                 AS payment_amount,
+                SUM(payment_fail_cnt)               AS payment_fail_cnt,
+                SUM(refund_cnt)                     AS refund_cnt,
+                SUM(refund_amount)                  AS refund_amount,
+                CAST(SUM(gmv) / NULLIF(SUM(order_cnt), 0) AS DECIMAL(18, 2))            AS avg_order_amount,
+                CAST(SUM(payment_cnt) / NULLIF(SUM(payment_cnt) + SUM(payment_fail_cnt), 0)
+                     AS DECIMAL(10, 4))                                                 AS payment_success_rate,
+                CAST(SUM(refund_amount) / NULLIF(SUM(payment_amount), 0)
+                     AS DECIMAL(10, 4))                                                 AS refund_rate
+            FROM {BATCH_DATABASE}.ads_batch_trade_1m
+        """
+        fields = [
+            "gmv", "order_cnt", "avg_order_amount",
+            "payment_cnt", "payment_amount", "payment_fail_cnt", "payment_success_rate",
+            "refund_cnt", "refund_amount", "refund_rate",
+        ]
+        row = self.client.query(sql, max_limit=1).first
+        return row, [f"{BATCH_DATABASE}.ads_batch_trade_1m"], fields
+
+    def batch_trade_daily(self, limit: int = 60) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+        """离线链路按天指标（报表口径，取最近 N 天，按日期升序）。
+
+        为什么看板用天表而不是分钟表：
+            离线数据的价值是"准确、可回溯"，不是"秒级"。
+            让看板把 11000+ 行分钟数据拉回来自己聚合，
+            既浪费带宽也把口径计算搬到了前端 —— 天表就是为此存在的。
+        """
+        sql = f"""
+            SELECT dt, gmv, order_cnt, order_user_cnt, avg_order_amount,
+                   payment_cnt, payment_amount, payment_fail_cnt, payment_success_rate,
+                   refund_cnt, refund_amount, refund_rate
+            FROM (
+                SELECT dt, gmv, order_cnt, order_user_cnt, avg_order_amount,
+                       payment_cnt, payment_amount, payment_fail_cnt, payment_success_rate,
+                       refund_cnt, refund_amount, refund_rate
+                FROM {BATCH_DATABASE}.ads_batch_trade_1d
+                ORDER BY dt DESC
+                LIMIT {int(limit)}
+            ) recent
+            ORDER BY dt
+        """
+        fields = [
+            "gmv", "order_cnt", "order_user_cnt", "avg_order_amount", "payment_cnt",
+            "payment_amount", "payment_fail_cnt", "payment_success_rate",
+            "refund_cnt", "refund_amount", "refund_rate",
+        ]
+        return self.client.query(sql).rows, [f"{BATCH_DATABASE}.ads_batch_trade_1d"], fields
+
+    def batch_category_top(self, limit: int = 10) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+        """离线链路类目销售排行（全量口径，与 category_top 同公式）。"""
+        sql = f"""
+            SELECT category_name,
+                   SUM(order_cnt)      AS order_cnt,
+                   SUM(gmv)            AS gmv,
+                   SUM(total_quantity) AS total_quantity,
+                   CAST(SUM(gmv) / NULLIF(SUM(order_cnt), 0) AS DECIMAL(18, 2)) AS avg_order_amount
+            FROM {BATCH_DATABASE}.ads_batch_category_1m
+            GROUP BY category_name
+            ORDER BY gmv DESC
+            LIMIT {int(limit)}
+        """
+        fields = ["order_cnt", "gmv", "total_quantity", "avg_order_amount"]
+        return self.client.query(sql).rows, [f"{BATCH_DATABASE}.ads_batch_category_1m"], fields
+
+    def reconciliation(self) -> tuple[dict[str, Any], list[str], list[str]]:
+        """批流对账结论（最近一批）+ 实时/离线关键指标并排对比。
+
+        这是"数据可信"的对外证据：
+            latest   —— 最近一次对账的区间、窗口数、不一致数、GMV 对比
+            mismatch —— 若存在差异，给出差异最大的若干窗口（便于定位）
+        服务层只读，不参与对账本身（对账是 Spark 作业完成的）。
+        """
+        latest = self.client.query(
+            f"""
+            SELECT batch_id, compared_at, scope_start, scope_end,
+                   realtime_windows, batch_windows, matched_windows, mismatched_windows,
+                   first_mismatch_at, realtime_total_gmv, batch_total_gmv, is_pass
+            FROM {BATCH_DATABASE}.ads_reconcile_summary
+            ORDER BY compared_at DESC
+            LIMIT 1
+            """,
+            max_limit=1,
+        ).first
+
+        mismatches = self.client.query(
+            f"""
+            SELECT window_start, diff_gmv, diff_order_cnt, diff_order_user_cnt,
+                   diff_payment_cnt, diff_payment_amount, diff_payment_fail_cnt,
+                   diff_refund_cnt, diff_refund_amount
+            FROM {BATCH_DATABASE}.ads_reconcile_trade_1m
+            WHERE is_match = false
+            ORDER BY window_start
+            LIMIT 20
+            """
+        ).rows
+
+        realtime = self.client.query(
+            "SELECT SUM(gmv) AS gmv, SUM(order_cnt) AS order_cnt, "
+            "SUM(payment_amount) AS payment_amount, SUM(refund_amount) AS refund_amount "
+            "FROM ads_realtime_trade_1m",
+            max_limit=1,
+        ).first
+        batch = self.client.query(
+            f"SELECT SUM(gmv) AS gmv, SUM(order_cnt) AS order_cnt, "
+            f"SUM(payment_amount) AS payment_amount, SUM(refund_amount) AS refund_amount "
+            f"FROM {BATCH_DATABASE}.ads_batch_trade_1m",
+            max_limit=1,
+        ).first
+
+        data = {
+            "latest": latest or {},
+            "mismatches": mismatches,
+            "mismatch_count_shown": len(mismatches),
+            "totals": {
+                "realtime": realtime or {},
+                "batch": batch or {},
+            },
+        }
+        tables = [
+            f"{BATCH_DATABASE}.ads_reconcile_summary",
+            f"{BATCH_DATABASE}.ads_reconcile_trade_1m",
+            f"{BATCH_DATABASE}.ads_batch_trade_1m",
+            "ecommerce.ads_realtime_trade_1m",
+        ]
+        fields = ["gmv", "order_cnt", "payment_amount", "refund_amount"]
+        return data, tables, fields
+
+    # ========================================================
     # 元数据
     # ========================================================
     def categories(self) -> tuple[list[str], list[str]]:
@@ -350,29 +503,39 @@ class Repository:
         return [r["category_name"] for r in rows], ["ecommerce.ads_realtime_category_1m"]
 
     def table_metadata(self, tables: list[str]) -> tuple[list[dict[str, Any]], list[str]]:
-        """表白名单的字段结构（来自 information_schema，只读）。"""
+        """表白名单的字段结构（来自 information_schema，只读）。
+
+        注意要查**两个库**：
+            实时链路的表在 ecommerce，离线链路的表在 lakehouse_ads。
+            只按 ecommerce 过滤会让 /meta/tables 里永远看不到离线表，
+            并且是静默的"少了几个表"（不报错），很难被发现。
+        """
         placeholders = ", ".join(["%s"] * len(tables))
+        schemas = ["ecommerce", BATCH_DATABASE]
+        schema_placeholders = ", ".join(["%s"] * len(schemas))
+
         columns = self.client.query(
             f"""
-            SELECT table_name, column_name, data_type, column_comment, column_type
+            SELECT table_schema, table_name, column_name, data_type, column_comment, column_type
             FROM information_schema.columns
-            WHERE table_schema = %s AND table_name IN ({placeholders})
+            WHERE table_schema IN ({schema_placeholders}) AND table_name IN ({placeholders})
             ORDER BY table_name, ordinal_position
             """,
-            ["ecommerce", *tables],
+            [*schemas, *tables],
             max_limit=500,
         ).rows
         comments = self.client.query(
             f"""
-            SELECT table_name, table_comment
+            SELECT table_schema, table_name, table_comment
             FROM information_schema.tables
-            WHERE table_schema = %s AND table_name IN ({placeholders})
+            WHERE table_schema IN ({schema_placeholders}) AND table_name IN ({placeholders})
             """,
-            ["ecommerce", *tables],
-            max_limit=100,
+            [*schemas, *tables],
+            max_limit=200,
         ).rows
 
         comment_map = {r["table_name"]: r["table_comment"] for r in comments}
+        schema_map = {r["table_name"]: r["table_schema"] for r in comments}
         grouped: dict[str, dict[str, Any]] = {}
         for row in columns:
             name = row["table_name"]
@@ -380,6 +543,7 @@ class Repository:
                 name,
                 {
                     "table": name,
+                    "database": schema_map.get(name, "ecommerce"),
                     "layer": _layer_of(name),
                     "comment": comment_map.get(name, ""),
                     "columns": [],

@@ -383,6 +383,29 @@
     return part / whole;
   }
 
+  // 对账差异：后端返回的是字符串（Decimal 直接转字符串，避免浮点截断）。
+  //   0 / 0.00 / -0.00 都算"无差异"，统一显示为 0 而不是 -0.00，
+  //   否则一张全对的表里会冒出刺眼的 "-0.00"，看起来像有问题。
+  function formatDelta(v) {
+    if (isMissing(v)) return '—';
+    var s = String(v).trim();
+    var n = numberOrNull(s);
+    if (n === null) return s;
+    if (n === 0) return /\./.test(s) ? '0.00' : '0';
+    return /\./.test(s) ? formatMoney(s) : String(n);
+  }
+
+  // 金额缩写：只用于图表坐标轴刻度（"12.3万"），表格里一律用完整数字。
+  //   坐标轴要的是量级感，完整数字会把轴标签挤成一团。
+  function compactMoney(v) {
+    var n = numberOrNull(v);
+    if (n === null) return '';
+    var abs = Math.abs(n);
+    if (abs >= 1e8) return (n / 1e8).toFixed(2) + '亿';
+    if (abs >= 1e4) return (n / 1e4).toFixed(1) + '万';
+    return formatIntGroup(n);
+  }
+
   function formatTime(v) {
     if (isMissing(v)) return '—';
     return String(v);
@@ -551,7 +574,10 @@
     orders: function (params) { return apiGet('/orders', params); },
     orderDetail: function (orderId) { return apiGet('/orders/' + encodeURIComponent(orderId)); },
     metaMetrics: function () { return apiGet('/meta/metrics'); },
-    metaTables: function () { return apiGet('/meta/tables'); }
+    metaTables: function () { return apiGet('/meta/tables'); },
+    // 离线链路（Sprint 3）：批处理算出的同名同口径指标 + 批流对账结论
+    batchOverview: function (days) { return apiGet('/batch/overview', { days: days }); },
+    batchReconcile: function () { return apiGet('/batch/reconcile'); }
   };
 
   // ============================================================
@@ -868,6 +894,7 @@
     { key: 'traffic', title: '流量分析', subtitle: 'UV / PV、行为漏斗与转化率' },
     { key: 'category', title: '类目销售', subtitle: '类目 GMV 排行、占比与明细' },
     { key: 'orders', title: '订单明细', subtitle: '按类目与日期筛选，查看订单支付与退款记录' },
+    { key: 'batch', title: '离线与对账', subtitle: '离线分层指标、按天趋势，以及实时/离线逐窗口对账结论' },
     { key: 'metrics', title: '指标口径', subtitle: '指标字典与表结构（Agent 回答问题的口径来源）' }
   ];
 
@@ -1897,6 +1924,210 @@
   };
 
   // ============================================================
+  // ---------- 页面 7：离线与对账（Sprint 3） ----------
+  // ============================================================
+  //
+  // 这一页回答的问题与其它页不同：
+  //   其它页回答"业务上发生了什么"；这一页回答"**这个数可不可信**"。
+  //   它同时展示离线链路算出的指标，以及实时/离线两条链路的逐窗口对账结论。
+  //   对账是离线 Spark 作业完成的，这一页只读结论（服务层不参与对账）。
+
+  // 日粒度的 X 轴：日期只需 MM-DD，避免 60 天的标签互相压字
+  function shortDate(v) {
+    if (isMissing(v)) return '';
+    var s = String(v);
+    return s.length >= 10 ? s.slice(5, 10) : s;
+  }
+
+  var BatchPanel = {
+    name: 'BatchPanel',
+    template: '#tpl-batch',
+    setup: function () {
+      var panel = usePanel();
+      var overview = ref(null);
+      var reconcile = ref(null);
+      var days = ref(60);
+      var dailyEl = ref(null);
+      var categoryEl = ref(null);
+
+      var dayOptions = [
+        { value: 30, label: '最近 30 天' },
+        { value: 60, label: '最近 60 天' },
+        { value: 180, label: '最近 180 天' },
+        { value: 365, label: '最近 365 天' }
+      ];
+
+      function load() {
+        return panel.run(function () {
+          return Promise.all([
+            api.batchOverview(days.value),
+            api.batchReconcile()
+          ]).then(function (res) {
+            overview.value = res[0] || null;
+            reconcile.value = res[1] || null;
+            return res[0] || null;
+          });
+        }, function () { return null; });
+      }
+      panel.setReload(load);
+      onMounted(load);
+
+      function changeDays(value) {
+        var next = Number(value && value.value !== undefined ? value.value : value);
+        if (!next || next === days.value) return;
+        days.value = next;
+        load();
+      }
+
+      var daily = computed(function () {
+        var data = overview.value;
+        return (data && data.daily) || [];
+      });
+      var categoryTop = computed(function () {
+        var data = overview.value;
+        return (data && data.category_top) || [];
+      });
+      var isPass = computed(function () {
+        var latest = reconcile.value && reconcile.value.latest;
+        return !!(latest && latest.is_pass);
+      });
+      var mismatches = computed(function () {
+        return (reconcile.value && reconcile.value.mismatches) || [];
+      });
+
+      var kpiCards = computed(function () {
+        var data = overview.value;
+        if (!data) return [];
+        var kpi = data.kpi || {};
+        var range = data.time_range || {};
+        var span = range.start && range.end
+          ? shortDate(range.start) + ' ~ ' + shortDate(range.end)
+          : '全量';
+        return [
+          {
+            label: 'GMV（离线口径）', value: formatMoney(kpi.gmv), unit: '元', domain: 'trade',
+            sub: '离线链路 · ' + span, tip: definitionOf('gmv')
+          },
+          {
+            label: '订单量', value: formatInt(kpi.order_cnt), unit: '笔', domain: 'trade',
+            sub: '按天聚合后求和', tip: definitionOf('order_cnt')
+          },
+          {
+            label: '支付成功率', value: formatRate(kpi.payment_success_rate), unit: '', domain: 'trade',
+            sub: '支付 ' + formatInt(kpi.payment_cnt) + ' 笔 / 失败 ' + formatInt(kpi.payment_fail_cnt) + ' 笔',
+            tip: definitionOf('payment_success_rate')
+          },
+          {
+            label: '退款金额', value: formatMoney(kpi.refund_amount), unit: '元', domain: 'trade',
+            sub: '退款 ' + formatInt(kpi.refund_cnt) + ' 笔', tip: definitionOf('refund_amount')
+          },
+          {
+            label: '退款率', value: formatRate(kpi.refund_rate), unit: '', domain: 'trade',
+            sub: '退款金额 / 支付金额', tip: definitionOf('refund_rate')
+          },
+          {
+            label: '客单价', value: formatMoney(kpi.avg_order_amount), unit: '元', domain: 'trade',
+            sub: 'GMV / 订单量', tip: definitionOf('avg_order_amount')
+          }
+        ];
+      });
+
+      // 实时 vs 离线的并排对比：差异列直接展示，一眼看到"是不是同一个数"
+      var compareRows = computed(function () {
+        var rep = reconcile.value;
+        if (!rep || !rep.totals) return [];
+        var rt = rep.totals.realtime || {};
+        var bt = rep.totals.batch || {};
+        var deltas = rep.deltas || {};
+        if (isMissing(rt.gmv) && isMissing(bt.gmv)) return [];
+        return [
+          {
+            label: 'GMV（元）',
+            realtime: formatMoney(rt.gmv), batch: formatMoney(bt.gmv),
+            diff: formatDelta(deltas.gmv)
+          },
+          {
+            label: '订单量（笔）',
+            realtime: formatInt(rt.order_cnt), batch: formatInt(bt.order_cnt),
+            diff: formatDelta(deltas.order_cnt)
+          },
+          {
+            label: '支付金额（元）',
+            realtime: formatMoney(rt.payment_amount), batch: formatMoney(bt.payment_amount),
+            diff: formatDelta(deltas.payment_amount)
+          },
+          {
+            label: '退款金额（元）',
+            realtime: formatMoney(rt.refund_amount), batch: formatMoney(bt.refund_amount),
+            diff: formatDelta(deltas.refund_amount)
+          }
+        ];
+      });
+
+      bindChart(function () { return dailyEl.value; }, function () {
+        var rows = daily.value;
+        if (!rows.length) return null;
+        var labels = rows.map(function (r) { return shortDate(r.dt); });
+        return {
+          color: [C.trade, C.neutral],
+          tooltip: {
+            axisPointer: { type: 'cross', label: { backgroundColor: '#1b2739', color: C.text2, crossStyle: { color: C.grid } } }
+          },
+          legend: { data: ['GMV', '订单量'] },
+          xAxis: timeAxis(labels),
+          yAxis: [moneyAxis(), intAxis({ splitLine: { show: false } })],
+          series: [
+            makeLine('GMV', rows.map(function (r) { return numberOrNull(r.gmv); }), C.trade, 0),
+            makeBar('订单量', rows.map(function (r) { return numberOrNull(r.order_cnt); }),
+              withAlpha(C.neutral, 0.75), { yAxisIndex: 1 })
+          ]
+        };
+      });
+
+      bindChart(function () { return categoryEl.value; }, function () {
+        var rows = categoryTop.value;
+        if (!rows.length) return null;
+        var ordered = rows.slice().sort(function (a, b) {
+          return Number(a.gmv || 0) - Number(b.gmv || 0);
+        });
+        return {
+          color: [C.trade],
+          grid: { left: 8, right: 24, top: 16, bottom: 8, containLabel: true },
+          tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+          xAxis: intAxis({ axisLabel: { formatter: function (v) { return compactMoney(v); } } }),
+          yAxis: {
+            type: 'category',
+            data: ordered.map(function (r) { return r.category_name; }),
+            axisLabel: { color: C.text2 }
+          },
+          series: [makeBar('GMV', ordered.map(function (r) { return numberOrNull(r.gmv); }), C.trade)]
+        };
+      });
+
+      return {
+        loading: panel.loading,
+        error: panel.error,
+        days: days,
+        dayOptions: dayOptions,
+        changeDays: changeDays,
+        daily: daily,
+        categoryTop: categoryTop,
+        kpiCards: kpiCards,
+        reconcile: reconcile,
+        isPass: isPass,
+        compareRows: compareRows,
+        mismatches: mismatches,
+        dailyEl: dailyEl,
+        categoryEl: categoryEl,
+        shortDate: shortDate,
+        shortTime: shortTime,
+        formatInt: formatInt,
+        formatMoney: formatMoney
+      };
+    }
+  };
+
+  // ============================================================
   // ---------- 根组件 ----------
   // ============================================================
 
@@ -2020,6 +2251,7 @@
   app.component('category-panel', CategoryPanel);
   app.component('orders-panel', OrdersPanel);
   app.component('metrics-panel', MetricsPanel);
+  app.component('batch-panel', BatchPanel);
   app.mount('#app');
 
   if (bootEl && bootEl.parentNode) bootEl.parentNode.removeChild(bootEl);

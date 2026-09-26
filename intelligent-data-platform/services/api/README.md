@@ -42,6 +42,8 @@ curl -s 'http://127.0.0.1:8000/overview' | head -c 400
 
 ## 3. 接口一览
 
+### 3.1 实时链路（Flink → Doris，分钟粒度）
+
 | 路径 | 说明 |
 | --- | --- |
 | `GET /health` | 健康检查（含"是否使用只读账号"） |
@@ -53,8 +55,24 @@ curl -s 'http://127.0.0.1:8000/overview' | head -c 400
 | `GET /orders?limit=20&offset=0&category=&start=&end=` | 订单明细分页 |
 | `GET /orders/{order_id}` | 订单 + 支付 + 退款 |
 | `GET /meta/metrics` | **指标口径字典**（解析自 metrics.md） |
-| `GET /meta/tables` | 表结构与分层 |
+| `GET /meta/tables` | 表结构与分层（覆盖实时库与离线库） |
 | `GET /categories` | 类目下拉选项 |
+
+### 3.2 离线链路（Spark → 湖仓 → Doris，天粒度）
+
+> 为什么单独一组路径而不是给上面加 `source` 参数：
+> 两条链路的**时间语义不同** —— 实时是 1 分钟窗口（秒级新鲜），
+> 离线是按天（准确、可回溯）。混在一个响应里，前端必须写一堆 if
+> 去解释"这个数是哪来的"；分开之后，**路径本身就是数据来源**。
+
+| 路径 | 说明 |
+| --- | --- |
+| `GET /batch/overview?days=60` | 离线链路总览：全量 KPI + 按天序列 + 类目 Top10 |
+| `GET /batch/reconcile` | **批流对账结论**：最近一批的区间/窗口数/不一致数、实时 vs 离线全量对比与差异、差异明细（最多 20 个窗口） |
+
+`/batch/reconcile` 的 `data.deltas` 是"离线 − 实时"的字符串差额。
+任一侧缺数据时返回 `null` 而**不是 0** —— 把"没有数据"当成 0
+会让差异看起来是 0，从而掩盖真实的不一致。
 
 统一响应信封：
 
@@ -93,6 +111,19 @@ curl -s 'http://127.0.0.1:8000/overview' | head -c 400
 [`sql/metadata/metrics.md`](../../sql/metadata/metrics.md)（**唯一权威口径**），
 服务端在运行时解析该文档（按 mtime 缓存），不存在第二份口径副本。
 
+**离线链路的指标口径与实时链路逐字相同**：
+
+```text
+实时  repository.trade_kpi()          ↔  离线  repository.batch_trade_kpi()
+实时  repository.trade_series()       ↔  离线  repository.batch_trade_daily()
+实时  repository.category_top()       ↔  离线  repository.batch_category_top()
+```
+
+两条链路谁算错了，由离线 Spark 作业产出的
+`lakehouse_ads.ads_reconcile_trade_1m` 逐窗口记录下来，
+`/batch/reconcile` 只是把这份结论读出来展示 —— 服务层不参与对账，
+也不做任何"看起来成功"的兜底（AGENTS.md 第 10.3 节）。
+
 空值约定：
 
 - 可加指标（GMV / 笔数 / 金额 / PV）无事件时补 `0`；
@@ -103,8 +134,15 @@ curl -s 'http://127.0.0.1:8000/overview' | head -c 400
 ```bash
 bash scripts/install-web.sh      # 首次安装（nginx + venv + 只读账号 + systemd）
 bash scripts/deploy-web.sh       # 更新代码后重启服务
-bash scripts/verify-sprint-6.sh  # 7 步验收（含对账与安全验证）
+bash scripts/verify-sprint-6.sh  # 服务层 7 步验收（含对账与安全验证）
+bash scripts/verify-sprint-3.sh  # 离线分层 + 批流对账 8 步验收（含服务装载校验）
 journalctl -u data-platform-api -n 100 --no-pager   # 看日志
+```
+
+装载离线指标（把湖仓结果搬进 Doris 的 `lakehouse_ads`）：
+
+```bash
+bash scripts/load-batch-to-doris.sh   # S3() TVF 直读 Parquet + 行数对账 + 只读账号验证
 ```
 
 ## 7. 测试
@@ -113,3 +151,6 @@ journalctl -u data-platform-api -n 100 --no-pager   # 看日志
 python -m pytest -m unit                    # SQL 守卫 + 口径解析（不依赖容器）
 python -m pytest -m smoke tests/smoke/test_api.py   # 真实接口冒烟（需服务已启动）
 ```
+
+> 服务器上用项目虚拟环境：`/opt/data-platform/.venv/bin/python -m pytest`
+> （系统 python3 里没有 pytest，验收脚本会自动优先选用 `.venv`）。

@@ -131,10 +131,11 @@ def index() -> dict[str, Any]:
                 "/health", "/overview", "/metrics/trade", "/metrics/traffic",
                 "/metrics/category", "/funnel", "/orders", "/orders/{order_id}",
                 "/meta/metrics", "/meta/tables", "/categories",
+                "/batch/overview", "/batch/reconcile",
             ],
             "docs": "/docs",
         },
-        note="所有接口均为只读（Doris 只读账号 + SQL 安全守卫）",
+        note="所有接口均为只读（Doris 只读账号 + SQL 安全守卫）；/batch/* 为离线链路",
     )
 
 
@@ -348,5 +349,119 @@ def meta_tables() -> dict[str, Any]:
     return envelope(
         rows,
         tables=tables,
-        note="来自 Doris information_schema（只读），含字段注释与所属分层",
+        note=(
+            "来自 Doris information_schema（只读），含字段注释与所属分层；"
+            "同时覆盖实时链路库 ecommerce 与离线链路库 lakehouse_ads"
+        ),
     )
+
+
+# ============================================================
+# 离线（批处理）链路 —— Sprint 3
+#
+# 为什么单独一组接口而不是给已有接口加 source 参数：
+#   两条链路的**时间语义不同**：实时是 1 分钟窗口（秒级新鲜度），
+#   离线是按天（准确、可回溯）。把它们塞进同一个响应里，
+#   前端必然要写一堆 if 去解释"这个数是哪来的"。
+#   分开之后，路径本身就是数据来源（/batch/* 即离线），
+#   血缘信息（tables）也随之清晰。
+# ============================================================
+@app.get("/batch/overview", summary="离线链路总览")
+def batch_overview(
+    days: int = Query(60, ge=1, le=1000, description="返回最近多少个自然日的按天指标"),
+) -> dict[str, Any]:
+    """离线链路（Spark 分层计算 → 湖仓 → Doris）的总览数据。
+
+    与 `/overview` 的区别：这里的数据来自批处理，按天粒度，准确且可回溯；
+    `/overview` 来自实时链路，按分钟粒度，秒级新鲜但可能仍在追赶。
+    """
+    repo = get_repository()
+    doc = get_metrics_doc()
+
+    kpi, kpi_tables, kpi_fields = repo.batch_trade_kpi()
+    daily, daily_tables, daily_fields = repo.batch_trade_daily(limit=days)
+    top, top_tables, top_fields = repo.batch_category_top(limit=10)
+
+    latest_day = daily[-1]["dt"] if daily else None
+    earliest_day = daily[0]["dt"] if daily else None
+
+    return envelope(
+        {
+            "kpi": kpi or {},
+            "daily": daily,
+            "category_top": top,
+            "days": len(daily),
+        },
+        tables=kpi_tables + daily_tables + top_tables,
+        metric_definitions=doc.definitions_for(
+            [f for f in kpi_fields + daily_fields + top_fields]
+        ),
+        time_range={"start": earliest_day, "end": latest_day},
+        note=(
+            "离线链路指标由 Spark 分层计算（ODS→DWD→DWS→ADS）后装载进 Doris，"
+            "口径与实时链路**逐字相同**（见 sql/metadata/metrics.md），"
+            "两者逐窗口对账结果见 /batch/reconcile。"
+        ),
+    )
+
+
+@app.get("/batch/reconcile", summary="批流对账结论")
+def batch_reconcile() -> dict[str, Any]:
+    """实时链路与离线链路的逐窗口对账结论。
+
+    这是"数据是否可信"的直接证据：同一条业务事实，
+    走 Flink 实时链路与走 Spark 离线链路，算出来的指标必须完全一致。
+    差异明细逐窗口落盘（lakehouse_ads.ads_reconcile_trade_1m），
+    这里返回最近一批的结论与差异最大的若干窗口。
+
+    口径说明：**查询失败即失败**，不做任何"看起来成功"的兜底
+    （AGENTS.md 第 10.3 节）。
+    """
+    repo = get_repository()
+    doc = get_metrics_doc()
+    data, tables, fields = repo.reconciliation()
+
+    latest = data.get("latest") or {}
+    totals = data.get("totals") or {}
+    realtime = totals.get("realtime") or {}
+    batch = totals.get("batch") or {}
+
+    return envelope(
+        {
+            **data,
+            "deltas": {
+                "gmv": _decimal_delta(batch.get("gmv"), realtime.get("gmv")),
+                "order_cnt": _decimal_delta(batch.get("order_cnt"), realtime.get("order_cnt")),
+                "payment_amount": _decimal_delta(
+                    batch.get("payment_amount"), realtime.get("payment_amount")
+                ),
+                "refund_amount": _decimal_delta(
+                    batch.get("refund_amount"), realtime.get("refund_amount")
+                ),
+            },
+        },
+        tables=tables,
+        metric_definitions=doc.definitions_for(fields),
+        time_range={"start": latest.get("scope_start"), "end": latest.get("scope_end")},
+        note=(
+            "对账由 Spark 作业完成（infrastructure/spark/jobs/reconcile_batch_realtime.py），"
+            "服务层只读结论。不一致窗口数 = 0 表示两条链路在这些窗口上完全一致。"
+        ),
+    )
+
+
+def _decimal_delta(batch_value: Any, realtime_value: Any) -> Any:
+    """离线值减实时值；任一侧缺失时返回 None（而不是假装是 0）。
+
+    为什么不用 `or 0` 兜底：
+        把"没有数据"当成 0 会让差异看起来是 0，从而**掩盖真实的不一致**。
+        这正是 AGENTS.md 第 10.3 节「失败即失败」要防的事。
+    """
+    if batch_value is None or realtime_value is None:
+        return None
+    try:
+        from decimal import Decimal
+
+        return str(Decimal(str(batch_value)) - Decimal(str(realtime_value)))
+    except Exception:  # noqa: BLE001 - 值不是数字时如实返回 None，不猜
+        return None

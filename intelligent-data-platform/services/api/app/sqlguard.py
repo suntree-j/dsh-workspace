@@ -42,13 +42,29 @@ BUSINESS_TABLES = {
     "dwd_traffic_behavior_detail",
     # DWS 汇总层
     "dws_traffic_overview_1m",
-    # ADS 应用层
+    # ADS 应用层（实时链路）
     "ads_realtime_trade_1m",
     "ads_realtime_traffic_1m",
     "ads_realtime_category_1m",
     # 维表
     "dim_product",
     "dim_user",
+    # --------------------------------------------------------
+    # ADS 应用层（离线链路，Sprint 3）
+    #
+    # 这些表在**另一个库** lakehouse_ads 里（见 sql/doris/30_batch_ads_tables.sql）。
+    # 为什么仍放进同一份白名单：
+    #   "哪些表允许被查"由业务属性决定，与库名无关；
+    #   库名在 SQL 里由 repository 常量写死，用户输入无法影响它。
+    #   把库名也做成可配置的校验项，只会增加一处可能与实际部署不一致的地方。
+    # --------------------------------------------------------
+    "ads_batch_trade_1m",
+    "ads_batch_trade_1d",
+    "ads_batch_category_1m",
+    "ads_batch_category_1d",
+    # 批流对账结果（Sprint 3）：服务层只读，用于展示"两链路是否一致"
+    "ads_reconcile_trade_1m",
+    "ads_reconcile_summary",
 }
 
 # 元数据查询（只在 /meta/tables 接口里由本服务自己拼接，不接受用户输入）

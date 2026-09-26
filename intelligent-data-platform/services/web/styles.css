@@ -1092,6 +1092,37 @@ input[type="date"].input { color-scheme: dark; }
 .empty__text { margin: 0; color: var(--text-2); font-size: var(--fs-13); }
 .empty__hint { margin: 0; color: var(--text-3); font-size: var(--fs-12); }
 
+/* ------------------------------------------------------------
+ * 15.1 结论条（离线与对账页）
+ *
+ * 用途：一句"结论"要比一堆数字更先被看到 ——
+ *   批流对账一致 / 存在差异，是整页的前提是否成立，
+ *   因此放在最上方，用语义色（正向绿 / 告警黄）区分状态。
+ * 只用左侧 3px 色条而不是整块底色：结论条长期存在，
+ * 大面积着色会在深色大屏上喧宾夺主。
+ * ------------------------------------------------------------ */
+.notice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+.notice__body { display: grid; gap: var(--sp-1); min-width: 0; }
+.notice__body strong { color: var(--text-1); font-size: var(--fs-14); font-weight: var(--fw-semibold); }
+.notice__body p { margin: 0; color: var(--text-3); font-size: var(--fs-12); line-height: 1.65; }
+.notice--ok { border-left-color: var(--pos); background: rgba(70, 196, 106, 0.07); }
+.notice--ok > .icon { color: var(--pos); }
+.notice--warn { border-left-color: var(--warning); background: rgba(226, 176, 74, 0.08); }
+.notice--warn > .icon { color: var(--warning); }
+
+/* 对账差异列：0 用中性色（"没问题"不需要强调），非 0 用负向色并加粗 */
+.diff-ok { color: var(--text-3); }
+.diff-bad { color: var(--neg); font-weight: var(--fw-semibold); }
+
 .errorbar {
   display: flex;
   align-items: flex-start;
