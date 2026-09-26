@@ -4,7 +4,7 @@
 # ============================================================
 #
 # 用法（服务器上，仓库根目录）：
-#   bash scripts/run-batch-pipeline.sh                 # 全链路：抽取 → DWD → DWS → ADS → 对账
+#   bash scripts/run-batch-pipeline.sh                 # 全链路：抽取 → DWD → DWS → ADS → 对账 → 装载
 #   bash scripts/run-batch-pipeline.sh --stage dwd     # 只跑某一层
 #   bash scripts/run-batch-pipeline.sh --skip-reconcile
 #   bash scripts/run-batch-pipeline.sh --list
@@ -14,18 +14,16 @@
 #   dwd   ODS    → DWD   去重 / 清洗 / 维度补全
 #   dws   DWD    → DWS   按天轻度聚合
 #   ads   DWD    → ADS   指标口径（含 1 分钟粒度）
-#   load  ADS    → Doris 只读服务用的表（S3() TVF 直读，无需额外 loader）
-#   reconcile    实时 AD S ↔ 离线 ADS 逐窗口比对
+#   reconcile    实时 ADS ↔ 离线 ADS 逐窗口比对，产出对账结果表
+#   load  ADS/对账结果 → Doris 只读服务用的表（S3() TVF 直读，无需额外 loader）
 #
-# 为什么要有这个脚本：
-#   Sprint 3 之前，离线链路只有一条命令（抽取）。到了分层建模，
-#   如果让人手工按顺序敲 6 条命令，迟早出现"只跑了 DWD 就去看 ADS"
-#   这种低级错误，而且难以复现。把顺序固化进脚本，
-#   每层失败立即停止（set -e 语义），下游不会被脏数据污染。
-#
-# 每个阶段都自带作业内对账/断言（见 infrastructure/spark/jobs/*.py），
-# 因此本脚本不需要重复实现校验，只负责**顺序**与**失败即停**。
-# ============================================================
+# !! 为什么 reconcile 必须排在 load 前面（实测踩坑）!!
+#   load 要装载的 6 张表里包含 ads_reconcile_trade_1m / ads_reconcile_summary，
+#   这两张是**对账阶段的产物**。曾经把 load 放在 reconcile 之前，
+#   结果前 4 张表装载成功、第 5 张报"装载失败"——
+#   因为它的 Parquet 目录此时还不存在（S3() TVF 匹配不到文件，静默返回空）。
+#   顺序即依赖：先算出来，再搬进服务库。
+STAGES=(ods dwd dws ads reconcile load)
 
 # shellcheck source=lib/common.sh
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
@@ -34,7 +32,7 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/spark-job.sh"
 # shellcheck source=lib/memory-guard.sh
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/memory-guard.sh"
 
-STAGES=(ods dwd dws ads load reconcile)
+STAGES=(ods dwd dws ads reconcile load)
 SELECTED=()
 SKIP_RECONCILE=0
 
@@ -76,8 +74,9 @@ parse_args() {
                 printf '  %-10s %s\n' dwd "ODS → DWD（去重 / 清洗 / 维度补全）"
                 printf '  %-10s %s\n' dws "DWD → DWS（按天轻度聚合，只出可加指标）"
                 printf '  %-10s %s\n' ads "DWD → ADS（指标口径，1 分钟 + 1 天）"
-                printf '  %-10s %s\n' load "ADS → Doris（S3() TVF 直读 Parquet，供只读服务查询）"
                 printf '  %-10s %s\n' reconcile "实时 ADS ↔ 离线 ADS 逐窗口对账（差异不为 0 即失败）"
+                printf '  %-10s %s\n' load "ADS + 对账结果 → Doris（S3() TVF 直读 Parquet，供只读服务查询）"
+                printf '\n注意：reconcile 必须在 load 之前 —— load 要装载的表里包含对账结果表。\n'
                 exit 0
                 ;;
             -h|--help)

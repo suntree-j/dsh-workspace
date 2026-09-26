@@ -23,7 +23,24 @@ from __future__ import annotations
 
 import sys
 
-from _common import Checker, build_spark, ensure_tables, exact_distinct, run_sql_file
+from _common import (
+    Checker,
+    build_spark,
+    clean_stale_spark_temp,
+    describe_columns,
+    ensure_tables,
+    exact_distinct,
+    run_sql_file,
+)
+
+# ADS 表的 S3 路径 —— 作业开始前清理这些目录下的 Spark 写入残留
+# （残留的 .spark-staging-* 会被 Doris 的 `**/*.parquet` 递归读到，导致装载行数翻倍）
+ADS_TABLE_PATHS: tuple[str, ...] = (
+    "s3a://lakehouse/warehouse/ads/batch_trade_1m",
+    "s3a://lakehouse/warehouse/ads/batch_trade_1d",
+    "s3a://lakehouse/warehouse/ads/batch_category_1m",
+    "s3a://lakehouse/warehouse/ads/batch_category_1d",
+)
 
 # 与 sql/doris/12_ads_tables.sql 的 ads_realtime_trade_1m 必须逐字段一致
 REALTIME_TRADE_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -55,6 +72,12 @@ def main() -> int:
     print("=" * 60, flush=True)
 
     ensure_tables(spark)
+
+    # 清理上次被中断的写入残留（.spark-staging-*）：
+    # 否则下游 Doris 的 `**/*.parquet` 会把残留数据再读一遍，装载行数翻倍。
+    removed = clean_stale_spark_temp(spark, ADS_TABLE_PATHS)
+    print(f"[clean] 清理 Spark 写入残留目录：{removed} 个", flush=True)
+
     run_sql_file(spark, "03_ads_metrics.sql")
 
     checker = Checker("ADS 层自检")
@@ -177,11 +200,7 @@ def main() -> int:
     # 这是批流对账的结构前提：字段错位会让差异看起来是"算法不同"，
     # 实际只是列顺序不一致。这里在写数据之后就立即校验，
     # 不要等到对账脚本里才发现。
-    describe = {
-        row["col_name"]: row["data_type"]
-        for row in spark.sql("DESCRIBE lakehouse.ads_batch_trade_1m").collect()
-        if row["col_name"] and not row["col_name"].startswith("#")
-    }
+    describe = describe_columns(spark, "lakehouse.ads_batch_trade_1m")
     for name, expected_type in REALTIME_TRADE_COLUMNS:
         checker.check(
             f"1m 字段类型 {name}",

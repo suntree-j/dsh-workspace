@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import sys
 
-from _common import Checker, build_spark, ensure_tables, run_sql_file
+from _common import Checker, build_spark, describe_columns, ensure_tables, run_sql_file
 
 # DWD 表 → 对应的 ODS 表（用于行数一致性断言）
 LAYER_PAIRS: tuple[tuple[str, str], ...] = (
@@ -64,12 +64,15 @@ def main() -> int:
     checker.check("dwd_trade_order_detail 主键唯一", int(duplicates), 0)
 
     # 金额类型：必须是 decimal(18,2)，出现 double/float 会破坏"精确到分"的对账
-    money_types = (
-        spark.sql("DESCRIBE lakehouse.dwd_trade_order_detail")
-        .filter("col_name = 'amount'")
-        .first()["data_type"]
+    #
+    # 用 describe_columns 而不是手写 DESCRIBE 过滤：Spark 的 DESCRIBE 会给列名
+    # 右填充空格（详见 _common.describe_columns 的说明），直接比较会静默取不到值。
+    order_columns = describe_columns(spark, "lakehouse.dwd_trade_order_detail")
+    checker.check(
+        "dwd_trade_order_detail.amount 类型",
+        order_columns.get("amount", "<缺失>"),
+        "decimal(18,2)",
     )
-    checker.check("dwd_trade_order_detail.amount 类型", money_types, "decimal(18,2)")
 
     # 事件时间不能为空（为空会让窗口聚合静默丢行）
     for table in (

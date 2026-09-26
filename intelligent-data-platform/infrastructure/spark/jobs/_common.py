@@ -172,6 +172,60 @@ def _expand_includes(content: str, base_dir: Path) -> str:
     return "\n".join(out)
 
 
+def describe_columns(spark: SparkSession, qualified_table: str) -> dict[str, str]:
+    """返回 {列名: 类型}，用于字段类型断言。
+
+    !! 为什么必须 strip()（Sprint 3 踩坑）!!
+        Spark 的 DESCRIBE 输出里，**列名会被右填充空格对齐**（打印宽度对齐），
+        而类型列不会：命令行下看到的是
+            amount              \\tdecimal(18,2)
+        于是：
+            - DataFrame API 取 ["col_name"] 得到的可能是带尾空格的字符串；
+            - 用 awk '$1=="amount"' 解析 CLI 输出则**永远匹配不到**，
+              表现为"取不到类型"的空值（而不是报错），极易误判成类型错误。
+        这里统一 strip，且把"取不到"明确表示为 None 的缺失项。
+    """
+    rows = spark.sql(f"DESCRIBE {qualified_table}").collect()
+    out: dict[str, str] = {}
+    for row in rows:
+        name = (row["col_name"] or "").strip()
+        if not name or name.startswith("#"):
+            continue  # 跳过 "# Partition Information" 这类分隔行
+        out[name] = (row["data_type"] or "").strip()
+    return out
+
+
+def clean_stale_spark_temp(spark: SparkSession, table_paths: tuple[str, ...]) -> int:
+    """清理 Spark 写入残留的临时目录（.spark-staging-* / _temporary）。
+
+    !! 为什么必须清（实测踩坑）!!
+      带分区的 INSERT OVERWRITE 会先在表目录下写
+        <表目录>/.spark-staging-<uuid>/_temporary/0/task_.../dt=.../part-*.parquet
+      成功后再原子地搬到 dt=... 并删掉 staging 目录。
+      如果作业中途被杀（本项目因为内存不足被杀过一次），staging 目录会**留在
+      S3 上**：它不会被自动清理，而下游 Doris 的 S3() TVF 用
+      `**/*.parquet` 递归读取时会把这份残留数据**再读一遍**，
+      导致装载行数凭空翻倍 —— 而且是"看起来多了一半数据"这种
+      最难怀疑到根因的现象。
+
+    只在作业开始时清理，不碰 dt=* 这些正式分区。
+    """
+    jvm = spark._jvm  # noqa: SLF001 - PySpark 没有公开的 FS API，只能走 JVM 网关
+    conf = spark._jsc.hadoopConfiguration()  # noqa: SLF001
+    removed = 0
+    for path in table_paths:
+        root = jvm.org.apache.hadoop.fs.Path(path)
+        fs = root.getFileSystem(conf)
+        if not fs.exists(root):
+            continue
+        for status in fs.listStatus(root):
+            name = status.getPath().getName()
+            if name.startswith(".spark-staging-") or name == "_temporary":
+                fs.delete(status.getPath(), True)
+                removed += 1
+    return removed
+
+
 def exact_distinct(spark: SparkSession, expression: str, source: str) -> int:
     """精确去重计数。
 

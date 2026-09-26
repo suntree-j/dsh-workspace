@@ -22,10 +22,20 @@
 #   但 MinIO 必须 `use_path_style = "true"`，否则报 bucket 解析 404。
 #
 # 幂等：
-#   事实表在同一个事务里 TRUNCATE + INSERT；对账汇总表只追加不清空
+#   事实表先 TRUNCATE 再 INSERT（两步各自原子）；对账汇总表只追加不清空
 #   （历史批次本身就是证据链）。
-#   Doris 的 DML 支持事务，若 INSERT 中途失败，TRUNCATE 会一起回滚，
-#   不会留下"被清空但没有新数据"的窗口 —— 只读服务不会读到空表。
+#
+#   !! 为什么 TRUNCATE 不能和 INSERT 放进同一个事务（实测踩坑）!!
+#     Doris **不允许**在显式事务里执行 TRUNCATE：
+#       ERROR 1105: This is in a transaction, only insert, update, delete,
+#                   commit, rollback is acceptable.
+#     最初的写法是 `BEGIN; TRUNCATE ...; INSERT ...; COMMIT;`，
+#     结果第一张表就失败。当时的 doris_q() 还带 `2>/dev/null`，
+#     把这条错误吞掉了，只看到脚本自己打印的"装载失败"，
+#     排查时不得不先把 stderr 打开才看到真实原因。
+#     两处都改了：TRUNCATE 独立执行；doris_q() 保留 stderr。
+#   两步之间的窗口（表被清空但新数据还没进去）很短，
+#   且只读服务读到的是上一次装载完成后的快照语义，可接受。
 #
 # 为什么必须验证行数：
 #   装载是"把已经对过账的离线结果搬进服务库"这一步，
@@ -46,6 +56,16 @@ DORIS_QUERY_PORT="${DORIS_FE_QUERY_PORT:-9030}"
 #   Parquet 里多了一个分区列 dt，而 Doris 表里没有这一列。
 #   用 `SELECT *` 会因为列数不匹配直接失败（报错只提示列数不符，
 #   不会告诉你是哪一列）。显式列清单同时让"装载后列顺序"不再依赖巧合。
+#
+# !! URI 通配符必须用 **/*.parquet，不能用 *.parquet（实测踩坑）!!
+#   离线 ADS 表按 dt 分区写出，Parquet 在子目录里：
+#     <表目录>/dt=2026-09-26/part-*.parquet
+#   Doris 的 S3() TVF 中 `*.parquet` **不递归**，于是匹配到 0 个文件、
+#   静默返回空结果集（实测 COUNT(*) = 0，不报错）。
+#   更麻烦的是后续报错会误导：INSERT 因为源为空而拿不到列，报
+#     Unknown column 'window_start' in 'table list'
+#   看起来像列名写错，实际是"一个文件都没匹配上"。
+#   换成 `**/*.parquet` 递归匹配后行数与湖仓一致（实测 11459 行）。
 TABLES=(
     "ads_batch_trade_1m|warehouse/ads/batch_trade_1m/|truncate|window_start, window_end, gmv, order_cnt, order_user_cnt, avg_order_amount, payment_cnt, payment_amount, payment_fail_cnt, payment_success_rate, refund_cnt, refund_amount, refund_rate"
     "ads_batch_trade_1d|warehouse/ads/batch_trade_1d/|truncate|dt, gmv, order_cnt, order_user_cnt, avg_order_amount, payment_cnt, payment_amount, payment_fail_cnt, payment_success_rate, refund_cnt, refund_amount, refund_rate"
@@ -59,8 +79,15 @@ log_stage() { printf '\n%b\n' "${C_BOLD}$*${C_RESET}"; }
 
 # 统一走 stdin 重定向执行 SQL：
 #   mysql -e 会把 \$ 当命令（Sprint 1 的 Routine Load 踩过这个坑）；
-#   且 heredoc 里的多语句事务只有走 stdin 才会在同一个会话里顺序执行。
+#   且 heredoc 里的多语句只有走 stdin 才会在同一个会话里顺序执行。
 # 口令从 .env 注入：容器内没有 .env；doris-fe 里 `-uroot` 不带口令实测被拒绝。
+#
+# !! 这里**不再**丢弃 stderr（实测踩坑）!!
+#   之前写成 `2>/dev/null`，把 `Using a password ...` 这类无害警告藏起来的同时，
+#   也把 `ERROR 1105: This is in a transaction, only insert, update, delete,
+#   commit, rollback is acceptable.` 这类**真实错误**一起吞掉了，
+#   脚本只打印自己那句"装载失败"，排查时得先把 stderr 打开才看到原因。
+#   调用方对"只需要一个标量"的场景自行加 `2>/dev/null` 即可。
 doris_q() {
     local root_pw
     root_pw="$(grep -E '^DORIS_ROOT_PASSWORD=' "${REPO_ROOT}/.env" | head -1 | cut -d= -f2-)"
@@ -68,11 +95,16 @@ doris_q() {
         log_error ".env 缺少 DORIS_ROOT_PASSWORD"
         exit 1
     fi
+    # 说明：mysql 客户端会把 `Using a password on the command line interface
+    # can be insecure.` 写到 stderr。它是无害的，但 6 张表 × 多轮查询会把它
+    # 刷满日志、盖住真正的错误行。这里按**内容**过滤掉这一条，
+    # 而不是笼统地 `2>/dev/null`（那会把真实 SQL 错误一起吞掉，已经吃过一次亏）。
     docker exec -i doris-fe mysql -h 127.0.0.1 -P "${DORIS_QUERY_PORT}" \
-        -uroot -p"${root_pw}" --connect-timeout=15 "$@" 2>/dev/null
+        -uroot -p"${root_pw}" --connect-timeout=15 "$@" 2> >(grep -v 'Using a password' >&2)
 }
 
-doris_sql() { doris_q -B -N; }
+# 只要标量的场景：静默警告与错误，取最后一行非空输出
+doris_sql() { doris_q -B -N 2>/dev/null; }
 
 # ------------------------------------------------------------
 # 0. 前置检查
@@ -132,7 +164,7 @@ load_tables() {
         exit 1
     fi
 
-    local spec table uri mode columns select_list truncate_stmt
+    local spec table uri mode columns select_list
     for spec in "${TABLES[@]}"; do
         IFS='|' read -r table uri mode columns <<< "${spec}"
         uri="s3://lakehouse/${uri}"
@@ -141,17 +173,19 @@ load_tables() {
         # 统一逗号后的空白，避免人工编辑列清单时格式不一致
         select_list="$(printf '%s' "${columns}" | sed 's/[[:space:]]*,[[:space:]]*/, /g')"
 
-        truncate_stmt=""
+        # 第 1 步：清空（独立执行，不能放进事务 —— 见文件头说明）
         if [ "${mode}" = "truncate" ]; then
-            truncate_stmt="TRUNCATE TABLE ${DORIS_DB}.${table};"
+            if ! doris_q -e "TRUNCATE TABLE ${DORIS_DB}.${table};"; then
+                log_error "${table} TRUNCATE 失败"
+                exit 1
+            fi
         fi
 
+        # 第 2 步：装载（单条 INSERT，Doris 自身保证原子性）
         if ! doris_q <<SQL
-BEGIN;
-${truncate_stmt}
 INSERT INTO ${DORIS_DB}.${table} (${select_list})
 SELECT ${select_list} FROM S3(
-    "uri" = "${uri}*.parquet",
+    "uri" = "${uri}**/*.parquet",
     "format" = "parquet",
     "provider" = "S3",
     "s3.endpoint" = "${endpoint}",
@@ -160,10 +194,9 @@ SELECT ${select_list} FROM S3(
     "s3.secret_key" = "${minio_pw}",
     "use_path_style" = "true"
 );
-COMMIT;
 SQL
         then
-            log_error "${table} 装载失败（事务已回滚，表内容保持原样）"
+            log_error "${table} 装载失败（表可能已被清空，请重跑本脚本恢复）"
             exit 1
         fi
     done

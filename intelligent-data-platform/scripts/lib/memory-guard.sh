@@ -34,10 +34,47 @@ host_total_mb() {
     free -m | awk '/^Mem:/ {print $2}'
 }
 
-# 是否有 Spark 作业正在运行（排除 Master/Worker 自身的 Java 进程）
+# 是否有 Spark **作业**正在运行。
+#
+# !! 为什么不能只看有没有 spark-submit 容器（实测踩坑）!!
+#   scripts/spark-sql.sh 也是用一次性 spark-submit 容器跑 `spark-sql -e "..."`。
+#   如果把这些临时查询容器当成"作业在运行"，就会出现：
+#   验收脚本刚查完湖仓行数、紧接着重跑 ADS 层 → 被闸门拒绝
+#   （自己把自己挡住，报"已有 Spark 作业在运行"，而其实一个作业都没有）。
+#   因此这里必须区分：
+#     作业    : spark-submit ... /opt/jobs/xxx.py
+#     临时查询: spark-sql --conf ... -e "SELECT ..."
 spark_jobs_running() {
-    docker ps --format '{{.Names}}' 2>/dev/null | grep -q 'spark-submit-run' && return 0
-    pgrep -f 'org.apache.spark.deploy.SparkSubmit' >/dev/null 2>&1 && return 0
+    local pid
+    for pid in $(pgrep -f 'org\.apache\.spark\.deploy\.SparkSubmit' 2>/dev/null); do
+        # /proc/<pid>/cmdline 以 NUL 分隔；换成空格后判断是否引用了作业脚本
+        if tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null | grep -q '/opt/jobs/.*\.py'; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# 等待正在运行的 Spark 作业结束（最多 wait_seconds 秒）。
+# 返回 0 = 现在没有作业；1 = 超时仍有作业在跑。
+wait_for_no_running_jobs() {
+    local wait_seconds="${1:-240}"
+    local waited=0
+    if ! spark_jobs_running; then
+        return 0
+    fi
+    log_warn "检测到 Spark 作业正在运行，等待其结束（最多 ${wait_seconds}s）..."
+    while [ "${waited}" -lt "${wait_seconds}" ]; do
+        sleep 5
+        waited=$(( waited + 5 ))
+        if ! spark_jobs_running; then
+            printf '\r\033[K'
+            printf '  前一个作业已结束（等待 %ss）\n' "${waited}"
+            return 0
+        fi
+        printf '\r  等待中 ... %ss' "${waited}"
+    done
+    printf '\r\033[K'
     return 1
 }
 
@@ -69,16 +106,21 @@ require_memory_for_batch() {
 
 # ------------------------------------------------------------
 # 闸门 2：不要叠加第二个 Spark 作业
+#
+# 先等一会儿再判定：上一个作业可能刚刚结束、进程正在退出，
+# 立刻判"占用"会让串行流水线在边界上偶发失败（实测踩过一次）。
 # ------------------------------------------------------------
 require_no_running_jobs() {
-    if spark_jobs_running; then
-        log_error "已有 Spark 作业在运行，拒绝再启动一个"
-        printf '  原因：两个驱动同时跑会直接打穿这台机器的内存。\n'
-        printf '  查看： docker ps --filter name=spark-submit-run\n'
-        printf '  等待： bash scripts/run-batch-pipeline.sh  会串行执行各阶段，无需并发\n'
-        return 1
+    if wait_for_no_running_jobs "${SPARK_WAIT_SECONDS:-240}"; then
+        return 0
     fi
-    return 0
+    log_error "已有 Spark 作业在运行（等待 ${SPARK_WAIT_SECONDS:-240}s 仍未结束），拒绝再启动一个"
+    printf '  原因：两个驱动同时跑会直接打穿这台机器的内存。\n'
+    printf '  查看： docker ps --filter name=spark-submit-run\n'
+    printf '        pgrep -af SparkSubmit\n'
+    printf '  既然流水线本身是串行执行，正常情况下不会走到这里；\n'
+    printf '  若确实需要强制重跑，先确认前一作业已结束。\n'
+    return 1
 }
 
 # ------------------------------------------------------------

@@ -79,6 +79,25 @@ sql_text() {
     sql "$1" | grep -vE '^(Time taken|$)' || true
 }
 
+# 取某张表某个字段的类型。
+#
+# !! 为什么不能直接 awk '$1=="amount"'（Sprint 3 踩坑）!!
+#   Spark 的 DESCRIBE 会**把列名右填充空格**做对齐，而类型列不填充：
+#       amount              <TAB>decimal(18,2)
+#   于是 $1 实际是 "amount              "（带 14 个空格），
+#   与 "amount" 永远不相等 —— awk 不报错，只是输出空字符串，
+#   表现为"取不到类型"，看起来像类型错了，其实是解析错了。
+#   这里先 tr -s ' ' 把连续空格压成一个，再去掉行首行尾空白。
+describe_type() {
+    local table="$1" column="$2"
+    sql_text "DESCRIBE lakehouse.${table};" \
+        | tr -s ' ' \
+        | awk -F'\t' -v col="${column}" '
+            { gsub(/^[ \t]+|[ \t]+$/, "", $1) }
+            $1 == col { gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit }
+        '
+}
+
 doris_q() {
     local root_pw
     root_pw="$(grep -E '^DORIS_ROOT_PASSWORD=' "${REPO_ROOT}/.env" | head -1 | cut -d= -f2-)"
@@ -196,7 +215,11 @@ step_types() {
                  dws_trade_overview_1d dws_trade_category_1d dws_trade_user_1d \
                  ads_batch_trade_1m ads_batch_trade_1d ads_batch_category_1m \
                  ads_batch_category_1d; do
-        line="$(sql_text "DESCRIBE lakehouse.${table};" | awk -F'\t' 'tolower($2) ~ /double|float/ {print $1":"$2}')"
+        # 注意 awk 的 print 里必须有空格：
+        #   print $1":"$2  →  "amountdecimal(18,2)"（拼接，取不到类型）
+        #   print $1 ": " $2 → "amount: decimal(18,2)"（正确）
+        # 这个坑让类型断言全部误报成 FAIL（看起来像类型错了，其实解析错了）。
+        line="$(sql_text "DESCRIBE lakehouse.${table};" | awk -F'\t' 'tolower($2) ~ /double|float/ {print $1 ": " $2}')"
         if [ -n "${line}" ]; then
             log_warn "${table} 存在浮点列：${line}"
             bad=$(( bad + 1 ))
@@ -205,16 +228,16 @@ step_types() {
     check "无 double/float 列" "0" "${bad}"
 
     local amount_type
-    amount_type="$(sql_text "DESCRIBE lakehouse.dwd_trade_order_detail;" | awk -F'\t' '$1=="amount" {print $2}')"
-    check "dwd_trade_order_detail.amount" "decimal(18,2)" "${amount_type}"
+    amount_type="$(describe_type dwd_trade_order_detail amount)"
+    check "dwd_trade_order_detail.amount" "decimal(18,2)" "${amount_type:-<未取到>}"
 
     local gmv_type
-    gmv_type="$(sql_text "DESCRIBE lakehouse.ads_batch_trade_1m;" | awk -F'\t' '$1=="gmv" {print $2}')"
-    check "ads_batch_trade_1m.gmv" "decimal(18,2)" "${gmv_type}"
+    gmv_type="$(describe_type ads_batch_trade_1m gmv)"
+    check "ads_batch_trade_1m.gmv" "decimal(18,2)" "${gmv_type:-<未取到>}"
 
     local rate_type
-    rate_type="$(sql_text "DESCRIBE lakehouse.ads_batch_trade_1m;" | awk -F'\t' '$1=="refund_rate" {print $2}')"
-    check "ads_batch_trade_1m.refund_rate" "decimal(10,4)" "${rate_type}"
+    rate_type="$(describe_type ads_batch_trade_1m refund_rate)"
+    check "ads_batch_trade_1m.refund_rate" "decimal(10,4)" "${rate_type:-<未取到>}"
 }
 
 # ============================================================
@@ -343,24 +366,44 @@ step_regression() {
 step_tests() {
     section "8/8 自动化测试（单元 + 冒烟）"
 
-    if ! command -v python >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
-        printf '  %b %-46s 未找到 python\n' "${C_YELLOW}[SKIP]${C_RESET}" "pytest"
+    # !! 必须优先用项目自己的虚拟环境 !!
+    #   服务器上系统 python3 里**没有** pytest（实测：No module named pytest），
+    #   项目依赖装在 /opt/data-platform/.venv（见 scripts/install-web.sh）。
+    #   直接用 `python -m pytest` 会得到"测试失败"的假警报，
+    #   而实际上只是找错了解释器 —— 这类假失败会让人不再相信验收结果。
+    local py=""
+    if [ -x "${REPO_ROOT}/.venv/bin/python" ]; then
+        py="${REPO_ROOT}/.venv/bin/python"
+    elif command -v python >/dev/null 2>&1; then
+        py="$(command -v python)"
+    elif command -v python3 >/dev/null 2>&1; then
+        py="$(command -v python3)"
+    fi
+
+    if [ -z "${py}" ]; then
+        printf '  %b %-46s 未找到可用的 python\n' "${C_YELLOW}[SKIP]${C_RESET}" "pytest"
         SKIP=$(( SKIP + 1 ))
         return
     fi
-    local py
-    py="$(command -v python || command -v python3)"
+
+    if ! "${py}" -c 'import pytest' >/dev/null 2>&1; then
+        printf '  %b %-46s %s\n' "${C_YELLOW}[SKIP]${C_RESET}" "pytest 不可用" "${py}"
+        printf '  提示：服务器上依赖装在 .venv，请执行 bash scripts/install-web.sh 或\n'
+        printf '        %s -m pip install -r services/api/requirements.txt\n' "${py}"
+        SKIP=$(( SKIP + 1 ))
+        return
+    fi
 
     local out
     if out="$(cd "${REPO_ROOT}" && "${py}" -m pytest -q 2>&1)"; then
         local summary
         summary="$(printf '%s\n' "${out}" | tail -1)"
-        printf '  %b %-46s %s\n' "${C_GREEN}[ OK ]${C_RESET}" "pytest 全部通过" "${summary}"
+        printf '  %b %-46s %s\n' "${C_GREEN}[ OK ]${C_RESET}" "pytest 全部通过 (${py##*/})" "${summary}"
         PASS=$(( PASS + 1 ))
     else
         printf '  %b %-46s\n' "${C_RED}[FAIL]${C_RESET}" "pytest 失败"
         printf '%s\n' "${out}" | tail -25
-        DETAILS+=("pytest 失败")
+        DETAILS+=("pytest 失败（解释器 ${py}）")
         FAIL=$(( FAIL + 1 ))
     fi
 }

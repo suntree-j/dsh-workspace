@@ -25,8 +25,11 @@
 --   单 BE 必须显式 replication_num = 1（Doris 4.1.4 无 default_replication_num）。
 -- ============================================================
 
-CREATE DATABASE IF NOT EXISTS lakehouse_ads
-COMMENT '离线（批处理）指标库：由 Spark 分层计算、Doris S3() TVF 装载';
+-- 说明：Doris 的 CREATE DATABASE **不支持** MySQL 那样的
+--   `CREATE DATABASE x COMMENT '...'` 写法（实测报
+--    mismatched input 'COMMENT' expecting {<EOF>, ';'}），
+--   所以库级说明只能写成 SQL 注释（就是下面这段）。
+CREATE DATABASE IF NOT EXISTS lakehouse_ads;
 
 -- ------------------------------------------------------------
 -- 离线交易总览（1 分钟，与实时表同形）
