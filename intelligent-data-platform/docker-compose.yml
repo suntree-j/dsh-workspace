@@ -749,5 +749,14 @@ services:
     volumes:
       - ./infrastructure/spark/jobs:/opt/jobs:ro
       - ./sql/hive:/opt/sql/hive:ro
+      # 分层作业自带的 SQL（ODS→DWD→DWS→ADS→对账）。
+      #
+      # !! 不能挂在 /opt/jobs/sql（实测踩坑）!!
+      #   /opt/jobs 已经是只读挂载，Docker 在其下再创建挂载点时
+      #   会因为父目录只读而失败：
+      #     mkdirat .../opt/jobs/sql: read-only file system
+      #   所以挂到 /opt/jobs 之外的平级目录，作业侧通过
+      #   spark.jobs.layerSqlDir 显式指定（见 scripts/lib/spark-job.sh）。
+      - ./infrastructure/spark/sql:/opt/layer-sql:ro
     networks:
       - data-platform
