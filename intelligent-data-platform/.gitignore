@@ -55,6 +55,32 @@ venv/
 ENV/
 env/
 .python-version
+# Sprint 4：Airflow 的独立 venv（与 .venv / .venv-agent 同样的理由）
+# 注意 .venv-airflow 不以 `.venv/` 结尾，上面那条匹配不到，必须单列。
+.venv-airflow/
+
+# ============================================================
+# Sprint 4 — Airflow
+#
+# AIRFLOW_HOME 放在仓库内（/opt/data-platform/airflow），
+# 这样 DAG 代码可以进版本库；但同一个目录下还有**机器状态**，
+# 那些绝不能进 Git：
+#   logs/                     运行日志（含任务输出）
+#   airflow.env               含元数据库口令（0640 dpaiflow:dpapi）
+#   simple_auth_passwords.json 登录口令（明文 JSON）
+#   airflow.cfg / webserver_config.py  Airflow 自己生成的配置
+#   *.db                      万一退回 sqlite 时的元数据库文件
+# ============================================================
+airflow/logs/
+airflow/plugins/
+airflow/airflow.env
+airflow/airflow.cfg
+airflow/webserver_config.py
+airflow/simple_auth_passwords.json
+airflow/*.db
+airflow/*.sqlite
+airflow/*.pid
+airflow/*.lock
 
 # Test / coverage
 .pytest_cache/

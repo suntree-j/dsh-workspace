@@ -390,6 +390,21 @@ start_services() {
         *200*|*302*|*307*) log_ok "API server 在 127.0.0.1:${API_PORT} 响应" ;;
         *) log_error "API server 无响应（全部 ${codes}）"; FAILED=1 ;;
     esac
+
+    # !! 口令文件权限必须收紧 !!
+    #   api-server 首次启动时会生成 simple_auth_passwords.json，
+    #   用的是默认 umask → **644，全局可读**，而里面是**明文口令**。
+    #   这是实测发现的（ls -l 显示 -rw-r--r--），不是假想问题。
+    #   每次部署都 chmod 一次，保证即使文件被重建也不会留着宽权限。
+    local pf="${AIRFLOW_HOME_DIR}/simple_auth_passwords.json"
+    if [ -f "${pf}" ]; then
+        chmod 600 "${pf}"
+        chown "${AIRFLOW_USER}:${AIRFLOW_GROUP}" "${pf}" 2>/dev/null || true
+        log_ok "登录口令文件： $(stat -c '%a %U:%G' "${pf}")"
+        printf '    查看口令（仅 root）： cat %s\n' "${pf}"
+    else
+        log_warn "尚未生成登录口令文件（api-server 首次启动时创建）"
+    fi
 }
 
 main() {
