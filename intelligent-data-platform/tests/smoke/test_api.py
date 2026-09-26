@@ -279,3 +279,84 @@ def test_categories_endpoint() -> None:
     rows, _ = get_data("/categories")
     assert isinstance(rows, list)
     assert all(isinstance(c, str) for c in rows)
+
+
+# ============================================================
+# 6. 离线链路与批流对账（Sprint 3）
+#
+# 这一组测试校验的是"数据可不可信"，而不只是"接口通不通"：
+# 离线链路的指标必须与实时链路逐项相等，否则 /batch/reconcile
+# 会报出差异，而这些测试也会失败。
+# ============================================================
+def test_batch_overview_has_kpi_daily_and_categories() -> None:
+    data, source = get_data("/batch/overview?days=30")
+    assert data["kpi"], "离线 KPI 不能为空"
+    assert data["daily"], "离线按天序列不能为空"
+    assert data["category_top"], "离线类目排行不能为空"
+
+    # 按天序列必须是升序（前端直接画折线，乱序会画成来回折的锯齿）
+    days = [row["dt"] for row in data["daily"]]
+    assert days == sorted(days), f"按天序列不是升序：{days[:5]}"
+
+    # 来源必须指向离线库（lakehouse_ads），而不是实时库
+    assert any(t.startswith("lakehouse_ads.") for t in source["tables"]), source["tables"]
+    assert "离线" in source["note"]
+
+
+def test_batch_kpi_equals_daily_sum() -> None:
+    """离线内部自洽：全量 KPI 必须等于按天序列之和。
+
+    这条断言看着显然，但能抓住一类真实错误：
+    总览读的是分钟表、明细读的是天表，两张表的口径一旦漂移，
+    看板上就会出现"上面写 5189 万、下面加起来是另一个数"。
+    """
+    data, _ = get_data("/batch/overview?days=1000")
+    daily = data["daily"]
+    kpi = data["kpi"]
+
+    gmv_sum = sum(Decimal(str(row["gmv"])) for row in daily)
+    assert Decimal(str(kpi["gmv"])) == gmv_sum, (
+        f"KPI GMV {kpi['gmv']} != 按天之和 {gmv_sum}"
+    )
+
+    order_sum = sum(int(row["order_cnt"]) for row in daily)
+    assert int(kpi["order_cnt"]) == order_sum, (
+        f"KPI 订单量 {kpi['order_cnt']} != 按天之和 {order_sum}"
+    )
+
+
+def test_batch_reconcile_passes_with_zero_mismatch() -> None:
+    """批流对账必须通过，且实时/离线关键指标逐项相等。"""
+    data, source = get_data("/batch/reconcile")
+    latest = data["latest"]
+    assert latest, "没有对账结论（请先执行 bash scripts/batch-mode.sh）"
+
+    assert latest["mismatched_windows"] == 0, (
+        f"存在 {latest['mismatched_windows']} 个不一致窗口，"
+        f"首个在 {latest['first_mismatch_at']}；"
+        "差异明细见 /batch/reconcile 的 mismatches"
+    )
+    assert bool(latest["is_pass"]) is True
+    assert latest["batch_windows"] > 0, "对账窗口数为 0 —— 空区间假通过"
+    assert latest["realtime_windows"] > 0, "实时侧没有窗口参与对账"
+
+    # 差异列必须全部为 0（或 0.00）：这是"同一指标只有一个定义"的直接证据
+    for field, value in data["deltas"].items():
+        assert value is not None, f"差异 {field} 为 None，说明某一侧缺数据"
+        assert Decimal(str(value)) == 0, f"差异 {field} = {value}，两条链路不一致"
+
+    assert source["tables"], "对账接口必须说明数据来源"
+
+
+def test_reconcile_deltas_are_null_when_side_missing() -> None:
+    """差异必须用 None 表达"缺数据"，不能伪装成 0。
+
+    这条是契约测试：把"没有数据"当成 0 会让差异看起来是 0，
+    从而掩盖真实的不一致（AGENTS.md 第 10.3 节「失败即失败」）。
+    """
+    data, _ = get_data("/batch/reconcile")
+    deltas = data["deltas"]
+    assert set(deltas) == {"gmv", "order_cnt", "payment_amount", "refund_amount"}
+    for field, value in deltas.items():
+        # 当前数据两侧都齐全 → 应为 "0"/"0.00"；一旦某侧缺失必须是 None
+        assert value is None or Decimal(str(value)) == 0, f"{field}={value}"

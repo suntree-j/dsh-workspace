@@ -103,12 +103,34 @@ def test_container_healthy(docker, container: str) -> None:
 # 2. Spark 集群
 # ============================================================
 def test_spark_cluster_has_worker(docker) -> None:
-    result = docker.run("exec", "spark-master", "curl", "-fsS", "http://localhost:8080/json/")
+    """集群必须至少有一个已注册的 Worker，且容量足够跑作业。
+
+    !! 必须用服务名而不是 localhost（同一个坑踩了两次）!!
+        Spark 的 MasterUI 绑定在"容器主机名对应的地址"上，
+        容器内 `curl http://localhost:8080/` 会被拒：
+            curl: (7) Failed to connect to localhost port 8080: Connection refused
+        （docker-compose 的 healthcheck 早就为此改成 `http://spark-master:8080/`，
+          注释里也写了原因，但测试里又写回了 localhost。）
+        服务名在 data-platform 网络里可解析，是唯一可靠的地址。
+
+    !! 为什么不断言"当前空闲"!!
+        /json/ 里的 coresused / memoryused 会随作业波动。
+        若断言"必须有空闲 core"，集群正在跑作业时会随机失败 ——
+        而"忙"是完全正常的状态。这里只断言结构性事实。
+    """
+    result = docker.run("spark-master", "curl", "-fsS", "http://spark-master:8080/json/")
     assert result.returncode == 0, "Spark Master Web UI 无响应"
     info = json.loads(result.stdout)
+
     assert int(info["aliveworkers"]) >= 1, f"没有 Worker 注册：{info}"
-    assert int(info["cores"]) >= 1, f"Worker 没有可用 core：{info}"
-    assert int(info["memory"]) >= 1024, f"Worker 可用内存过小：{info}"
+    assert int(info["cores"]) >= 1, f"Worker 总 core 数为 0：{info}"
+    assert int(info["memory"]) >= 1024, f"Worker 总内存过小：{info}"
+
+    # 账目自洽：已用不可能超过总量（能抓住 Worker 状态异常）
+    cores_used = int(info.get("coresused", 0))
+    memory_used = int(info.get("memoryused", 0))
+    assert 0 <= cores_used <= int(info["cores"]), f"core 账目异常：{info}"
+    assert 0 <= memory_used <= int(info["memory"]), f"内存账目异常：{info}"
 
 
 # ============================================================
@@ -122,9 +144,22 @@ def test_ods_tables_exist() -> None:
 
 @pytest.mark.parametrize("ods,mysql_table", ODS_PAIRS)
 def test_ods_table_is_external(ods: str, mysql_table: str) -> None:
-    """必须是外部表：DROP TABLE 只删元数据，不会连数据一起删掉。"""
+    """必须是外部表：DROP TABLE 只删元数据，不会连数据一起删掉。
+
+    !! 为什么判 LOCATION 而不是找 "EXTERNAL" 关键字（实测踩坑）!!
+        Spark 的 `SHOW CREATE TABLE` **不会**输出 EXTERNAL 关键字，
+        实测（Sprint 3 验收）输出的 DDL 里
+            EXTERNAL 出现 0 次、LOCATION 出现 1 次。
+        而"建表时显式给了 LOCATION"在 Hive/Spark 的 catalog 语义里
+        正是外部表的判定条件（未指定 LOCATION 的表才是 managed table）。
+        原断言找 EXTERNAL，会稳定失败 —— 那是断言写错，不是表建错了。
+    """
     ddl = spark_sql(f"SHOW CREATE TABLE lakehouse.{ods};")
-    assert "EXTERNAL" in ddl.upper(), f"{ods} 不是外部表：{ddl[:300]}"
+    upper = ddl.upper()
+    assert "LOCATION" in upper, f"{ods} 的 DDL 没有 LOCATION，可能是 managed table：{ddl[:300]}"
+    assert "S3A://LAKEHOUSE/WAREHOUSE/ODS/" in upper, (
+        f"{ods} 的数据位置不在湖仓 ODS 路径下：{ddl[:300]}"
+    )
 
 
 # ============================================================
