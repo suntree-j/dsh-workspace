@@ -7,15 +7,14 @@
 -- 依据：docs/sprint/SPRINT_0.md 第 11 节
 --
 -- 执行机制（重要）：
---   Doris BE 镜像的 entry_point.sh 会自动执行容器内
---   /docker-entrypoint-initdb.d/ 下的 *.sql / *.sh，
---   执行方式为： mysql -uroot -h <MASTER_FE_IP> -P 9030 < <file>
---   该目录由 docker-compose.yml 从 ./sql/doris 挂载而来。
+--   由 Doris BE 容器启动时的初始化流程执行本文件，
+--   执行方式为： mysql -h <FE_HOST> -P 9030 -uroot < <file>
+--   该目录由 docker-compose.yml 从 ./sql/doris 挂载到
+--   /docker-entrypoint-initdb.d。
 --
---   因此本文件：
---     1) 由 BE 容器初始化机制自动执行，无需手工操作；
---     2) 执行时未指定默认库，必须显式 USE ecommerce；
---     3) 全部语句幂等，容器重建不会报错。
+--   !! 容器每次重建都会重新执行，因此本文件必须幂等 !!
+--     - 建库 / 建表使用 IF NOT EXISTS
+--     - 测试数据插入放在 03_seed_test_connection.sh（先查后插）
 --
 -- 说明：Sprint 0 只建立 ecommerce 库与 test_connection 测试表，
 --       不提前创建 ODS/DWD/DWS/ADS 分层。
@@ -54,7 +53,11 @@ CREATE DATABASE IF NOT EXISTS `ecommerce`;
 --     backends. replication num is 3, available backend num is 1
 -- ------------------------------------------------------------
 
-USE `ecommerce`;
+-- 注意：这里不用反引号包围库名。
+--   实测 `USE \`ecommerce\`;` 在部分客户端下会报
+--   "USE must be followed by a database name"，
+--   而 `USE ecommerce;` 正常。
+USE ecommerce;
 
 -- ------------------------------------------------------------
 -- 3. 连通性测试表
@@ -77,16 +80,12 @@ PROPERTIES (
 --   - Doris 不支持 MySQL 风格的 `DELETE FROM t WHERE ...`
 --     （会报错），DUPLICATE KEY 模型上亦不保证逐行删除语义；
 --   - 也不支持 `INSERT ... SELECT ... WHERE NOT EXISTS` 这种写法。
---   因此本文件保持最朴素的「建表 + 插入」。
 --
---   幂等性由执行时机保证：BE 仅在
---   /opt/apache-doris/be/storage/data 不存在时（即首次启动、
---   数据卷为空）才执行本目录下的 SQL。容器重启不会重复插入。
---   如需彻底重跑，请删除数据卷：
---     docker compose down -v && docker compose up -d
+--   因此本文件只负责建库建表，**测试数据的插入放在
+--   03_seed_test_connection.sh 中**，用「先查后插」实现幂等：
+--   容器每次重建都会执行初始化目录，若在此直接 INSERT，
+--   重复执行会产生重复行（DUPLICATE KEY 模型不去重）。
 -- ------------------------------------------------------------
-INSERT INTO `test_connection` VALUES
-    (1, 'doris connection ok', NOW());
 
 -- ------------------------------------------------------------
 -- 5. 校验：查询结果会出现在 BE 容器日志中

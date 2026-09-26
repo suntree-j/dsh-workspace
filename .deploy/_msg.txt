@@ -1,0 +1,48 @@
+fix: correct doris init pipeline and keepalive idle loop
+
+服务器收尾阶段发现并修复的问题，均已实测确认（51 passed / 5 个容器 RestartCount=0）。
+
+## 1. 关键发现：Doris 拒绝在有 swap 时启动
+实测 start_be.sh 输出：
+  Disable swap memory before starting be
+此前按常规建议添加的 8G swap 直接导致 BE 无法启动，
+进而使 tablet 被标记为坏副本（isBad=true / alive replica num 0）。
+修正：移除 swap（swapoff + 删 /swapfile + 清 /etc/fstab），
+并在 /etc/sysctl.d/99-data-platform.conf 中显式记录
+「本机必须保持 swap 关闭」，避免后续再次误加。
+内存控制改为使用 Doris 自身配置（FE -Xmx2048m、BE_MEM_LIMIT）。
+
+## 2. 初始化 SQL 从未执行（Sprint 0 遗留缺陷）
+根因：entry_point.sh 的 process_init_files 位于
+check_be_status 之后的代码路径，而容器在 check_be_status 成功即退出，
+因此 /docker-entrypoint-initdb.d 下的 SQL 从未被完整执行，
+ecommerce 库与 test_connection 表实际并不存在
+（此前是崩溃循环期某次偶然执行留下的）。
+修正：保活包装在 BE 就绪后主动补执行初始化目录，
+失败自动重试（最多 5 次，每次间隔 10s）。
+
+## 3. 保活包装空转
+早期版本循环调用 start_be.sh --console，但 BE 已在运行时该脚本
+立即返回 rc=1（PID 文件已存在），导致每 3 秒空转刷日志。
+修正：改用 Doris 自带的 start_be.sh --daemon（本身即「启动 + 守护」），
+仅当心跳端口掉线时才重新拉起。实测空转次数 0。
+
+## 4. SQL / 脚本调整
+- 02_doris_init.sql：移除 INSERT（改为只建库建表），
+  并修正 USE 反引号语法报 "USE must be followed by a database name"
+  的问题，改用不带反引号的写法
+- 新增 03_seed_test_connection.sh：用「先查后插」实现幂等写入，
+  规避 Doris 不支持 DELETE ... WHERE 与 INSERT ... WHERE NOT EXISTS
+- health-check.sh：Doris BE 检查接受 IP 或容器主机名
+  （Doris 存在 FQDN/IP 双注册行为）
+
+## 5. 收尾
+- 清理排查期间遗留的 backend 记录（使用 DROPP）
+- 重置 Doris 存储卷，消除崩溃循环期留下的损坏 tablet
+
+## 实测结果
+- health-check.sh：5/5 [OK]，exit 0
+- pytest：51 passed
+- 幂等验证：重复执行 seed 不产生重复行（仍为 1 行）
+- 稳定性：mysql/kafka/minio/doris-fe/doris-be RestartCount 全部为 0
+- 数据：MySQL 1200/600/6000/5406/254，Kafka 31660 条，Doris test_connection=1

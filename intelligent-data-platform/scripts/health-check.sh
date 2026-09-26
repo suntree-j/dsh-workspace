@@ -202,12 +202,16 @@ check_doris_be() {
         return
     fi
 
-    # Host 列应包含 BE 的 IP；Alive 列为 true
-    if printf '%s\n' "${out}" | grep -q "${DORIS_BE_IP}" \
+    # Host 列可能是 BE 的静态 IP（由 BE_ADDR 决定），
+    # 也可能是容器主机名 —— Doris 存在 FQDN/IP 双注册行为
+    # （日志可见：master_info.backend_ip: doris-be, hostname_to_ip: 172.28.0.11），
+    # 因此两者都接受；Alive 列只需存在 true。
+    if { printf '%s\n' "${out}" | grep -q "${DORIS_BE_IP}" \
+         || printf '%s\n' "${out}" | grep -q "doris-be"; } \
        && printf '%s\n' "${out}" | grep -qw "true"; then
-        record "Doris BE" 1 "BE ${DORIS_BE_IP} 已注册且 Alive"
+        record "Doris BE" 1 "BE 已注册且 Alive"
     else
-        record "Doris BE" 0 "BE 尚未注册或未存活（SHOW BACKENDS 无 ${DORIS_BE_IP} / Alive=true）"
+        record "Doris BE" 0 "BE 尚未注册或未存活（SHOW BACKENDS 无匹配记录 / Alive=true）"
     fi
 }
 
