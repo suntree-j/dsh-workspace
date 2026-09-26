@@ -758,5 +758,12 @@ services:
       #   所以挂到 /opt/jobs 之外的平级目录，作业侧通过
       #   spark.jobs.layerSqlDir 显式指定（见 scripts/lib/spark-job.sh）。
       - ./infrastructure/spark/sql:/opt/layer-sql:ro
+    # 内存上限（Sprint 3 事故后补上）：
+    #   作业容器内跑的是 Spark **驱动**，它的堆由提交参数 --driver-memory 决定
+    #   （见 scripts/lib/spark-job.sh，默认 768m），容器再加上 JVM 非堆、
+    #   元空间与 Python 侧开销，给 1280m 上限留出足够余量。
+    #   不给上限的话，容器内存异常增长时 mem_limit 缺失会让它吃光宿主机内存
+    #   —— 这正是导致整机失联的直接路径。
+    mem_limit: ${SPARK_SUBMIT_MEMORY:-1280m}
     networks:
       - data-platform
