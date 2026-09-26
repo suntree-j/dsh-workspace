@@ -1,7 +1,7 @@
 # 指标口径字典（Metrics Dictionary）
 
 > 项目：基于 Lakehouse 与 AI Agent 的批流一体智能数据分析平台
-> 版本：V1.0（Sprint 1）
+> 版本：V1.1（Sprint 1 + Sprint 6 实现后同步）
 > 状态：**唯一权威口径定义**
 >
 > 规则：**同一指标在全项目只能有一个定义。**

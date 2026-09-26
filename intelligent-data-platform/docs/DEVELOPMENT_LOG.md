@@ -10,6 +10,7 @@
 
 - [2026-09-26 Sprint 0](#2026-09-26-sprint-0)
 - [2026-09-26 Sprint 1](#2026-09-26-sprint-1)
+- [2026-09-26 Sprint 6（服务层，顺序前移）](#2026-09-26-sprint-6服务层顺序前移)
 - [运行环境](#运行环境)
 - [待办与下一步](#待办与下一步)
 
@@ -238,6 +239,111 @@ Doris **内置**的 Kafka 导入能力，零额外依赖、天然断点续传与
 - [ ] 给窗口/去重状态配置 `table.exec.state.ttl`
 - [ ] Sprint 3 用 Spark 产出同名指标，与实时 ADS 交叉对账
 - [ ] 维表 join（`dim_product` / `dim_user`）与 `dws_trade_user_level_1m`
+
+---
+
+## 2026-09-26 Sprint 6（服务层，顺序前移）
+
+**主题**：数据后台（只读 API）+ 前后端（数据看板），直接部署在宿主机
+**状态**：✅ 已上线并验收通过
+**访问地址**：<http://36.151.150.140/data/>（接口文档 `/data/api/docs`）
+**设计文档**：[`docs/sprint/SPRINT_6.md`](sprint/SPRINT_6.md)
+
+### 阶段 1：先解决"要不要用 Docker"这个问题
+
+项目负责人提出"服务层能不能不用 Docker、直接装在服务器上"。结论与理由：
+
+```text
+数据层（MySQL/Kafka/Doris/Flink/MinIO）→ 继续用 Docker Compose
+服务层（Nginx + FastAPI + 前端静态文件）→ apt + systemd + Nginx 直装
+```
+
+数据层手工安装 Doris/Kafka 属于**高风险零收益**（版本绑定、依赖多、
+且它已经用命名卷稳定跑了两个 Sprint）；而服务层只有两个进程，
+systemd 管理反而更简单：`journalctl -u` 看日志、`nginx -t` 校验配置、
+`systemctl restart` 重启，少一层容器网络与端口映射。
+
+### 阶段 2：后端（services/api）
+
+```text
+config.py 口令只从 .env 注入（缺失就拒绝启动）
+sqlguard.py 唯一允许构造 SQL 的入口：仅 SELECT / 表白名单 / 强制 LIMIT
+doris.py 只读账号 + 参数绑定 + 查询超时 + DECIMAL 转字符串保精度
+repository.py 所有 SQL 常量（KPI / 时间序列 / 明细 / 元数据）
+metrics_doc.py 运行时解析 sql/metadata/metrics.md 作为口径字典
+envelope.py 统一信封 {data, source, generated_at}：每个响应都能说明数据来源
+main.py 11 个只读接口 + 统一异常处理（400/404/503 都是中文提示）
+```
+
+### 阶段 3：前端（services/web）
+
+**无构建步骤**：Vue 3 全局构建 + ECharts 由 `install-web.sh` 下载到
+`services/web/vendor/`（约 1.1 MB，不入 Git），源码即产物。
+6 个页面：总览 / 交易分析 / 流量分析 / 类目销售 / 订单明细 / 指标口径。
+
+前端三条与口径一致的约定：金额按字符串补零加千分位（跨行累加先转整数分）、
+`null` 显示 `—` 而不是 0、每个页面底部显示数据来源（`source.tables`）。
+
+### 阶段 4：部署
+
+```text
+scripts/install-web.sh   apt 装 nginx → venv 装依赖 → 建 dpapi 用户
+                        → 建 Doris 只读账号 agent_ro → 下载前端运行时
+                        → 装 nginx 站点与 systemd 单元 → 自检
+scripts/deploy-web.sh    日常更新：检查文件 → 同步依赖 → 重载配置 → 重启 → 自检
+scripts/verify-sprint-6.sh  7 步验收（状态/文件/Nginx 路径/健康/对账/安全/测试）
+```
+
+### 阶段 5：踩坑与修复
+
+| # | 现象 | 根因 | 修复 |
+| --- | --- | --- | --- |
+| 1 | 创建只读账号时脚本在最后一行中断 | Doris **不支持** MySQL 的 `FLUSH PRIVILEGES`（`mismatched input 'FLUSH'`），且 GRANT 立即生效 | 去掉该语句；在 SQL 文件里写明原因（否则后人还会加回来） |
+| 2 | 指标口径字典里所有指标的"域"都变成"通用" | 域标题正则 `\d+(?:\.\d+)?\s*` 没吃掉编号后的点（`## 2. 交易域指标`），整条正则永不命中 | 正则补 `\.?`；并给单元测试**加上域断言**（原来没断言所以一直没暴露） |
+| 3 | 口径字典里 `gmv` 的表显示成类目表 | 同一字段名在交易域与类目域都存在，按字段索引时后者覆盖了前者 | `by_field()` 改为保留**文档中先出现**的主口径 |
+| 4 | 口径字典里大量指标"所在表"=「同上」 | 文档表格用「同上」省略重复表名，解析器原样保留，血缘信息不可用 | 解析时把「同上」还原成同表上一行的真实表名 |
+| 5 | 总览"下单用户数/UV"是 6000 / 19999，明显偏大 | 窗口表的 `order_user_cnt` / `uv` 是**每个窗口内**的去重值，逐窗求和得到的是"人次" | KPI 改为回到 DWD 明细 `COUNT(DISTINCT user_id)`（真实为 1195 / 1200），并写明"不能用逐窗求和" |
+| 6 | 比率/客单价出现 8648.395961 这种长小数 | 除法结果未收敛精度，与口径定义的 `DECIMAL(18,2)` / `DECIMAL(10,4)` 不一致 | SQL 里显式 `CAST(... AS DECIMAL(...))` |
+| 7 | `source.tables` 里同一张表重复出现 | 一个接口由多条查询拼成，直接拼接表名列表 | 信封里对表名与口径去重（保持顺序） |
+| 8 | 脚本打印的访问地址是 `172.16.0.10`（内网） | `hostname -I` 返回的是云服务器内网地址 | `scripts/lib/common.sh` 新增 `public_ip()`：显式变量 → 公网回显服务 → 内网兜底 |
+| 9 | 接口冒烟测试报 `UnicodeEncodeError` | 测试直接拼中文查询参数（类目名），urllib 不会自动 URL 编码 | 测试里对 path 做 `urllib.parse.quote` |
+| 10 | **看板 6 个页面的 ECharts 图表全都不渲染**（KPI 与表格正常） | 真机 CDP 插桩结论：`draw` 被调用 8 次、`getEl()` 正常返回元素，但**每次容器尺寸都是 0x0**（页面刚挂载时容器不可见），于是在尺寸检查处早退；而 ResizeObserver 只在 `if (!inst)` 分支创建、`relayout()` 又要求 `inst` 已存在 → **没有任何机制能把 draw 叫回来**，容器后来可见了也永远不会初始化 | 先建立观察者再做尺寸判断；首次 init 不再要求实例已存在；补有上限的兜底重试（rAF 30 帧 + 定时退避 40 次），渲染成功后清零；`settled` 标志避免"init 成功但数据未到"被误判为完成 |
+| 11 | 指标口径页显示"没有匹配的指标定义"、条数为空 | 接口与前端对 `/meta/metrics` 的**响应结构理解不一致**：后端返回对象 `{metrics, conventions, version, updated_at, source_document}`（便于携带文档版本与通用约定），前端直接当数组用 | 前端统一走 `metricList(payload)` 取列表，并把口径文档版本/更新时间显示在"口径来源声明"里（顺带把"口径来自文档"这件事显式呈现） |
+
+> 第 10 条是本次最有价值的排查：**"没有报错、数据也对、就是图不显示"**
+> 这类问题用 `--screenshot` 截图只能看到"空白"，无法区分
+> 「没渲染」与「截图截早了」。改用 CDP 在页面里插桩计数
+> （`draw` / `elNull` / `noSize` / `inited`）才一次定位到根因。
+
+### 阶段 6：验收结果
+
+```text
+✅ bash scripts/verify-sprint-6.sh     7/7 PASS
+    服务状态 / 前端文件 / Nginx 对外路径 / API 健康 / 指标对账 / 安全验证 / 自动化测试
+✅ 访问地址                            http://36.151.150.140/data/（公网可达）
+✅ 接口文档                            http://36.151.150.140/data/api/docs
+✅ 指标对账                            API GMV 51,890,375.77 == MySQL 51,890,375.77（精确到分）
+✅ 安全验证                            只读账号建表被 Doris 拒绝；DELETE 返回 405；limit 超限返回 422
+✅ 自动化测试                          pytest 55 单元（SQL 守卫 31 + 生成器 24）+ 17 接口冒烟
+```
+
+### 决策记录
+
+| 决策 | 选择 | 理由 |
+| --- | --- | --- |
+| 服务层部署方式 | apt + systemd + Nginx，**不进 Docker** | 只有两个进程；数据层容器已有稳定收益，手工重装是高风险零收益 |
+| 后端框架 | FastAPI（不用 Spring Boot） | 与 Flink/生成器同语言同 venv，避免为一个只读接口引入 JVM 技术栈 |
+| 前端构建 | 无构建步骤（Vue 全局构建 + ECharts vendor） | 6 个页面、无第三方业务依赖；引入 Node 构建链的收益低于其成本 |
+| 接口安全 | 数据库只读账号 + SQL 守卫 + 接口约束（三道锁） | 只在应用层校验是单点防御，一旦绕过守卫 root 账号足以 DROP 整库 |
+| 口径来源 | 运行时解析 `metrics.md` | 口径只能有一份，接口返回的就是文档原文 |
+| 金额传输 | DECIMAL 转字符串 | float 序列化会让 51890375.77 变成 …69999999 |
+| 去重指标口径 | 回到 DWD 明细 `COUNT(DISTINCT)` | 窗口表逐窗求和是"人次"不是 UV（本次实际踩到） |
+
+### 待办
+
+- [ ] 接口鉴权（当前只读公开，知道 IP 即可访问）
+- [ ] 离线链路结果接入同一 API，与实时指标并排对比（Sprint 2/3 之后）
+- [ ] 需要时加连接池与 5 秒 TTL 缓存（当前每次请求都查 Doris，实测 <50ms）
 
 ---
 

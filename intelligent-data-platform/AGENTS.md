@@ -63,14 +63,28 @@
 | Apache Doris | `4.1.4`（FE + BE） | OLAP 查询与指标 |
 | Apache Flink | `1.20.1`（SQL + SQL Gateway） | 实时清洗与窗口聚合（Sprint 1 引入） |
 | flink-sql-connector-kafka | `3.4.0-1.20` | Flink 读写 Kafka |
-| Python | 3.13 | 数据生成器 |
+| FastAPI + uvicorn | `0.141.1` / `0.54.0` | 只读数据服务（Sprint 6 引入） |
+| Nginx | `1.24.0`（apt） | 静态托管 + 反向代理（Sprint 6 引入） |
+| Vue + ECharts | `3.5.13` / `5.6.0`（本地 vendor，无构建步骤） | 数据看板（Sprint 6 引入） |
+| systemd | 系统自带 | 守护 `data-platform-api`（Sprint 6 引入） |
+| Python | 3.13 | 数据生成器 / 数据服务 |
 | pytest | 9.x | 测试 |
+
+> **部署分层原则**（Sprint 6 起）：
+> **数据层**（MySQL/Kafka/MinIO/Doris/Flink）继续用 Docker Compose；
+> **服务层**（Nginx + FastAPI + 前端静态文件）直接装在宿主机
+> （apt + systemd + Nginx），不进 Docker —— 只有两个进程，
+> 用 `journalctl` / `nginx -t` / `systemctl restart` 管理更直接。
 
 ### 2.2 后续 Sprint 引入
 
 Spark + Hive + HDFS（S2）、Airflow（S4）、Iceberg（S5）、
-FastAPI / Spring Boot / Vue（S6）、LLM + Tool Calling（S7）、LangGraph（S8）、
-RAG（S9）、MCP（S10）、Prometheus + Grafana（S11）。
+LLM + Tool Calling（S7）、LangGraph（S8）、RAG（S9）、MCP（S10）、
+Prometheus + Grafana（S11）。
+
+> Sprint 6（数据后台 + 前后端）已按项目负责人要求**前移**到 Sprint 2~5 之前，
+> 理由是让数据"可访问、可验收"并为智能层预留只读接口，详见
+> [`docs/sprint/SPRINT_6.md`](docs/sprint/SPRINT_6.md) 第 1.1 节。
 
 ### 2.3 未经批准禁止引入
 
@@ -96,6 +110,9 @@ Kubernetes / Nacos / RabbitMQ / MongoDB ...
 | `sql/` | DDL / DML / 元数据定义 | **必须进 Git**，禁止只改容器内数据库 |
 | `scripts/` | 启停、状态、健康检查 | Bash，兼容 Git Bash / WSL / Linux |
 | `data-generator/` | Python 数据生成器 | 业务关系必须正确 |
+| `services/api/` | 只读数据服务（FastAPI，Sprint 6） | 只允许 SELECT；使用只读账号 `agent_ro` |
+| `services/web/` | 数据看板前端（Vue + ECharts，无构建步骤，Sprint 6） | 不引用外部 CDN；`vendor/` 不入 Git |
+| `deploy/` | 宿主机部署配置（Nginx / systemd，Sprint 6） | 只放配置模板，不在服务器上直接改 |
 | `tests/` | 单元测试与冒烟测试 | 冒烟测试必须真实执行 |
 | `volumes/` | 本地绑定挂载占位 | 内容不入 Git |
 
@@ -445,6 +462,15 @@ bash scripts/verify-sprint-1.sh      # Sprint 1 实时链路验收（就绪+heal
 bash scripts/verify-sprint-1.sh --replay   # 重建链路并重放数据后再验收
 bash scripts/cancel-flink-jobs.sh    # 取消全部 Flink 作业（重新提交作业前必跑）
 
+# ---------- 服务层（Sprint 6：Nginx + FastAPI + 前端） ----------
+bash scripts/install-web.sh          # 首次安装（nginx/依赖/只读账号/systemd）
+bash scripts/deploy-web.sh           # 更新代码后同步配置并重启服务
+bash scripts/verify-sprint-6.sh      # 服务层验收（7 步：状态/路径/对账/安全/测试）
+systemctl status data-platform-api   # 数据服务状态
+journalctl -u data-platform-api -n 100 --no-pager   # 数据服务日志
+nginx -t && systemctl reload nginx   # 站点配置校验与重载
+curl -s http://127.0.0.1/data/api/health             # 接口健康检查
+
 # ---------- 编排校验 ----------
 docker compose config                # 校验并打印解析后的配置
 docker compose config --quiet        # 仅校验语法
@@ -490,11 +516,11 @@ docker compose exec doris-be mysql -h 172.28.0.10 -P 9030 -uroot -e "SHOW BACKEN
 | --- | --- | --- |
 | **0** | **项目初始化与基础数据环境** | ✅ **已完成并验收通过** |
 | **1** | **Kafka + Flink + Doris 实时数仓** | ✅ **已完成并验收通过** |
+| **6** | **数据后台 + 前后端（服务层）** | ✅ **已完成并验收通过**（顺序前移，见 2.2 节说明） |
 | 2 | Spark + Hive + HDFS | ⏳ 下一步 |
 | 3 | ODS / DWD / DWS / ADS | 未开始 |
 | 4 | Airflow | 未开始 |
 | 5 | Iceberg Lakehouse | 未开始 |
-| 6 | Backend + Dashboard | 未开始 |
 | 7 | LLM + Tool Calling | 未开始 |
 | 8 | LangGraph Data Agent | 未开始 |
 | 9 | RAG + Metadata | 未开始 |
@@ -535,10 +561,24 @@ docker compose exec doris-be mysql -h 172.28.0.10 -P 9030 -uroot -e "SHOW BACKEN
 一键复现：`bash scripts/verify-sprint-1.sh`（详见
 [`docs/sprint/SPRINT_1_VERIFICATION_STATUS.md`](docs/sprint/SPRINT_1_VERIFICATION_STATUS.md)）。
 
-### 15.3 边界要求
+### 15.3 Sprint 6 验收结果（服务层)
 
-> **Sprint 1 已稳定，下一层是 Sprint 2（Spark + Hive + HDFS）。**
-> 仍然禁止提前实现 Sprint 3 及以后的内容（Airflow / Iceberg / Agent /
-> RAG / MCP / 前端 / 监控）。
+数据后台与前后端**直接装在宿主机**（不进 Docker）：
+
+```text
+✅ bash scripts/verify-sprint-6.sh   7/7 PASS
+✅ 访问地址                          http://36.151.150.140/data/
+✅ 接口文档                          http://36.151.150.140/data/api/docs
+✅ 只读账号                          agent_ro（写操作被 Doris 拒绝：Access denied CREATE）
+✅ 指标对账                          API GMV == MySQL GMV（51,890,375.77，精确到分）
+✅ 自动化测试                        pytest 55 单元（SQL 守卫 + 口径解析）+ 17 接口冒烟
+✅ 真实浏览器验收                    6 个页面渲染正常，图表 canvas 正常
+```
+
+### 15.4 边界要求
+
+> **Sprint 0 / 1 / 6 已稳定，下一层是 Sprint 2（Spark + Hive + HDFS）。**
+> 禁止提前实现 Sprint 7 及以后的内容（LLM / Agent / RAG / MCP / 监控）。
 > 指标口径以 [`sql/metadata/metrics.md`](sql/metadata/metrics.md) 为唯一权威，
-> 离线链路（Sprint 3 起）必须产生同名同口径指标并与实时链路交叉对账。
+> 离线链路（Sprint 3 起）必须产生同名同口径指标并与实时链路交叉对账；
+> 服务层接口（`services/api`）同样只能引用该口径，不得自建第二份定义。

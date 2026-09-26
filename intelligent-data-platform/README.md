@@ -4,24 +4,33 @@
 > 离线链路（Spark → Iceberg on HDFS/S3 → Hive）、以及基于 **LangGraph + LLM + MCP**
 > 的智能数据分析 Agent。
 >
-> **当前进度：Sprint 0 已完成并在腾讯云服务器上验收通过。**
+> **当前进度：Sprint 0（基础环境）、Sprint 1（实时数仓）、Sprint 6（数据后台 + 前后端）
+> 均已在腾讯云服务器上验收通过。**
 >
 > 核心原则：**先工程，再智能。**
 > 数据可靠 → 数据准确 → 数据可查询 → 数据可治理 → Agent 使用数据。
 
-> ✅ **验收结果**（腾讯云 36.151.150.140 / Ubuntu 24.04.2 LTS / Docker 29.8.1）
+> 🖥 **在线数据大屏**：<http://36.151.150.140/data/>
+> 接口文档：<http://36.151.150.140/data/api/docs>
+>
+> 架构：`浏览器 → Nginx(:80) → /data/ 静态看板 + /data/api/ 只读数据服务 → Doris`
+> 数据服务使用**专用只读账号**（`agent_ro`）+ SQL 安全守卫（仅 SELECT、强制 LIMIT），
+> 指标与 MySQL 事实源精确对账（GMV 51,890,375.77 元，精确到分）。
+
+> ✅ **Sprint 0 / 1 / 6 验收结果**（腾讯云 36.151.150.140 / Ubuntu 24.04.2 LTS）
 >
 > ```text
-> ✅ docker compose config        通过
-> ✅ docker compose up -d         5 个核心服务全部 healthy
-> ✅ scripts/health-check.sh      5/5 [OK]，退出码 0
-> ✅ python -m pytest             51 passed（24 单元 + 27 冒烟）
-> ✅ 数据生成                     MySQL 5 表 + Kafka 31,660 条事件
-> ✅ 数据持久化                   down / up 后数据完全保留
+> ✅ Sprint 0  docker compose up -d 5 个核心服务 healthy；health-check 5/5；pytest 51 passed
+> ✅ Sprint 1  Flink 8 作业 + Routine Load 8/8 RUNNING；health-check 11/11；
+>              pytest 74 passed；ADS 与 MySQL 精确对账（GMV 精确到分）
+> ✅ Sprint 6  Nginx + systemd 直装上线；/data/ 看板可访问；API GMV == MySQL GMV；
+>              只读账号写操作被 Doris 拒绝；pytest 55 单元 + 17 接口冒烟
 > ```
 >
 > 逐项证据见
-> [`docs/sprint/SPRINT_0_VERIFICATION_STATUS.md`](docs/sprint/SPRINT_0_VERIFICATION_STATUS.md)。
+> [`docs/sprint/SPRINT_0_VERIFICATION_STATUS.md`](docs/sprint/SPRINT_0_VERIFICATION_STATUS.md)、
+> [`docs/sprint/SPRINT_1_VERIFICATION_STATUS.md`](docs/sprint/SPRINT_1_VERIFICATION_STATUS.md)、
+> [`docs/sprint/SPRINT_6.md`](docs/sprint/SPRINT_6.md)。
 
 ---
 
@@ -790,6 +799,9 @@ Sprint 1  ✅ Kafka → Flink → Doris 实时数仓
              实时 GMV / 订单量 / 支付 / 退款 / UV-PV / 类目销售
              8 个 Flink 作业 + 8 个 Routine Load，指标与 MySQL 精确对账
    ↓
+Sprint 6  ✅ 数据后台 + 前后端（**顺序前移**，先让数据可访问）
+             Nginx + FastAPI 只读 API + Vue 看板，访问 http://<ip>/data/
+   ↓
 Sprint 2     Spark + Hive + HDFS
    ↓
 Sprint 3     ODS / DWD / DWS / ADS 分层建模（离线链路，与实时同口径对账）
@@ -797,8 +809,6 @@ Sprint 3     ODS / DWD / DWS / ADS 分层建模（离线链路，与实时同口
 Sprint 4     Airflow 调度
    ↓
 Sprint 5     Iceberg Lakehouse
-   ↓
-Sprint 6     Backend + Dashboard（FastAPI / Spring Boot + Vue）
    ↓
 Sprint 7     LLM + Tool Calling
    ↓
@@ -816,8 +826,15 @@ Sprint 13    毕业论文 + 答辩
 ```
 
 **下一步：Sprint 2 —— Spark + Hive + HDFS（离线链路）。**
-Sprint 1 的实时链路已验收（`bash scripts/verify-sprint-1.sh`），
-验收报告见 [`docs/sprint/SPRINT_1_VERIFICATION_STATUS.md`](docs/sprint/SPRINT_1_VERIFICATION_STATUS.md)。
+Sprint 6（服务层）已提前上线，接口与看板可以直接复用：
+离线链路产出结果后，接进同一个 `/data/api/metrics/*` 即可与实时指标并排对比。
+
+一键验收：
+
+```bash
+bash scripts/verify-sprint-1.sh     # 实时数仓（Kafka → Flink → Doris）
+bash scripts/verify-sprint-6.sh     # 数据服务与前端（Nginx + API + 对账 + 安全）
+```
 
 ---
 
@@ -834,6 +851,9 @@ Sprint 1 的实时链路已验收（`bash scripts/verify-sprint-1.sh`），
 | [`docs/sprint/SPRINT_0_VERIFICATION_STATUS.md`](docs/sprint/SPRINT_0_VERIFICATION_STATUS.md) | Sprint 0 逐项验证状态（已实测 / 待执行） |
 | [`docs/sprint/SPRINT_1.md`](docs/sprint/SPRINT_1.md) | Sprint 1 设计（含实现偏差记录） |
 | [`docs/sprint/SPRINT_1_VERIFICATION_STATUS.md`](docs/sprint/SPRINT_1_VERIFICATION_STATUS.md) | Sprint 1 逐项验证状态与证据 |
+| [`docs/sprint/SPRINT_6.md`](docs/sprint/SPRINT_6.md) | Sprint 6 设计：数据后台 + 前后端（服务层） |
+| [`services/api/README.md`](services/api/README.md) | 数据服务说明（接口、安全、部署） |
+| [`services/web/README.md`](services/web/README.md) | 前端看板说明（无构建步骤、部署、空值约定） |
 | [`sql/metadata/metrics.md`](sql/metadata/metrics.md) | **指标口径字典（唯一权威）** |
 | [`sql/metadata/kafka_topics.md`](sql/metadata/kafka_topics.md) | Topic 与事件格式定义 |
 | [`data-generator/README.md`](data-generator/README.md) | 数据生成器使用说明 |
