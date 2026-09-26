@@ -4,26 +4,24 @@
 > 离线链路（Spark → Iceberg on HDFS/S3 → Hive）、以及基于 **LangGraph + LLM + MCP**
 > 的智能数据分析 Agent。
 >
-> **当前进度：Sprint 0 代码已交付（容器运行时验证待执行）。**
+> **当前进度：Sprint 0 已完成并在腾讯云服务器上验收通过。**
 >
 > 核心原则：**先工程，再智能。**
 > 数据可靠 → 数据准确 → 数据可查询 → 数据可治理 → Agent 使用数据。
 
-> ⚠️ **验证状态提示**
-> Sprint 0 的代码、SQL、配置与文档已完成并通过**静态验证**
-> （`docker compose config`、Bash 语法、24 个单元测试、忽略规则与行尾校验）。
-> 但**容器运行时验证尚未执行** —— 本机原先没有容器运行时，Docker Desktop 已安装，
-> 而启用 WSL2 组件需要**重启系统**。
+> ✅ **验收结果**（腾讯云 36.151.150.140 / Ubuntu 24.04.2 LTS / Docker 29.8.1）
 >
-> 因此 `docker compose up -d`、`health-check.sh`、冒烟测试的**实际结果尚未确认**。
-> 逐项状态见
-> [`docs/sprint/SPRINT_0_VERIFICATION_STATUS.md`](docs/sprint/SPRINT_0_VERIFICATION_STATUS.md)。
->
-> 重启后执行一条命令即可完成全部验收：
->
-> ```bash
-> bash scripts/verify-sprint-0.sh
+> ```text
+> ✅ docker compose config        通过
+> ✅ docker compose up -d         5 个核心服务全部 healthy
+> ✅ scripts/health-check.sh      5/5 [OK]，退出码 0
+> ✅ python -m pytest             51 passed（24 单元 + 27 冒烟）
+> ✅ 数据生成                     MySQL 5 表 + Kafka 31,660 条事件
+> ✅ 数据持久化                   down / up 后数据完全保留
 > ```
+>
+> 逐项证据见
+> [`docs/sprint/SPRINT_0_VERIFICATION_STATUS.md`](docs/sprint/SPRINT_0_VERIFICATION_STATUS.md)。
 
 ---
 

@@ -445,8 +445,10 @@ docker compose config                # 校验并打印解析后的配置
 docker compose config --quiet        # 仅校验语法
 
 # ---------- 数据生成 ----------
-docker compose run --rm data-generator python -m src.generate_mysql_data
-docker compose run --rm data-generator python -m src.generate_events
+docker compose run --rm -T data-generator python -m src.generate_mysql_data --reset
+docker compose run --rm -T data-generator python -m src.generate_events
+# 说明：加 --reset 先清空业务表，避免重复运行造成主键冲突；
+#       -T 关闭 TTY 分配（CI / 非交互环境必需）
 
 # ---------- 测试 ----------
 python -m pytest                     # 全部
@@ -481,7 +483,7 @@ docker compose exec doris-be mysql -h 172.28.0.10 -P 9030 -uroot -e "SHOW BACKEN
 
 | Sprint | 主题 | 状态 |
 | --- | --- | --- |
-| **0** | **项目初始化与基础数据环境** | ✅ 代码已完成；⏳ 容器验证待执行 |
+| **0** | **项目初始化与基础数据环境** | ✅ **已完成并验收通过** |
 | 1 | Kafka + Flink + Doris 实时数仓 | ⏳ 下一步 |
 | 2 | Spark + Hive + HDFS | 未开始 |
 | 3 | ODS / DWD / DWS / ADS | 未开始 |
@@ -496,24 +498,24 @@ docker compose exec doris-be mysql -h 172.28.0.10 -P 9030 -uroot -e "SHOW BACKEN
 | 12 | 测试 + 性能优化 | 未开始 |
 | 13 | 毕业论文 + 答辩 | 未开始 |
 
-### 15.1 Sprint 0 验证状态
+### 15.1 Sprint 0 验收结果
 
-Sprint 0 的代码、配置、SQL 与文档已完成并提交，**静态验证全部通过**
-（`docker compose config`、Bash 语法、24 个单元测试、忽略规则与行尾校验）。
+已在**腾讯云服务器**（Ubuntu 24.04.2 LTS / Docker 29.8.1 / Compose v5.5.1）
+完成全部容器验收：
 
-但**容器运行时验证尚未执行**：Docker Desktop 已安装，启用 WSL2 组件需要
-重启系统，重启前 daemon 不可用。
-
-> 逐项状态见 [`docs/sprint/SPRINT_0_VERIFICATION_STATUS.md`](docs/sprint/SPRINT_0_VERIFICATION_STATUS.md)。
-> **禁止把未验证项写成已验证项。**
-
-恢复验证：
-
-```bash
-bash scripts/verify-sprint-0.sh
+```text
+✅ docker compose config         通过
+✅ docker compose up -d          5 个核心服务全部 healthy
+✅ scripts/health-check.sh       5/5 [OK]，退出码 0
+✅ python -m pytest              51 passed（24 单元 + 27 冒烟）
+✅ 数据生成                      MySQL 5 表 + Kafka 4 Topic（31,660 条事件）
+✅ 数据持久化                    down / up 后数据完全保留
 ```
+
+逐项证据见
+[`docs/sprint/SPRINT_0_VERIFICATION_STATUS.md`](docs/sprint/SPRINT_0_VERIFICATION_STATUS.md)。
 
 ### 15.2 边界要求
 
 > **未经确认，不要开始 Sprint 1。**
-> 必须先在容器中跑通 Sprint 0 验收，确认基础环境稳定后再进入下一层。
+> Sprint 0 已稳定，下一层可以从 Kafka + Flink + Doris 实时数仓开始。

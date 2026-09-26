@@ -50,6 +50,8 @@ volumes:
     name: data-platform-doris-be-storage
   doris-be-log:
     name: data-platform-doris-be-log
+  data-generator-state:
+    name: data-platform-data-generator-state
 
 services:
 
@@ -262,6 +264,17 @@ services:
   # ==========================================================
   # Apache Doris BE — 后端（存储与计算）
   #   BE 启动时会自动向 FE 注册：ALTER SYSTEM ADD BACKEND
+  #
+  # ⚠️ 已知上游问题与处理方式
+  #   实测 apache/doris:be-4.1.4 的 entry_point.sh 在 check_be_status
+  #   检测到 BE 就绪后即返回，main() 结束导致容器 PID 1 退出，
+  #   Docker 随即终止 doris_be 并按 restart 策略重启，
+  #   形成「每 ~15 秒重启一次」的循环（RestartCount 持续增长，
+  #   但无 OOM、ExitCode=0）。
+  #   因此这里用 infrastructure/doris/be-keepalive.sh 包装：
+  #   先执行原始初始化完成注册，再在前台保活 BE。
+  #   上游修复后可移除 command 覆盖，恢复镜像默认 entrypoint。
+  #   详见 docs/development-environment.md「已知问题」。
   # ==========================================================
   doris-be:
     image: apache/doris:be-${DORIS_VERSION:-4.1.4}
@@ -278,6 +291,8 @@ services:
       # 单机环境必须限制 BE 内存，否则默认值会吃满宿主机内存
       # （BE 默认 mem_limit 为物理内存的 80%）
       BE_MEM_LIMIT: ${DORIS_BE_MEM_LIMIT:-4294967296}
+    # 覆盖镜像默认 entrypoint，改用保活包装（原因见上方说明）
+    entrypoint: ["/bin/bash", "/opt/doris-be-keepalive.sh"]
     ports:
       - "${DORIS_BE_HTTP_PORT:-8040}:8040"
       # 9050 / 9060 为 BE 内部心跳与 brpc 端口，仅在集群内使用，不映射到宿主机
@@ -286,6 +301,8 @@ services:
       - doris-be-log:/opt/apache-doris/be/log
       # BE 的 entry_point.sh 会自动执行此目录下的 *.sql / *.sh
       - ./sql/doris:/docker-entrypoint-initdb.d:ro
+      # Doris BE 保活包装（规避上游 entry_point.sh 提前退出问题）
+      - ./infrastructure/doris/be-keepalive.sh:/opt/doris-be-keepalive.sh:ro
     # Doris 需要较高的文件描述符上限（容器默认 soft nofile 仅 1024）
     ulimits:
       nofile:
@@ -340,6 +357,13 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}
       MINIO_BUCKET: ${MINIO_BUCKET:-lakehouse}
     volumes:
+      # 源码挂载：便于本地改动立即生效，无需重建镜像
       - ./data-generator:/app
+      # 快照目录单独用命名卷
+      # 原因：容器以非 root 的 appuser 运行，而 ./data-generator 由宿主机
+      #       以 root/其他属主挂载，导致 /app/state 不可写
+      #       （实测 PermissionError: '/app/state/dataset_snapshot.json'）。
+      #       命名卷由 Docker 初始化时会继承镜像内 /app/state 的权限。
+      - data-generator-state:/app/state
     networks:
       - data-platform

@@ -32,14 +32,27 @@
 CREATE DATABASE IF NOT EXISTS `ecommerce`;
 
 -- ------------------------------------------------------------
--- 2. 单副本默认值
+-- 2. 关于副本数（重要，实测结论）
 --
--- 关键：Doris 建表默认 replication_num = 3，而 Sprint 0 只有 1 个 BE，
---       若不修改默认值，任何不带 PROPERTIES 的建表都会失败。
---       SPRINT_0.md 第 11 节亦明确要求 replication_num = 1。
---       此处设置全局默认值，使后续 Sprint 建表无需重复声明。
+-- SPRINT_0.md 第 11 节要求 test_connection 表使用 replication_num = 1，
+-- 本文件在建表语句的 PROPERTIES 中显式声明。
+--
+-- !! 注意：不存在名为 default_replication_num 的系统变量 !!
+--   实测 Doris 4.1.4：
+--     ALTER SYSTEM SET default_replication_num = 1;
+--     -> ERROR 1105: mismatched input 'default_replication_num'
+--                    expecting 'LOAD'
+--     SET default_replication_num = 1;
+--     -> ERROR 1105: Unknown system variable 'default_replication_num'
+--   若在初始化脚本中使用该语句，会直接中断整个脚本，
+--   导致后续建表与插入都不执行（曾实际发生过）。
+--
+--   因此：**每张表都必须显式写 PROPERTIES("replication_num" = "1")**。
+--   不加 PROPERTIES 时 Doris 默认 replication_num = 3，
+--   单 BE 环境会报：
+--     replication num should be less than the number of available
+--     backends. replication num is 3, available backend num is 1
 -- ------------------------------------------------------------
-ALTER SYSTEM SET default_replication_num = 1;
 
 USE `ecommerce`;
 
@@ -58,10 +71,20 @@ PROPERTIES (
 );
 
 -- ------------------------------------------------------------
--- 4. 测试数据（幂等：避免容器重建后重复插入）
+-- 4. 测试数据
+--
+-- 说明（实测）：
+--   - Doris 不支持 MySQL 风格的 `DELETE FROM t WHERE ...`
+--     （会报错），DUPLICATE KEY 模型上亦不保证逐行删除语义；
+--   - 也不支持 `INSERT ... SELECT ... WHERE NOT EXISTS` 这种写法。
+--   因此本文件保持最朴素的「建表 + 插入」。
+--
+--   幂等性由执行时机保证：BE 仅在
+--   /opt/apache-doris/be/storage/data 不存在时（即首次启动、
+--   数据卷为空）才执行本目录下的 SQL。容器重启不会重复插入。
+--   如需彻底重跑，请删除数据卷：
+--     docker compose down -v && docker compose up -d
 -- ------------------------------------------------------------
-DELETE FROM `test_connection` WHERE `id` = 1;
-
 INSERT INTO `test_connection` VALUES
     (1, 'doris connection ok', NOW());
 

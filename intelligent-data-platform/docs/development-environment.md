@@ -1,46 +1,112 @@
 # 开发环境说明（Development Environment）
 
-> 文档版本：V1.0
+> 文档版本：V1.2
 > 更新日期：2026-09-26
 > 适用 Sprint：Sprint 0
 >
-> 本文档记录**实际使用的宿主机环境、镜像版本、端口分配与版本选型依据**。
+> 本文档记录**实际使用的运行环境、镜像版本、端口分配与版本选型依据**。
 > 原则：**不使用 `latest`，不猜测版本**。所有版本均来自官方仓库实际查证，
 > 并记录镜像 digest 以便复现。
 
 ---
 
-## 1. 宿主机环境（实测）
+## 0. 运行环境（Sprint 0 验收环境）
 
-以下为 Sprint 0 开发时实际探测到的环境信息。
+Sprint 0 的完整验收在**腾讯云服务器**上完成。
+
+| 项目 | 值 |
+| --- | --- |
+| 实例 | 腾讯云轻量应用服务器 `lavm-txyjj7xzr7` |
+| 规格 | 4 核 / 16 GB / 100 GB 通用型 SSD |
+| 操作系统 | Ubuntu 24.04.2 LTS（内核 6.8.0-53-generic） |
+| CPU | Intel Xeon Gold 6148（支持 AVX2 / AVX512F） |
+| 公网 IP | `36.151.150.140` |
+| 内网 IP | `172.16.0.10` |
+| 应用目录 | `/opt/data-platform` |
+| 登录 | `ssh -i ~/.ssh/suntree.pem root@36.151.150.140` |
+
+容器运行时（实测版本）：
+
+| 项目 | 版本 |
+| --- | --- |
+| Docker Engine | 29.8.1 |
+| Docker Compose | v5.5.1 |
+| containerd | 2.3.5 |
+| Python（宿主，仅用于 pytest） | 3.12.3（venv 在 `/opt/data-platform/.venv`） |
+
+### 0.1 服务器网络特殊性（重要）
+
+该服务器位于中国大陆网络环境，与本地开发机有两个关键差异：
+
+| 目标 | 服务器实测 | 处理方式 |
+| --- | --- | --- |
+| 安装 Docker | `get.docker.com` 被重置（Connection reset） | 改用清华镜像的 `docker-ce` apt 源 |
+| 拉取镜像 | `registry-1.docker.io` / `auth.docker.io` 超时不可达 | 配置国内 registry mirror |
+
+**镜像源实测结论**：
+
+```text
+docker.1panel.live     可用（MySQL / Kafka / MinIO 拉取成功）
+docker.m.daocloud.io   可用且较快（Doris FE 拉取成功）
+docker.1ms.run         可用但超时
+docker.xuanyuan.me     需付费（提示 free-vs-pro）
+其余（nju / rat.dev / dockerhub.icu / amingg / ketches / fast360）不可用
+```
+
+**加速手段**：SSH 反向隧道共享本地代理可显著提速——
+隧道建立后 Doris FE（1.6 GB）仅 12 秒拉取完成，而经镜像站需 30 分钟以上。
+
+```bash
+# 本地执行，把本地代理暴露给服务器
+ssh -i ~/.ssh/suntree.pem -N -R 127.0.0.1:7890:127.0.0.1:7890 root@36.151.150.140
+# 服务器上让 docker 走代理
+mkdir -p /etc/systemd/system/docker.service.d
+cat > /etc/systemd/system/docker.service.d/http-proxy.conf <<'EOF'
+[Service]
+Environment="HTTP_PROXY=http://127.0.0.1:7890"
+Environment="HTTPS_PROXY=http://127.0.0.1:7890"
+Environment="NO_PROXY=localhost,127.0.0.1,::1,minio,mysql,kafka,doris-fe,doris-be,172.16.0.0/12,10.0.0.0/8"
+EOF
+systemctl daemon-reload && systemctl restart docker
+```
+
+### 0.2 内核参数
+
+Apache Doris 要求 `vm.max_map_count >= 2000000`。服务器初始值为 1048576，
+已通过 `/etc/sysctl.d/99-data-platform.conf` 持久化调整：
+
+```ini
+vm.max_map_count = 2000000
+vm.swappiness = 10
+```
+
+---
+
+## 1. 本地开发机环境（实测）
+
+项目同时在本地 Windows 开发机上维护源码。
 
 | 项目 | 实测值 |
 | --- | --- |
-| 操作系统 | Microsoft Windows 11 Home China |
-| 系统版本 | 10.0.26200（Build 26200） |
-| CPU | 16 逻辑核心 |
-| 内存 | 15.7 GB |
-| 系统盘可用空间 | 43.1 GB（C:） |
-| 当前用户是否管理员 | **否**（`IsInRole(Administrator) = False`） |
-| Hyper-V 虚拟机监控程序 | 未呈现（`HypervisorPresent = False`） |
-| 固件虚拟化 | 已启用（`VirtualizationFirmwareEnabled = True`） |
+| 操作系统 | Microsoft Windows 11 Home China（Build 26200） |
+| CPU / 内存 | 16 逻辑核心 / 15.7 GB |
 | Git | 2.54.0.windows.1 |
-| Python | 3.13.14（`PythonSoftwareFoundation.Python.3.13`，另有 3.10 并存） |
-| pip | 26.1.2 |
-| winget | 1.29.380.0（源：winget / msstore） |
+| Python | 3.13.14 |
+| Bash | Git for Windows（`D:\Program Files\Git\bin\bash.exe`） |
 
-### 1.1 容器运行时
+> 本地 Docker Desktop 4.91.0 已安装，但启用 WSL2 组件需要重启系统，
+> 因此**容器验证统一在服务器上执行**。
 
-Sprint 0 的 `docker compose up -d` 需要**容器运行时**。本机初始状态为：
+### 1.1 本地已知问题
 
-```text
-Docker Desktop   : 未安装
-Docker CLI       : 不在 PATH
-Podman / nerdctl : 未安装
-WSL 发行版       : 无（`wsl -l -v` 返回 REGDB_E_CLASSNOTREG）
-```
+| 问题 | 说明 |
+| --- | --- |
+| `~/.ssh/config` 带 UTF-8 BOM | Git Bash 的 OpenSSH 报 `Bad configuration option: \357\273\277host`；Windows 自带 OpenSSH 容忍 BOM 所以此前未暴露。已备份为 `config.bom-backup-*` 并移除 BOM |
+| 全局 `core.autocrlf=true` | 会导致 Shell 脚本被检出为 CRLF；已由仓库 `.gitattributes` 强制 `*.sh`/`*.sql`/`*.yml` 为 LF |
 
-Docker Desktop 通过 **winget 安装成功**：
+### 1.2 本地 Docker Desktop（安装记录）
+
+本地 Docker Desktop 通过 **winget 安装成功**：
 
 ```powershell
 winget install --id Docker.DockerDesktop --accept-package-agreements --accept-source-agreements
@@ -56,39 +122,34 @@ winget install --id Docker.DockerDesktop --accept-package-agreements --accept-so
 - Docker Desktop **未加入系统 PATH**，需要手动补充：
   `C:\Program Files\Docker\Docker\resources\bin`
 
-安装结果：
-
 | 项目 | 实测值 |
 | --- | --- |
 | Docker Desktop 版本 | 4.91.0 |
 | Docker Client 版本 | 29.8.0（API 1.56） |
 | Docker Compose 版本 | v5.5.1 |
-| Docker Engine 版本 | _待回填（重启并启动 Docker Desktop 后确认）_ |
+| Docker Engine | 重启前不可用（daemon 未运行） |
 
 > ⚠️ **重启前 daemon 不可用**：
 > `docker info` 会报
 > `failed to connect to the docker API at npipe:////./pipe/docker_engine`。
 > 这是预期行为，不是配置错误。
-> 重启后需首次启动 Docker Desktop、接受服务条款，并确认使用 **WSL 2 backend**。
+>
+> **Sprint 0 的容器验收已在腾讯云服务器上完成**（见第 0 节），
+> 不依赖本地 daemon。
 
-#### 磁盘空间建议（重要）
+#### 磁盘空间建议
 
 | 盘符 | 总量 | 可用 |
 | --- | --- | --- |
 | C: | 145.4 GB | 38.7 GB |
 | **D:** | **329.1 GB** | **296.3 GB** |
 
-Doris BE 镜像约 2.9 GB、FE 约 1.6 GB、Kafka 约 0.2 GB、MySQL 约 0.2 GB、
-MinIO 约 0.06 GB，**镜像合计约 5 GB**；加上 Kafka 日志段、Doris BE 存储与
-MySQL 数据文件，运行时占用可能达到 10~15 GB。
-
-C 盘可用空间偏紧，**建议在首次启动 Docker Desktop 前**把镜像存储位置改到 D 盘：
+Doris BE 镜像约 9.3 GB、FE 约 4.3 GB，全部镜像合计约 15 GB；
+加上运行数据，**建议把镜像存储位置改到 D 盘**：
 
 ```text
 Docker Desktop → Settings → Resources → Disk image location → D:\DockerData
 ```
-
-若保持默认（`%LOCALAPPDATA%\Docker\wsl`），需确保 C 盘剩余空间 > 20 GB。
 
 ---
 
@@ -289,13 +350,28 @@ cp .env.example .env
 
 ## 8. 已知环境风险
 
+### 8.1 已在服务器上实测解决的问题
+
+| 问题 | 根因 | 处理 |
+| --- | --- | --- |
+| Doris BE 每 ~15 秒重启 | 上游 `be-4.1.4` 的 `entry_point.sh` 在 `check_be_status` 成功后即返回，容器 PID 1 退出 | `infrastructure/doris/be-keepalive.sh` 保活包装；已验证 150 秒 0 重启 |
+| Doris 初始化 SQL 中断 | `ALTER SYSTEM SET default_replication_num` 在 4.1.4 不存在该系统变量 | 删除该语句，改为每张表显式 `PROPERTIES("replication_num"="1")` |
+| MinIO 初始化失败 | minio 镜像基于 BusyBox，**无 sed/awk/grep/curl/tar** | init 脚本改 POSIX 参数展开；healthcheck 改用 `mc ls` |
+| 数据生成器写快照失败 | 非 root 用户 + 宿主机属主挂载 | 快照目录改用命名卷 |
+| `vm.max_map_count` 偏低 | 默认 1048576 < Doris 要求 2000000 | `/etc/sysctl.d/99-data-platform.conf` |
+| Docker Hub 不可达 | 中国大陆网络 | 国内 registry mirror + SSH 反向隧道代理 |
+
+### 8.2 仍需注意的风险
+
 | 风险 | 影响 | 应对 |
 | --- | --- | --- |
-| Docker Desktop 需管理员安装并重启 | 无法立即执行 `compose up` 验证 | 安装后按 README 快速启动步骤执行 |
-| C 盘可用空间 43.1 GB | Doris BE 镜像约 2.9 GB，FE 约 1.6 GB，全部镜像合计约 5 GB；加上运行数据可能超过 15 GB | 启动前确认剩余空间 > 20 GB；必要时 `docker system prune` |
-| 内存 15.7 GB | Doris FE (JVM) + BE + Kafka 同时运行占用较高 | 已为 FE/BE 设置合理 JVM/内存参数，避免默认值过大 |
-| `172.28.0.0/24` 网段冲突 | Doris FE/BE 无法启动 | 通过 `.env` 改子网与静态 IP |
+| `apache/doris:be-4.1.4` 的 entrypoint 上游缺陷 | 若移除保活包装会重新出现重启循环 | 保留 `be-keepalive.sh`；上游修复后可移除 `entrypoint` 覆盖 |
 | MinIO 镜像为社区再托管 | 供应链风险 | 已固定 digest，并记录替代方案 |
+| 服务器无 SWAP | 后续同时运行 Flink/Spark 可能内存紧张 | 增加 swap 或升级内存规格 |
+| 镜像加速站为第三方服务 | 可用性会变化 | `.deploy/README.md` 记录了可用源清单与切换方法 |
+| 内存 16 GB | Doris FE (JVM) + BE + Kafka 同时运行占用较高 | 已为 FE/BE 设置 JVM/内存参数（FE `-Xmx2048m`、BE `BE_MEM_LIMIT`） |
+| `172.28.0.0/24` 网段冲突 | Doris FE/BE 无法启动 | 通过 `.env` 改子网与静态 IP |
+| Doris BE 列表存在遗留 backend | 排查期间注册的 `172.28.0.12` | 不影响功能；可执行 `ALTER SYSTEM DROP BACKEND "172.28.0.12:9050"` 清理 |
 
 ---
 
@@ -304,3 +380,6 @@ cp .env.example .env
 | 日期 | 组件 | 变更 | 原因 |
 | --- | --- | --- | --- |
 | 2026-09-26 | 全部 | 初始记录 | Sprint 0 环境建立 |
+| 2026-09-26 | Docker / Doris / MinIO | 补记腾讯云服务器环境、镜像源适配、内核调优 | 在服务器完成 Sprint 0 全部容器验收 |
+| 2026-09-26 | Doris BE | 新增保活包装，记录上游 entrypoint 缺陷 | 实测 BE 每 15 秒重启 |
+| 2026-09-26 | MySQL | 确认使用官方 `mysql` 库镜像（非 `mysql/mysql-server`） | 后者 2023 年起停更 |

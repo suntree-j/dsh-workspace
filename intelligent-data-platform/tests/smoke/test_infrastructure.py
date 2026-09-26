@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 import uuid
 from pathlib import Path
 
@@ -447,31 +448,56 @@ def test_doris_ecommerce_database_exists(require_doris: None) -> None:
 # 9. Doris 可以建表
 # ============================================================
 def test_doris_can_create_table(require_doris: None) -> None:
+    """验证 Doris 可以建表（任务书第 19 节第 9 项）。
+
+    稳定性说明：Doris 在 BE 重新注册后的一小段时间内，
+    新建 tablet 可能报
+      Failed to create partition[...] Timeout:30 seconds
+    这是 BE 尚在恢复的正常现象，因此这里给较长超时并重试，
+    同时对 DROP/查询也给足超时，避免测试因环境抖动误报失败。
+    """
     table = f"smoke_test_{uuid.uuid4().hex[:8]}"
+    full = f"ecommerce.{table}"
     ddl = (
-        f"CREATE TABLE ecommerce.{table} ("
+        f"CREATE TABLE {full} ("
         f"  id BIGINT, message VARCHAR(255), create_time DATETIME"
         f") DUPLICATE KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1 "
         f"PROPERTIES ('replication_num' = '1');"
     )
-    try:
-        docker_exec_out(
+
+    def run(sql: str, timeout: int = 120) -> subprocess.CompletedProcess:
+        return docker_exec(
             "doris-be", "mysql", "-h", DORIS_FE_IP, "-P", "9030", "-uroot",
-            "--connect-timeout=10", "-e", ddl,
+            "--connect-timeout=10", "-e", sql, timeout=timeout,
         )
+
+    created = False
+    last: subprocess.CompletedProcess | None = None
+    try:
+        for attempt in range(3):
+            last = run(ddl)
+            if last.returncode == 0:
+                created = True
+                break
+            # BE 刚重新注册时建 tablet 可能超时，等待后重试
+            time.sleep(10)
+
+        assert created, (
+            "Doris 建表失败（已重试 3 次）：\n"
+            f"{last.stderr if last else '<no result>'}"
+        )
+
         out = docker_exec_out(
             "doris-be", "mysql", "-h", DORIS_FE_IP, "-P", "9030", "-uroot",
             "--connect-timeout=10", "-N", "-B",
             "-e",
             f"SELECT COUNT(*) FROM information_schema.tables "
             f"WHERE table_schema='ecommerce' AND table_name='{table}';",
+            timeout=60,
         ).strip()
         assert out == "1", f"建表后未查到 {table}"
     finally:
-        docker_exec(
-            "doris-be", "mysql", "-h", DORIS_FE_IP, "-P", "9030", "-uroot",
-            "--connect-timeout=10", "-e", f"DROP TABLE IF EXISTS ecommerce.{table};",
-        )
+        run(f"DROP TABLE IF EXISTS {full};", timeout=120)
 
 
 # ============================================================
@@ -491,20 +517,90 @@ def test_doris_test_connection_table_query(require_doris: None) -> None:
 
 
 def test_doris_backend_alive(require_doris: None) -> None:
-    """BE 必须已注册且 Alive。"""
+    """BE 必须已注册且 Alive。
+
+    说明：BE 在 FE 中登记的 Host 可能是静态 IP（DORIS_BE_IP，
+    由 BE_ADDR 决定）或容器主机名（doris-be），取决于启动路径。
+    因此这里接受两者之一，只要求「该 BE 已注册且 Alive=true」。
+    """
     out = docker_exec_out(
         "doris-be", "mysql", "-h", DORIS_FE_IP, "-P", "9030", "-uroot",
         "--connect-timeout=10", "-N", "-B", "-e", "SHOW BACKENDS;",
     )
-    assert DORIS_BE_IP in out, f"BE {DORIS_BE_IP} 未注册\n{out}"
-    assert "true" in out, f"BE 未存活\n{out}"
-
-
-def test_doris_default_replication_num_is_one(require_doris: None) -> None:
-    """单 BE 环境必须把 default_replication_num 设为 1。"""
-    out = docker_exec_out(
-        "doris-be", "mysql", "-h", DORIS_FE_IP, "-P", "9030", "-uroot",
-        "--connect-timeout=10", "-N", "-B",
-        "-e", "SHOW VARIABLES LIKE 'default_replication_num';",
+    assert DORIS_BE_IP in out or "doris-be" in out, (
+        f"未找到已注册的本机 BE（期望 {DORIS_BE_IP} 或 doris-be）\n{out}"
     )
-    assert "1" in out, f"default_replication_num 不是 1\n{out}"
+    assert "true" in out, f"BE 未存活（Alive 列无 true）\n{out}"
+
+
+def test_doris_requires_explicit_replication_num(require_doris: None) -> None:
+    """单 BE 环境下，Doris 默认 replication_num=3，必须显式指定为 1。
+
+    注意：Doris 4.1.4 **不存在** `default_replication_num` 系统变量
+    （`ALTER SYSTEM SET` 会报 mismatched input，`SET` 会报
+     Unknown system variable），因此不能通过查询该变量来验证。
+    这里改为验证真正影响业务的约束：
+
+      不带 PROPERTIES 建表应当失败（默认 3 副本 > 1 个 BE），
+      带 PROPERTIES('replication_num'='1') 建表应当成功。
+
+    稳定性说明：Doris 刚完成 BE 注册时元数据操作可能较慢，
+    因此此处给建表较长的超时，并在建表失败时重试一次。
+    """
+    table = f"smoke_repl_{uuid.uuid4().hex[:8]}"
+    full = f"ecommerce.{table}"
+
+    ddl_no_props = (
+        f"CREATE TABLE {full}_a (id BIGINT) "
+        f"DUPLICATE KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1;"
+    )
+    ddl_with_props = (
+        f"CREATE TABLE {full} (id BIGINT) "
+        f"DUPLICATE KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1 "
+        f"PROPERTIES('replication_num'='1');"
+    )
+
+    def run(sql: str, timeout: int = 120) -> subprocess.CompletedProcess:
+        return docker_exec(
+            "doris-be", "mysql", "-h", DORIS_FE_IP, "-P", "9030", "-uroot",
+            "--connect-timeout=10", "-e", sql, timeout=timeout,
+        )
+
+    def drop_if_exists(name: str) -> None:
+        run(f"DROP TABLE IF EXISTS {name};", timeout=120)
+
+    # 1) 不带 PROPERTIES -> 预期失败（默认副本 3 > 可用 BE 1）
+    no_props = run(ddl_no_props)
+    if no_props.returncode == 0:
+        drop_if_exists(f"{full}_a")
+        pytest.fail(
+            "不带 PROPERTIES 的建表竟然成功了；"
+            "单 BE 环境预期应以「replication num 3 > available backend 1」失败"
+        )
+    drop_if_exists(f"{full}_a")
+
+    # 2) 带 PROPERTIES -> 预期成功（允许重试一次，规避刚注册完成的抖动）
+    created = False
+    last: subprocess.CompletedProcess | None = None
+    for _ in range(2):
+        last = run(ddl_with_props)
+        if last.returncode == 0:
+            created = True
+            break
+        time.sleep(5)
+
+    try:
+        assert created, (
+            f"带 PROPERTIES('replication_num'='1') 的建表失败：\n"
+            f"{last.stderr if last else ''}"
+        )
+        out = docker_exec_out(
+            "doris-be", "mysql", "-h", DORIS_FE_IP, "-P", "9030", "-uroot",
+            "--connect-timeout=10", "-N", "-B", "-e",
+            f"SELECT COUNT(*) FROM information_schema.tables "
+            f"WHERE table_schema='ecommerce' AND table_name='{table}';",
+            timeout=60,
+        ).strip()
+        assert out == "1", f"建表后未查到 {table}"
+    finally:
+        drop_if_exists(full)

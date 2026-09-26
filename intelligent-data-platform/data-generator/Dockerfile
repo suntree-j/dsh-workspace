@@ -38,7 +38,12 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY . /app
 
 # 运行时状态目录（快照会写入这里）
-RUN mkdir -p /app/state
+#
+# 权限说明：容器以非 root 的 appuser 运行，而 docker-compose.yml 会把
+# 宿主机的 ./data-generator 挂载到 /app（覆盖此处权限）。
+# 因此这里放开 state 目录权限，保证挂载后仍可写入快照；
+# 生产环境应改用命名卷或预先 chown。
+RUN mkdir -p /app/state && chmod 0777 /app/state
 
 # 以非 root 运行
 RUN useradd --create-home --uid 1000 appuser \

@@ -118,7 +118,13 @@ check_kafka() {
 }
 
 # ------------------------------------------------------------
-# MinIO：检查健康接口
+# MinIO：健康检查 + bucket 存在性
+#
+# 注意：minio 镜像基于 BusyBox，**不含 curl / wget / nc / sed / grep**，
+#       只有 sh 内建、busybox 基础工具与 /usr/bin/mc。
+#       因此不能用 curl 探健康接口，只能用 mc。
+#       同时 `mc ls` 成功即说明服务可用，因此把「服务可用」与
+#       「bucket 存在」合并为一次探测的两种情况。
 # ------------------------------------------------------------
 check_minio() {
     if ! container_running minio; then
@@ -126,17 +132,19 @@ check_minio() {
         return
     fi
 
-    if docker exec minio curl -fsS http://localhost:9000/minio/health/live >/dev/null 2>&1; then
-        # 确认 lakehouse bucket 存在
-        if docker exec minio sh -c \
-            "MC_HOST_local=\"http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@localhost:9000\" mc ls local/ 2>/dev/null" \
-            | grep -q "${MINIO_BUCKET}"; then
-            record "MinIO" 1 "lakehouse bucket 存在"
-        else
-            record "MinIO" 0 "服务正常，但 bucket ${MINIO_BUCKET} 不存在（见 minio-init 容器日志）"
-        fi
+    # mc ls <alias>/<bucket>：服务可用且 bucket 存在 -> 退出 0
+    if docker exec minio sh -c \
+        "MC_HOST_local='http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@localhost:9000'; export MC_HOST_local; mc ls local/${MINIO_BUCKET} >/dev/null 2>&1"; then
+        record "MinIO" 1 "服务可用，bucket ${MINIO_BUCKET} 存在"
+        return
+    fi
+
+    # bucket 不存在时再判断服务本身是否可用
+    if docker exec minio sh -c \
+        "MC_HOST_local='http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@localhost:9000'; export MC_HOST_local; mc ls local >/dev/null 2>&1"; then
+        record "MinIO" 0 "服务可用，但 bucket ${MINIO_BUCKET} 不存在（见 minio-init 容器日志）"
     else
-        record "MinIO" 0 "健康接口 /minio/health/live 无响应"
+        record "MinIO" 0 "mc 无法连接 MinIO，请检查 MINIO_ROOT_USER / MINIO_ROOT_PASSWORD"
     fi
 }
 
