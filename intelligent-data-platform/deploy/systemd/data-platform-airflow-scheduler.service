@@ -32,6 +32,26 @@ User=dpaiflow
 Group=dpapi
 EnvironmentFile=/opt/data-platform/airflow/airflow.env
 
+# !! 必须给一个可写的 HOME，否则任务里的 `docker compose` 会失败 !!
+#
+#   实测踩坑（Sprint 4，DAG 全线失败后定位到）：
+#   docker CLI 要读写 $HOME/.docker/config.json。本单元开了
+#   ProtectHome=yes，/home/dpaiflow 变成不可访问，于是 docker 报
+#       WARNING: Error loading config file: open /home/dpaiflow/.docker/config.json: permission denied
+#       unknown shorthand flag: 'f' in -f
+#   第二行才是致命的：**docker 因此没能把 `compose` 识别为子命令**，
+#   把 -f 当成了自己的参数。
+#   后果极具迷惑性：DAG 第一步"暂停实时链路"里的 compose stop 全部失败，
+#   而那个函数当时把 stderr 吞了、还返回成功 ——
+#   表现为"任务 success，但实时链路根本没暂停"，
+#   接着每个 batch stage 都被内存闸门拒绝，整条 DAG 全线失败。
+#
+#   对照实验（干净地分清了是哪一条属性）：
+#       ProtectHome=yes            → 失败
+#       ProtectSystem=full         → 正常
+#       ProtectHome=yes + 可写HOME → 正常   ← 采用这个，加固一点不丢
+Environment=HOME=/opt/data-platform/airflow
+
 ExecStart=/opt/data-platform/.venv-airflow/bin/airflow scheduler
 
 Restart=always

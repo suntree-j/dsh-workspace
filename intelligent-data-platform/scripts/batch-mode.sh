@@ -89,17 +89,52 @@ parse_args() {
 
 pause_realtime() {
     printf '\n%b\n' "${C_BOLD}── 暂停实时链路（为批处理腾出内存）──${C_RESET}"
-    local c stopped=0
+    local c stopped=0 skipped=0 failed=0
     for c in "${REALTIME_STACK_CONTAINERS[@]}"; do
-        if container_running "${c}"; then
-            compose stop "${c}" >/dev/null 2>&1 && { printf '  已暂停 %s\n' "${c}"; stopped=$(( stopped + 1 )); }
-        else
+        if ! container_running "${c}"; then
             printf '  跳过 %s（未运行）\n' "${c}"
+            skipped=$(( skipped + 1 ))
+            continue
+        fi
+
+        # !! 这里绝对不能吞掉 stderr !!
+        #   实测踩坑（Sprint 4，Airflow 里跑 DAG 时暴露）：
+        #   原实现是 `compose stop "${c}" >/dev/null 2>&1 && { printf '已暂停'; }`。
+        #   当 compose stop 失败时 `&&` 短路 —— **既不打印"已暂停"，也不打印错误**，
+        #   函数最后照样输出"已暂停 0 个容器"并返回 0。
+        #   结果：Airflow 看到任务 success，而实时链路根本没暂停，
+        #   紧接着每个 batch stage 都被内存闸门拒绝（可用内存不足），
+        #   整条 DAG 全线失败，日志里却看不到任何"暂停失败"的痕迹。
+        #
+        #   这就是"静默 pass"的典型代价：一个被吞掉的错误，
+        #   最终表现为"任务成功但什么都干不了"，排查方向完全被带偏。
+        local err
+        if err="$(compose stop "${c}" 2>&1)"; then
+            printf '  已暂停 %s\n' "${c}"
+            stopped=$(( stopped + 1 ))
+        else
+            printf '  %b 暂停 %s 失败\n' "${C_RED}[FAIL]${C_RESET}" "${c}"
+            printf '    %s\n' "${err}"
+            failed=$(( failed + 1 ))
         fi
     done
     # 等内存真正释放（容器退出到内存归还有一两秒延迟）
     sleep 5
     printf '  实时链路已暂停 %s 个容器；当前可用内存 %s MB\n' "${stopped}" "$(host_available_mb)"
+
+    # !! "什么都没做"与"做成功了"必须能区分开 !!
+    #   全部跳过（本来就都停着）算成功（幂等）；
+    #   但只要有失败，就必须返回非 0，让调用方停下来。
+    if [ "${failed}" -gt 0 ]; then
+        log_error "${failed} 个容器暂停失败，实时链路未完全停止"
+        log_error "后续批处理会因内存不足被闸门拒绝，已中止"
+        return 1
+    fi
+    if [ "${stopped}" -eq 0 ] && [ "${skipped}" -eq 0 ]; then
+        log_error "没有任何容器被处理（容器清单可能为空）—— 实时链路状态未知"
+        return 1
+    fi
+    return 0
 }
 
 restore_realtime() {
@@ -181,7 +216,12 @@ main() {
         # 暂停实时链路本身不危险，但若此时已有作业在跑，
         # 说明有人正在手工跑批，两边叠加会打穿内存（Sprint 3 的事故形态）。
         require_no_running_jobs || exit 1
-        pause_realtime
+        # 暂停失败必须让调用方知道（Airflow 会据此把任务标成 failed），
+        # 不能"没暂停也报成功" —— 见 pause_realtime 里的踩坑说明。
+        pause_realtime || {
+            log_error "暂停实时链路失败，已中止"
+            exit 1
+        }
         printf '\n'
         log_ok "实时链路已暂停；跑完批处理后请执行： bash scripts/batch-mode.sh --restore-only"
         exit 0
@@ -192,7 +232,10 @@ main() {
 
     local paused=0
     if [ "${KEEP_REALTIME}" -eq 0 ]; then
-        pause_realtime
+        pause_realtime || {
+            log_error "暂停实时链路失败，已中止（未跑批）"
+            exit 1
+        }
         paused=1
     else
         log_warn "按 --keep-realtime 运行：实时链路保持在线，请自行确认内存充裕"

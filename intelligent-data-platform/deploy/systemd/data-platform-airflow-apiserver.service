@@ -40,6 +40,10 @@ User=dpaiflow
 Group=dpapi
 EnvironmentFile=/opt/data-platform/airflow/airflow.env
 
+# 可写 HOME：理由见 data-platform-airflow-scheduler.service 里的详细说明
+# （docker CLI 需要 $HOME/.docker，而 ProtectHome=yes 让 /home 不可访问）
+Environment=HOME=/opt/data-platform/airflow
+
 ExecStart=/opt/data-platform/.venv-airflow/bin/airflow api-server --host 127.0.0.1 --port 8085 --workers 1
 
 Restart=always

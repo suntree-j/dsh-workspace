@@ -30,6 +30,11 @@ User=dpaiflow
 Group=dpapi
 EnvironmentFile=/opt/data-platform/airflow/airflow.env
 
+# 可写 HOME：理由见 data-platform-airflow-scheduler.service 里的详细说明
+# （docker CLI 需要 $HOME/.docker，而 ProtectHome=yes 让 /home 不可访问；
+#  DAG 不由本进程执行，但保持三个单元配置一致，避免以后踩同样的坑）
+Environment=HOME=/opt/data-platform/airflow
+
 ExecStart=/opt/data-platform/.venv-airflow/bin/airflow dag-processor
 
 Restart=always
