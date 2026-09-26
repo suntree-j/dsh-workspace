@@ -1,0 +1,73 @@
+# ============================================================
+# systemd 单元：数据问答 Agent（LLM + Tool Calling）
+# ============================================================
+#
+# 安装位置： /etc/systemd/system/data-platform-agent.service
+# 由 scripts/deploy-agent.sh 拷贝并 enable。
+#
+# 运维命令：
+#   systemctl status data-platform-agent
+#   systemctl restart data-platform-agent
+#   journalctl -u data-platform-agent -n 100 --no-pager
+#   curl -s http://127.0.0.1:8100/health | python3 -m json.tool
+#
+# 为什么与数据服务分成两个单元（而不是塞进同一个进程）：
+#   1) **故障隔离**：LLM 调用慢/被限流/欠费时，只影响问答，
+#      看板与只读接口不受影响；
+#   2) **权限隔离**：Agent 单元拿不到数据库凭据（它的 .env 只读 LLM Key 与
+#      数据服务地址），"Agent 只能用只读能力"由进程边界保证；
+#   3) **独立重启**：换模型/换 Key 只需重启 Agent。
+#
+# 安全设计：
+#   1) 以专用系统用户 dpagent 运行，不用 root；
+#      .env 权限仍为 root:dpapi 0640 —— 因此需要把 dpagent 加入 dpapi 组，
+#      这样它只能**读**配置、不能改（见 scripts/deploy-agent.sh 的说明）；
+#   2) 只监听 127.0.0.1:8100，对外必须经 Nginx（/data/agent/）；
+#   3) 基础加固与数据服务保持一致。
+# ============================================================
+
+[Unit]
+Description=Data Platform Q&A Agent (FastAPI + DeepSeek Tool Calling)
+Documentation=file:/opt/data-platform/docs/sprint/SPRINT_7.md
+After=network-online.target data-platform-api.service
+Wants=network-online.target
+# 依赖数据服务（Agent 的所有取数都经它）：
+# 但用 Wants 而不是 Requires —— 数据服务暂时不可用时 Agent 仍应能启动，
+# /health 会如实报告 data_api.ok=false，等它恢复后自动可用。
+Wants=data-platform-api.service
+
+[Service]
+Type=simple
+User=dpagent
+Group=dpagent
+WorkingDirectory=/opt/data-platform/services/agent
+
+# 应用自己解析 .env（与数据服务同一份 .env，单一配置来源）
+Environment=DATA_PLATFORM_ENV=/opt/data-platform/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+ExecStart=/opt/data-platform/.venv-agent/bin/uvicorn app.main:app \
+    --host 127.0.0.1 --port 8100 --workers 1 --app-dir /opt/data-platform/services/agent
+
+# Agent 要串起多次 LLM 调用 + 多次只读查询，启动后前几十秒可能仍在处理请求；
+# 给足优雅退出时间，避免正在回答的问题被强杀。
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+
+# 基础加固
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=data-platform-agent
+
+[Install]
+WantedBy=multi-user.target

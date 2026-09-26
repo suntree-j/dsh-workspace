@@ -23,6 +23,7 @@ from typing import Any
 from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 from .config import ConfigError, Settings, load_settings
 from .doris import DorisClient, DorisUnavailable
@@ -53,10 +54,13 @@ app = FastAPI(
 
 # 演示环境：只读接口允许跨域，便于本地静态页面直接联调。
 # 注意：这里开放的只有 SELECT 能力，且带行数上限与超时。
+#
+# allow_methods 里必须带上 POST：/query 用 POST 承载 SQL 语句（原因见该接口的说明）。
+# 放开 POST 不改变"只读"这一性质 —— 写操作在 SQL 守卫与数据库权限两层都被拦住。
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
@@ -132,10 +136,15 @@ def index() -> dict[str, Any]:
                 "/metrics/category", "/funnel", "/orders", "/orders/{order_id}",
                 "/meta/metrics", "/meta/tables", "/categories",
                 "/batch/overview", "/batch/reconcile",
+                "POST /query（Agent 专用：动态只读 SQL）",
             ],
             "docs": "/docs",
         },
-        note="所有接口均为只读（Doris 只读账号 + SQL 安全守卫）；/batch/* 为离线链路",
+        note=(
+            "所有接口均为只读（Doris 只读账号 + SQL 安全守卫）；"
+            "/batch/* 为离线链路；POST /query 是 LLM Agent 的执行入口，"
+            "同样只放行 SELECT"
+        ),
     )
 
 
@@ -352,6 +361,78 @@ def meta_tables() -> dict[str, Any]:
         note=(
             "来自 Doris information_schema（只读），含字段注释与所属分层；"
             "同时覆盖实时链路库 ecommerce 与离线链路库 lakehouse_ads"
+        ),
+    )
+
+
+# ============================================================
+# 动态只读查询（Sprint 7：LLM Agent 的执行入口）
+# ============================================================
+class SqlQueryRequest(BaseModel):
+    """一次动态只读查询的请求体。"""
+
+    sql: str = Field(
+        ...,
+        min_length=1,
+        max_length=8000,
+        description="只允许 SELECT；守卫会拒绝多语句、注释、DDL/DML 与白名单外的表",
+    )
+    limit: int = Field(
+        200,
+        ge=1,
+        le=1000,
+        description="本次查询的行数上限（守卫会在此基础上再收敛一次）",
+    )
+
+
+@app.post("/query", summary="执行只读 SQL（Agent 专用入口）")
+def run_query(payload: SqlQueryRequest) -> dict[str, Any]:
+    """执行一条**外部传入**的只读 SQL，并返回结果 + 血缘 + 实际执行的语句。
+
+    ## 为什么这个接口用 POST，而其它接口全是 GET
+
+    项目里其它接口都是 GET（只读语义最直白，也方便直接贴链接）。
+    这里破例用 POST，原因是**长度**而不是语义：
+    LLM 生成的 SQL 常常带多列、多个聚合与 GROUP BY，实测很容易超过 2KB；
+    而 GET 的 SQL 放在查询串里，受 nginx `large_client_header_buffers`
+    与各级代理的 URL 长度限制（通常几 KB），会出现"短问题能问、复杂问题 502"
+    这种极难排查的失败模式。POST 把语句放在请求体里，没有这个上限。
+
+    语义上它仍然是**只读**的：语句必须过 `sqlguard`，
+    只放行 SELECT、表白名单、强制 LIMIT，且连接用的是只读账号 `agent_ro`。
+    Nginx 侧对该路径单独放行 POST，其余路径仍是 `limit_except GET HEAD OPTIONS`。
+
+    ## 为什么返回 `executed_sql`
+
+    守卫会改写语句（补/收 LIMIT）。返回**实际执行的那一条**，
+    才能满足 `AGENTS.md` 第 10.1 节「Agent 不得伪造查询结果」——
+    "我查了这句话"必须可核对，而不是靠调用方自述。
+
+    ## 为什么表名由服务端从 SQL 里提取
+
+    血缘信息用于展示与审计。如果让调用方自报读了哪些表，
+    这个字段就失去了可信度；统一从实际执行的 SQL 里正则提取，
+    与守卫用的是同一套规则（见 `sqlguard.extract_tables`）。
+    """
+    repo = get_repository()
+    doc = get_metrics_doc()
+
+    data, tables, executed_sql = repo.sql_query(payload.sql, max_limit=payload.limit)
+
+    # 从结果列里反推可能涉及的指标口径，让回答能引用"这个数是怎么定义的"。
+    # 只做字段名匹配，不做语义推断 —— 猜错口径比不给出处更糟。
+    columns: list[str] = []
+    if data["rows"]:
+        columns = list(data["rows"][0].keys())
+
+    return envelope(
+        data,
+        tables=tables,
+        metric_definitions=doc.definitions_for(columns),
+        note=(
+            f"动态只读查询，实际执行：{executed_sql}；"
+            "语句已通过 SQL 守卫（仅 SELECT、表白名单、强制 LIMIT），"
+            "并使用只读账号，写操作会被 Doris 拒绝。"
         ),
     )
 

@@ -75,6 +75,12 @@
         <path d="M4 4.5h6.5a3 3 0 0 1 3 3V20a2.4 2.4 0 0 0-2.4-2.4H4z"></path>
         <path d="M20 4.5h-6.5a3 3 0 0 0-3 3V20a2.4 2.4 0 0 1 2.4-2.4H20z"></path>
       </template>
+      <!-- 数据问答：对话气泡，表示"用自然语言问数据" -->
+      <template v-else-if="name === 'ask'">
+        <path d="M4 5.5h16a1.5 1.5 0 0 1 1.5 1.5v8a1.5 1.5 0 0 1-1.5 1.5h-8.2L7 20.5V16.5H4A1.5 1.5 0 0 1 2.5 15V7A1.5 1.5 0 0 1 4 5.5z"></path>
+        <path d="M7.5 10h9"></path>
+        <path d="M7.5 13h5.5"></path>
+      </template>
       <!-- 离线链路：堆叠的"存储层"，暗示 ODS→DWD→DWS→ADS 的分层结构 -->
       <template v-else-if="name === 'batch'">
         <ellipse cx="12" cy="5.6" rx="7.5" ry="3.1"></ellipse>
@@ -947,6 +953,158 @@
   </script>
 
   <!-- ============================================================
+       页面：数据问答（Sprint 7）
+       数据来源：POST /data/agent/ask（Agent 经只读数据服务取数）
+       ============================================================ -->
+  <script type="text/x-template" id="tpl-ask">
+    <div class="page">
+      <!-- Agent 不可用时的说明条：把"为什么不能用、怎么修"直接写出来 -->
+      <section class="panel panel--notice" v-if="agent && !agentReady">
+        <div class="notice notice--warn">
+          <icon name="down" :size="18"></icon>
+          <div class="notice__body">
+            <strong>数据问答暂不可用</strong>
+            <p>{{ agentHint }}</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <header class="panel__head">
+          <div>
+            <h2 class="panel__title">用自然语言问数据</h2>
+            <p class="panel__desc">
+              Agent 会先查指标口径、再生成只读 SQL、通过安全守卫后取数，
+              最后给出**带数据来源**的回答。它没有数据库写权限。
+            </p>
+          </div>
+        </header>
+
+        <form class="ask" @submit.prevent="submit">
+          <label class="sr-only" for="ask-input">输入你的问题</label>
+          <textarea id="ask-input" class="ask__input" rows="2"
+                    v-model="question" :disabled="loading"
+                    placeholder="例如：最近一周每天的 GMV 是多少？"
+                    @keydown.ctrl.enter="submit" @keydown.meta.enter="submit"></textarea>
+          <button type="submit" class="btn btn--primary" :disabled="loading || !question.trim()">
+            <icon name="search" :size="14"></icon>
+            <span>{{ loading ? '分析中…' : '提问' }}</span>
+          </button>
+        </form>
+        <p class="ask__hint">Ctrl / ⌘ + Enter 提交。回答由 LLM 生成，所有数字都来自真实查询结果。</p>
+
+        <div class="ask__examples">
+          <span class="dim">试试：</span>
+          <button v-for="q in examples" :key="q" type="button" class="chip"
+                  :disabled="loading" @click="useExample(q)">{{ q }}</button>
+        </div>
+      </section>
+
+      <!-- 加载中：明确写出 Agent 正在做什么，而不是只转圈 -->
+      <section class="panel" v-if="loading">
+        <div class="ask__progress">
+          <skeleton variant="kpi" :count="1"></skeleton>
+          <p class="dim">正在分析：识别指标 → 核对口径 → 生成并校验 SQL → 查询 → 汇总结论…</p>
+        </div>
+      </section>
+
+      <!-- 错误 -->
+      <section class="panel" v-if="error">
+        <div class="notice notice--warn">
+          <icon name="down" :size="18"></icon>
+          <div class="notice__body">
+            <strong>提问失败</strong>
+            <p>{{ error }}</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- 回答 -->
+      <template v-if="answer">
+        <section class="panel">
+          <header class="panel__head">
+            <div>
+              <h2 class="panel__title">回答</h2>
+              <p class="panel__desc">
+                模型 {{ answer.model }} · 耗时 {{ formatMs(answer.elapsed_ms) }} ·
+                工具调用 {{ answer.rounds }} 轮
+                <template v-if="answer.truncated"> · <span class="diff-bad">已达到调用上限，答案可能不完整</span></template>
+              </p>
+            </div>
+          </header>
+          <div class="ask__answer">{{ answer.answer }}</div>
+        </section>
+
+        <!-- 数据来源：这是"不得伪造查询结果"的可核对痕迹 -->
+        <section class="panel">
+          <header class="panel__head">
+            <div>
+              <h2 class="panel__title">数据来源（可核对）</h2>
+              <p class="panel__desc">
+                下面两项不是 Agent 的自述，而是服务端记录的实际执行痕迹。
+              </p>
+            </div>
+          </header>
+
+          <div class="ask__evidence">
+            <div>
+              <h3 class="ask__subtitle">用到的表</h3>
+              <p v-if="answer.tables.length" class="ask__tables">
+                <span v-for="t in answer.tables" :key="t" class="tag mono">{{ t }}</span>
+              </p>
+              <p v-else class="dim">本次回答没有查表（例如只是解释口径）。</p>
+            </div>
+
+            <div v-if="answer.executed_sql.length">
+              <h3 class="ask__subtitle">实际执行的 SQL</h3>
+              <div v-for="(sql, i) in answer.executed_sql" :key="i" class="ask__sql">
+                <pre class="mono">{{ sql }}</pre>
+              </div>
+              <p class="dim">
+                语句已通过 SQL 守卫（仅 SELECT、表白名单、强制 LIMIT）；
+                写操作会被守卫与 Doris 只读账号两层拒绝。
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <!-- 执行过程：默认折叠，需要排查时展开 -->
+        <section class="panel" v-if="answer.steps.length">
+          <header class="panel__head">
+            <div>
+              <h2 class="panel__title">执行过程（{{ answer.steps.length }} 步）</h2>
+              <p class="panel__desc">每一步调了什么工具、成功与否 —— 用于排查"为什么这么答"</p>
+            </div>
+          </header>
+          <ol class="steps">
+            <li v-for="(step, i) in answer.steps" :key="i" class="steps__item"
+                :class="step.ok ? 'steps__item--ok' : 'steps__item--fail'">
+              <div class="steps__head">
+                <span class="tag">{{ step.round }}</span>
+                <span class="mono">{{ step.tool }}</span>
+                <span class="dim">{{ step.ok ? '成功' : '失败' }}</span>
+              </div>
+              <pre class="steps__body mono">{{ prettyArgs(step.arguments) }}</pre>
+            </li>
+          </ol>
+        </section>
+      </template>
+
+      <!-- 还没提问时的引导 -->
+      <section class="panel" v-if="!answer && !loading && !error">
+        <div class="ask__empty">
+          <icon name="ask" :size="28"></icon>
+          <p class="empty__text">还没有提问</p>
+          <p class="empty__hint">
+            可以问指标口径、趋势、排行、异常，也可以问「这些数据准不准」——
+            最后这类问题 Agent 会用批流对账结论回答。
+          </p>
+        </div>
+      </section>
+    </div>
+  </script>
+
+  <!-- ============================================================
        应用挂载点
        ============================================================ -->
   <div id="app" v-cloak>
@@ -1043,6 +1201,7 @@
         <category-panel v-else-if="page === 'category'" key="category"></category-panel>
         <orders-panel v-else-if="page === 'orders'" key="orders"></orders-panel>
         <batch-panel v-else-if="page === 'batch'" key="batch"></batch-panel>
+        <ask-panel v-else-if="page === 'ask'" key="ask"></ask-panel>
         <metrics-panel v-else-if="page === 'metrics'" key="metrics"></metrics-panel>
 
         <footer class="foot">

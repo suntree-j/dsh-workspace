@@ -67,10 +67,23 @@
 
   // 由 index.html 的 <meta name="api-base"> 提供；
   // 取不到时回退到相对路径 ./api，保证在任意子路径下都能工作（不拼接域名）。
+  //
+  // !! 这个值是**绝对路径**（部署在 /data/ 下时为 "/data/api"），
+  //    不是"前缀" —— 曾经把它当相对前缀再拼一次，得到
+  //    /data/api/api/health 这种路径，整站所有请求 404（实测踩坑）。
+  //    因此下面显式定义两个完整基址，谁都不再二次拼接。!!
   var API_BASE = (function () {
     var meta = document.querySelector('meta[name="api-base"]');
     var value = meta && meta.getAttribute('content');
     return (value && value.trim()) || './api';
+  })();
+
+  // 数据问答 Agent 的基址（Sprint 7），与数据服务同一套 Nginx 反代。
+  // 从 API_BASE 推导：/data/api → /data/agent；相对形式 ./api → ./agent。
+  var AGENT_BASE = (function () {
+    var base = API_BASE.replace(/\/+$/, '');
+    if (/\/api$/.test(base)) return base.slice(0, -3) + 'agent';
+    return base + '/agent';
   })();
 
   // 与 styles.css 的设计令牌对应：深色底、低饱和、高区分度
@@ -483,9 +496,19 @@
   }
   ApiError.prototype = Object.create(Error.prototype);
 
-  function buildUrl(path, params) {
-    var base = API_BASE.replace(/\/+$/, '');
-    var url = base + path;
+  /**
+   * 拼出请求 URL。
+   *
+   * 两个后端共用一套拼接逻辑，差别只在 base：
+   *   API_BASE   → 只读数据服务 services/api（/data/api）
+   *   AGENT_BASE → 数据问答 Agent services/agent（/data/agent）
+   *
+   * !! 这里只拼一次：base 已经是完整路径，调用方传**相对基址的路径**。
+   *    绝不能在 base 上再叠 "/api" 之类的前缀 —— 那会拼出
+   *    /data/api/api/health，整站 404（实测踩过）。!!
+   */
+  function buildUrl(base, path, params) {
+    var url = String(base).replace(/\/+$/, '') + path;
     if (!params) return url;
     var parts = [];
     Object.keys(params).forEach(function (key) {
@@ -524,9 +547,37 @@
    * 统一 GET：拼 query → 解析信封 → 出错时抛出带中文 message 的 ApiError。
    * 返回信封中的 data 字段（业务代码不再关心信封结构）。
    */
-  function apiGet(path, params) {
-    var url = buildUrl(path, params);
+  function apiGet(path, params, base) {
+    var target = base || API_BASE;
     var init = { method: 'GET', headers: { Accept: 'application/json' }, cache: 'no-store' };
+    return runRequest(buildUrl(target, path, params), init, target);
+  }
+
+  /**
+   * 统一 POST（Sprint 7 起需要）。
+   *
+   * 为什么看板会出现 POST：
+   *   数据问答 Agent 的提问内容与 Agent 的取数 SQL 都放在请求体里 ——
+   *   问题与 SQL 都可能很长，塞进 URL 会撞上各级代理的长度限制，
+   *   出现"短问题能问、复杂问题失败"这种最难定位的故障。
+   *   注意：**取数仍然是只读的**，写操作在 SQL 守卫与 Doris 只读账号两层被拒。
+   *
+   * base 参数用于区分两个后端：
+   *   '/api'   → 只读数据服务（services/api，8000）
+   *   '/agent' → 数据问答 Agent（services/agent，8100）
+   */
+  function apiPost(path, payload, base) {
+    var target = base || API_BASE;
+    var init = {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      body: JSON.stringify(payload || {})
+    };
+    return runRequest(buildUrl(target, path, null), init, target);
+  }
+
+  function runRequest(url, init, target) {
     return fetch(url, init).then(function (resp) {
       return resp.text().then(function (text) {
         var body = null;
@@ -556,8 +607,10 @@
       });
     }, function (cause) {
       // 网络层失败（后端未启动 / Nginx 未转发）与业务错误分开提示，便于定位
-      throw new ApiError('无法连接到后端数据接口，请确认 API 服务与 Nginx 反向代理已启动', 'NETWORK_ERROR',
-        String((cause && cause.message) || cause), 0);
+      var where = String(target).indexOf('agent') >= 0
+        ? '无法连接到数据问答 Agent，请确认 data-platform-agent 服务与 Nginx 反向代理已启动'
+        : '无法连接到后端数据接口，请确认 API 服务与 Nginx 反向代理已启动';
+      throw new ApiError(where, 'NETWORK_ERROR', String((cause && cause.message) || cause), 0);
     });
   }
 
@@ -577,7 +630,10 @@
     metaTables: function () { return apiGet('/meta/tables'); },
     // 离线链路（Sprint 3）：批处理算出的同名同口径指标 + 批流对账结论
     batchOverview: function (days) { return apiGet('/batch/overview', { days: days }); },
-    batchReconcile: function () { return apiGet('/batch/reconcile'); }
+    batchReconcile: function () { return apiGet('/batch/reconcile'); },
+    // 数据问答 Agent（Sprint 7）：走独立的 AGENT_BASE（/data/agent）
+    agentHealth: function () { return apiGet('/health', null, AGENT_BASE); },
+    agentAsk: function (question) { return apiPost('/ask', { question: question }, AGENT_BASE); }
   };
 
   // ============================================================
@@ -895,6 +951,7 @@
     { key: 'category', title: '类目销售', subtitle: '类目 GMV 排行、占比与明细' },
     { key: 'orders', title: '订单明细', subtitle: '按类目与日期筛选，查看订单支付与退款记录' },
     { key: 'batch', title: '离线与对账', subtitle: '离线分层指标、按天趋势，以及实时/离线逐窗口对账结论' },
+    { key: 'ask', title: '数据问答', subtitle: '用自然语言提问，Agent 经只读接口取数并给出可核对的来源' },
     { key: 'metrics', title: '指标口径', subtitle: '指标字典与表结构（Agent 回答问题的口径来源）' }
   ];
 
@@ -2128,6 +2185,122 @@
   };
 
   // ============================================================
+  // ---------- 页面 8：数据问答（Sprint 7） ----------
+  // ============================================================
+  //
+  // 这一页的 UI 重点不是"聊天框好不好看"，而是**证据要看得见**：
+  //   回答下面必须能展开"用了哪些表 / 实际执行的 SQL / 每一步调了什么工具"。
+  //   因为 AGENTS.md 第 10.1 节要求「Agent 不得伪造查询结果」——
+  //   光靠一句"我查了数据库"是无法验证的，得把可核对的东西摆出来。
+
+  // 工具参数展示：把 JSON 压成一行，太长时截断（步骤只是给人扫一眼，不是给人读 SQL）
+  function prettyArgs(args) {
+    if (!args || typeof args !== 'object') return '（无参数）';
+    var text;
+    try {
+      text = JSON.stringify(args, null, 2);
+    } catch (e) {
+      text = String(args);
+    }
+    return text.length > 600 ? text.slice(0, 600) + '\n…（已截断）' : text;
+  }
+
+  function formatMs(ms) {
+    var n = numberOrNull(ms);
+    if (n === null) return '—';
+    return n < 1000 ? (n + ' ms') : ((n / 1000).toFixed(1) + ' s');
+  }
+
+  var AskPanel = {
+    name: 'AskPanel',
+    template: '#tpl-ask',
+    setup: function () {
+      var panel = usePanel();
+      var question = ref('');
+      var answer = ref(null);
+      var agent = ref(null);
+      var agentError = ref('');
+
+      var examples = [
+        '最近一周每天的 GMV 是多少？',
+        '支付成功率和退款率分别是多少？',
+        '哪个类目的 GMV 最高？',
+        '这些数据准不准？实时和离线一致吗？'
+      ];
+
+      // Agent 健康检查：决定是否显示"暂不可用"提示条
+      function loadAgent() {
+        return api.agentHealth().then(function (data) {
+          agent.value = data || null;
+          agentError.value = '';
+          return data;
+        }).catch(function (cause) {
+          agent.value = null;
+          agentError.value = (cause && cause.message) || '无法获取 Agent 状态';
+          return null;
+        });
+      }
+      onMounted(loadAgent);
+      panel.setReload(loadAgent);
+
+      var agentReady = computed(function () {
+        var a = agent.value;
+        return !!(a && a.llm && a.llm.configured && a.data_api && a.data_api.ok);
+      });
+
+      // 把"为什么不可用、怎么修"写清楚，而不是只显示一个灰按钮
+      var agentHint = computed(function () {
+        if (agentError.value) {
+          return agentError.value + '（请确认 data-platform-agent 服务已启动）';
+        }
+        var a = agent.value;
+        if (!a) return '正在检查 Agent 状态…';
+        if (!a.data_api || !a.data_api.ok) {
+          return 'Agent 无法连接只读数据服务：' + ((a.data_api && a.data_api.detail) || '未知原因') +
+            '。请确认 data-platform-api 已启动。';
+        }
+        if (!a.llm || !a.llm.configured) {
+          return 'LLM 未配置：请在服务器 /opt/data-platform/.env 中设置 LLM_API_KEY'
+            + '（DeepSeek 平台申请），然后 systemctl restart data-platform-agent。';
+        }
+        return '';
+      });
+
+      function submit() {
+        var q = question.value.trim();
+        if (!q || panel.loading.value) return;
+        answer.value = null;
+        return panel.run(function () {
+          return api.agentAsk(q).then(function (data) {
+            answer.value = data || null;
+            return data;
+          });
+        }, function () { return null; });
+      }
+
+      function useExample(q) {
+        question.value = q;
+        submit();
+      }
+
+      return {
+        loading: panel.loading,
+        error: panel.error,
+        question: question,
+        answer: answer,
+        agent: agent,
+        agentReady: agentReady,
+        agentHint: agentHint,
+        examples: examples,
+        submit: submit,
+        useExample: useExample,
+        prettyArgs: prettyArgs,
+        formatMs: formatMs
+      };
+    }
+  };
+
+  // ============================================================
   // ---------- 根组件 ----------
   // ============================================================
 
@@ -2252,6 +2425,7 @@
   app.component('orders-panel', OrdersPanel);
   app.component('metrics-panel', MetricsPanel);
   app.component('batch-panel', BatchPanel);
+  app.component('ask-panel', AskPanel);
   app.mount('#app');
 
   if (bootEl && bootEl.parentNode) bootEl.parentNode.removeChild(bootEl);

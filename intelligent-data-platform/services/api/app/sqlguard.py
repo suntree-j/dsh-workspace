@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 
-__all__ = ["SqlRejected", "validate_select", "ALLOWED_TABLES"]
+__all__ = ["SqlRejected", "validate_select", "extract_tables", "ALLOWED_TABLES"]
 
 
 class SqlRejected(ValueError):
@@ -111,6 +111,21 @@ def _normalize_table(raw: str) -> str:
     """把 `ecommerce`.`ads_xxx` / ecommerce.ads_xxx / [ads_xxx] 统一成表名。"""
     last = re.split(r"\s*\.\s*", raw.strip())[-1]
     return last.strip().strip("`\"[]")
+
+
+def extract_tables(sql: str) -> list[str]:
+    """提取语句里引用的表名（去重、保持出现顺序）。
+
+    用途：把"这段 SQL 读了哪些表"写进响应的血缘信息与审计日志。
+    与校验用的是同一个正则，保证"校验了什么"和"报告了什么"永远一致 ——
+    如果两者用不同规则，就可能出现"校验放行了 A 表、血缘却报告 B 表"。
+    """
+    seen: list[str] = []
+    for match in _TABLE_RE.finditer(sql):
+        name = _normalize_table(match.group(1))
+        if name and name not in seen:
+            seen.append(name)
+    return seen
 
 
 def validate_select(sql: str, max_limit: int = 1000) -> str:

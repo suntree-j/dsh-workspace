@@ -1123,6 +1123,143 @@ input[type="date"].input { color-scheme: dark; }
 .diff-ok { color: var(--text-3); }
 .diff-bad { color: var(--neg); font-weight: var(--fw-semibold); }
 
+/* ------------------------------------------------------------
+ * 15.2 数据问答页（Sprint 7）
+ *
+ * 设计取舍：这一页的主角是**回答与证据**，不是输入框。
+ *   所以输入区刻意做得朴素（一行文本域 + 一个按钮），
+ *   而把视觉重量放在"数据来源"与"执行过程"上 ——
+ *   因为这一页要回答的问题是"这个结论可不可信"。
+ * ------------------------------------------------------------ */
+.ask {
+  display: flex;
+  gap: var(--sp-3);
+  align-items: flex-start;
+}
+.ask__input {
+  flex: 1 1 auto;
+  min-width: 0;
+  resize: vertical;
+  padding: var(--sp-3) var(--sp-4);
+  font-family: inherit;
+  font-size: var(--fs-14);
+  line-height: 1.6;
+  color: var(--text-1);
+  background: var(--surface-inset);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  transition: border-color var(--dur) var(--ease);
+}
+.ask__input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.ask__input:disabled { opacity: 0.6; cursor: not-allowed; }
+.ask__hint {
+  margin: var(--sp-2) 0 0;
+  color: var(--text-3);
+  font-size: var(--fs-12);
+}
+
+.ask__examples {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-4);
+  padding-top: var(--sp-4);
+  border-top: 1px solid var(--line-subtle);
+  font-size: var(--fs-12);
+}
+.chip {
+  padding: 4px 10px;
+  font-size: var(--fs-12);
+  color: var(--text-2);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  transition: color var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+.chip:hover:not(:disabled) { color: var(--accent-text); border-color: var(--accent); }
+.chip:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.ask__progress { display: grid; gap: var(--sp-3); }
+
+/* 回答正文：保留换行（模型会输出分点），行高放宽便于阅读 */
+.ask__answer {
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-1);
+  font-size: var(--fs-14);
+  line-height: 1.85;
+}
+
+.ask__evidence { display: grid; gap: var(--sp-5); }
+.ask__subtitle {
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-13);
+  font-weight: var(--fw-semibold);
+  color: var(--text-2);
+}
+.ask__tables { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin: 0; }
+.ask__sql + .ask__sql { margin-top: var(--sp-2); }
+.ask__sql pre {
+  margin: 0;
+  padding: var(--sp-3);
+  overflow-x: auto;
+  font-size: var(--fs-12);
+  line-height: 1.7;
+  color: var(--text-2);
+  background: var(--surface-inset);
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius);
+}
+
+.tag {
+  display: inline-block;
+  padding: 2px 8px;
+  font-size: var(--fs-12);
+  color: var(--text-2);
+  background: var(--surface-3);
+  border-radius: var(--radius-sm);
+}
+
+/* 执行过程：左侧竖线 + 状态色点，一眼看出哪一步失败 */
+.steps { margin: 0; padding: 0; list-style: none; display: grid; gap: var(--sp-2); }
+.steps__item {
+  padding: var(--sp-3) var(--sp-4);
+  border-left: 3px solid var(--line);
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+}
+.steps__item--ok { border-left-color: var(--pos); }
+.steps__item--fail { border-left-color: var(--neg); }
+.steps__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  font-size: var(--fs-12);
+}
+.steps__body {
+  margin: var(--sp-2) 0 0;
+  overflow-x: auto;
+  font-size: var(--fs-12);
+  line-height: 1.6;
+  color: var(--text-3);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ask__empty {
+  display: grid;
+  place-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-6) var(--sp-4);
+  text-align: center;
+  color: var(--text-3);
+}
+
 .errorbar {
   display: flex;
   align-items: flex-start;

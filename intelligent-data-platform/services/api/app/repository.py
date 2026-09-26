@@ -491,6 +491,39 @@ class Repository:
         return data, tables, fields
 
     # ========================================================
+    # 动态只读查询（Sprint 7：给 Agent 用）
+    # ========================================================
+    def sql_query(self, sql: str, max_limit: int) -> tuple[dict[str, Any], list[str], str]:
+        """执行一条**外部传入**的 SELECT（唯一允许外部 SQL 的入口）。
+
+        安全边界（三道，缺一不可）：
+            1. `DorisClient.query` 内部第一件事就是 `sqlguard.validate_select`，
+               只放行 SELECT、拒绝多语句/注释/DDL/DML、表白名单、强制 LIMIT；
+            2. 连接用的是**只读账号** `agent_ro`，即使守卫被绕过，Doris 也会拒绝写；
+            3. 连接带 read_timeout，慢查询会超时断开而不是拖垮集群。
+
+        !! 为什么必须返回"实际执行的 SQL" !!
+            `Agent 不得伪造查询结果`（AGENTS.md 第 10.1 节）的前提是
+            **能证明这段 SQL 真的被跑过**。守卫会改写语句（补/收 LIMIT），
+            因此返回的必须是改写后的最终语句，而不是调用方传进来的那个字符串 ——
+            否则"我查了 X"这句话本身就不成立。
+
+        表名从**实际执行的 SQL** 里提取，而不是让调用方自报：
+            以后写进审计日志时，血缘信息才不会因为调用方说谎而失真。
+        """
+        from .sqlguard import extract_tables  # 放在函数内，避免模块级循环导入
+
+        result = self.client.query(sql, max_limit=max_limit)
+        tables = extract_tables(result.sql)
+        data = {
+            "rows": result.rows,
+            "row_count": len(result.rows),
+            "elapsed_ms": result.elapsed_ms,
+            "executed_sql": result.sql,
+        }
+        return data, tables, result.sql
+
+    # ========================================================
     # 元数据
     # ========================================================
     def categories(self) -> tuple[list[str], list[str]]:
