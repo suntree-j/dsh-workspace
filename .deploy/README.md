@@ -39,12 +39,19 @@ docker.xuanyuan.me    需要付费（提示 free-vs-pro）
 | --- | --- | --- | --- |
 | 1 | `tune-system.sh` | 内核参数调优 | Doris 要求 `vm.max_map_count >= 2000000`；降低 `vm.swappiness` |
 | 2 | `install-docker.sh` | 安装 Docker CE + Compose | 清华源 + 多源回退获取 GPG 公钥，写入镜像加速配置 |
-| 3 | `pull-images.sh` | 拉取全部镜像 | 约 5 GB；任一个失败返回非 0 |
+| 3 | `pull-images.sh` | 拉取全部镜像 | 约 15 GB；任一个失败返回非 0 |
 | 4 | `gen-env.sh` | 生成 `.env` | 用 `openssl rand` 生成 192-bit 随机口令，权限 600 |
 | 5 | `verify-env.sh` | 校验 `.env` | 确认无 `change_me` 占位符、口令长度、compose 配置有效 |
 | 6 | `setup-venv.sh` | 建 Python venv | 先装 `python3-venv`/`python3-pip`（PEP 668），再装测试依赖 |
-| 7 | `sync-to-server.sh` | 同步项目到服务器 | 本地执行；tar over ssh，排除 `.venv`/快照/`.env` |
+| 7 | `sync-to-server.sh` | 同步项目到服务器 | **本地执行**；tar over ssh，排除 `.venv`/快照/`.env` |
 | 8 | `run-smoke.sh` | 运行冒烟测试 | 部署更新后的测试文件并执行 `pytest -m smoke` |
+| 9 | `final-acceptance.sh` | 完整验收 + 持久化验证 | config → health-check → pytest → 数据校验 → `down`/`up` 后复查 |
+
+补充：
+
+| 脚本 | 作用 |
+| --- | --- |
+| `pull-doris-via-proxy.sh` | 通过 SSH 反向隧道代理拉取 Doris 镜像（镜像站过慢时使用） |
 
 ### 2.1 `install-docker.sh` 写入的镜像配置
 
@@ -62,6 +69,19 @@ docker.xuanyuan.me    需要付费（提示 free-vs-pro）
 ```
 
 **实测版本**：Docker 29.8.1、Compose v5.5.1、containerd 2.3.5
+
+### 2.2 拉取 Doris 镜像的推荐方式
+
+镜像站拉取 Doris（FE 1.6 GB / BE 2.9 GB）实测仅约 1.5 MB/s，耗时 30 分钟以上。
+**推荐用 SSH 反向隧道共享本地代理**，实测 FE 仅 12 秒完成：
+
+```bash
+# 本地：把本地 7890 代理暴露到服务器
+ssh -i ~/.ssh/suntree.pem -N -R 127.0.0.1:7890:127.0.0.1:7890 root@36.151.150.140
+
+# 服务器：执行
+bash pull-doris-via-proxy.sh
+```
 
 ---
 
