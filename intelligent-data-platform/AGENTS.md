@@ -68,7 +68,7 @@
 | FastAPI + uvicorn | `0.141.1` / `0.54.0` | 只读数据服务（Sprint 6 引入） |
 | openai（SDK） | `2.54.0` | 调用 DeepSeek（OpenAI 兼容协议，Tool Calls）（Sprint 7 引入） |
 | DeepSeek API | `deepseek-flash`（模型名） | 数据问答 Agent 的 LLM（Sprint 7 引入） |
-| Nginx | `1.24.0`（apt） | 静态托管 + 反向代理 + **TLS 终止**（Sprint 6 引入，Sprint 7 启用 HTTPS） |
+| Nginx | `1.24.0`（apt） | 静态托管 + 反向代理（Sprint 6 引入；TLS 曾启用后按实测停用，见 15.7） |
 | Vue + ECharts | `3.5.13` / `5.6.0`（本地 vendor，无构建步骤） | 数据看板（Sprint 6 引入） |
 | systemd | 系统自带 | 守护 `data-platform-api` / `data-platform-agent`（Sprint 6/7 引入） |
 | Python（宿主机） | `3.12.3` | 数据服务 / Agent / 调度（宿主 venv `.venv`、`.venv-agent`、`.venv-airflow`） |
@@ -642,7 +642,7 @@ docker compose exec doris-be mysql -h 172.28.0.10 -P 9030 -uroot -e "SHOW BACKEN
 ✅ bash scripts/verify-sprint-6.sh   7/7 PASS
 ✅ 访问地址                          http://36.151.150.140/data/   ← 协议见 15.7
 ✅ 调度 UI                           http://36.151.150.140/airflow/（Sprint 4）
-✅ 接口文档                          https://36.151.150.140/data/api/docs
+✅ 接口文档                          http://36.151.150.140/data/api/docs
 ✅ 只读账号                          agent_ro（写操作被 Doris 拒绝：Access denied CREATE）
 ✅ 指标对账                          API GMV == MySQL GMV（51,890,375.77，精确到分）
 ✅ 自动化测试                        pytest 74 单元（SQL 守卫 + 口径解析）+ 21 接口冒烟
