@@ -45,6 +45,10 @@ MANIFEST
 # 第三方二进制（JAR 由脚本从 Maven Central 获取，不入 Git）
 *.jar
 
+# 前端运行时（Vue / ECharts 由 scripts/install-web.sh 从 npmmirror 获取，
+# 属第三方构建产物，约 1.1 MB，不入 Git）
+services/web/vendor/
+
 # Virtual environments
 .venv/
 venv/

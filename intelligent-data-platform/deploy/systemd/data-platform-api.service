@@ -1,0 +1,63 @@
+# ============================================================
+# systemd 单元：数据服务（只读指标 API）
+# ============================================================
+#
+# 安装位置： /etc/systemd/system/data-platform-api.service
+# 由 scripts/install-web.sh 拷贝并 enable。
+#
+# 运维命令：
+#   systemctl status data-platform-api
+#   systemctl restart data-platform-api
+#   journalctl -u data-platform-api -n 100 --no-pager
+#
+# 安全设计：
+#   1) 以专用系统用户 dpapi 运行，不用 root；
+#      .env 权限设为 root:dpapi 0640，只有它和 root 能读口令；
+#   2) 只监听 127.0.0.1，对外必须经 Nginx；
+#   3) 开启 NoNewPrivileges / ProtectSystem 等基础加固；
+#   4) **不使用 systemd 的 EnvironmentFile** —— .env 里有带空格的值，
+#      交给应用自己解析（services/api/app/config.py）更稳，
+#      也保证"配置只有一个来源"。
+# ============================================================
+
+[Unit]
+Description=Data Platform Read-only API (FastAPI + Doris)
+Documentation=file:/opt/data-platform/docs/sprint/SPRINT_6.md
+After=network-online.target docker.service
+Wants=network-online.target
+# Doris 跑在 Docker 里，容器没起来时 API 起来也没用，但不必强依赖：
+# 接口会返回 503 并给出中文提示，等 Doris 恢复后自动可用。
+
+[Service]
+Type=simple
+User=dpapi
+Group=dpapi
+WorkingDirectory=/opt/data-platform/services/api
+
+# 应用自己解析 .env（单一配置来源，避免 systemd 解析带空格的值）
+Environment=DATA_PLATFORM_ENV=/opt/data-platform/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+ExecStart=/opt/data-platform/.venv/bin/uvicorn app.main:app \
+    --host 127.0.0.1 --port 8000 --workers 1 --app-dir /opt/data-platform/services/api
+
+Restart=always
+RestartSec=3
+TimeoutStopSec=10
+
+# 基础加固
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=data-platform-api
+
+[Install]
+WantedBy=multi-user.target

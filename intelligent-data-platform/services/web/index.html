@@ -1,0 +1,751 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <!-- 主题色，让移动端浏览器地址栏与深色大屏一致 -->
+  <meta name="theme-color" content="#0b1220" />
+  <!--
+    API 基址集中在此声明（而不是写死在 JS 里）：
+    部署脚本或 Nginx 反向代理调整路径时，只需改这一行。
+    页面被挂在 http://<ip>/data/ 下访问，因此这里写的是绝对路径 /data/api；
+    若 meta 缺失，app.js 会退回相对路径 ./api。
+  -->
+  <meta name="api-base" content="/data/api" />
+  <title>批流一体智能数据分析平台 · 实时数据看板</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+
+  <!-- ============================================================
+       依赖未就绪时的兜底提示
+       Vue / ECharts 由 scripts/install-web.sh 下载到 ./vendor/。
+       该脚本未执行时下面的 script 标签会 404，app.js 检测到全局变量缺失
+       就会把 #app 替换成"请先执行安装脚本"的中文提示，避免白屏。
+       ============================================================ -->
+  <div class="boot" id="boot">
+    <p class="boot__text">正在加载前端依赖与看板…</p>
+  </div>
+  <noscript>
+    <div class="boot">
+      <p class="boot__text">本看板需要启用 JavaScript 才能运行，请在浏览器设置中允许执行脚本。</p>
+    </div>
+  </noscript>
+
+  <!-- ============================================================
+       页面模板（x-template）
+       选择"模板集中在 index.html"的方案，理由：
+         1. 全站文案可直接在浏览器里搜索，评审与答辩时定位方便；
+         2. 无需构建步骤即可把模板与逻辑分开维护；
+         3. 与约束一致：不使用 ES module，不使用打包器。
+       ============================================================ -->
+
+  <!-- 内联 SVG 图标：不引入任何图标字体或外部图片，避免外网依赖 -->
+  <script type="text/x-template" id="tpl-icon">
+    <svg class="icon" viewBox="0 0 24 24" width="18" height="18" fill="none"
+         stroke="currentColor" stroke-width="1.6" stroke-linecap="round"
+         stroke-linejoin="round" aria-hidden="true" focusable="false">
+      <template v-if="name === 'overview'">
+        <rect x="3" y="3" width="7.5" height="8.5" rx="1.5"></rect>
+        <rect x="13.5" y="3" width="7.5" height="5" rx="1.5"></rect>
+        <rect x="3" y="14.5" width="7.5" height="6.5" rx="1.5"></rect>
+        <rect x="13.5" y="11" width="7.5" height="10" rx="1.5"></rect>
+      </template>
+      <template v-else-if="name === 'trade'">
+        <path d="M3 18.5h18"></path>
+        <path d="M4 15.5l4.8-5.2 3.6 3 6.6-7"></path>
+        <path d="M15.6 6.3h3.4v3.4"></path>
+      </template>
+      <template v-else-if="name === 'traffic'">
+        <path d="M3 4.5h18l-6.8 7.6v6.4L9.8 21v-8.9z"></path>
+      </template>
+      <template v-else-if="name === 'category'">
+        <rect x="3" y="3" width="7.5" height="7.5" rx="1.5"></rect>
+        <rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5"></rect>
+        <rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5"></rect>
+        <rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5"></rect>
+      </template>
+      <template v-else-if="name === 'orders'">
+        <path d="M6.5 3h11a1.5 1.5 0 0 1 1.5 1.5v16l-3.4-2.1-2.6 2.1-2.6-2.1L7 20.5V4.5A1.5 1.5 0 0 1 8.5 3z" transform="translate(0.5,0)"></path>
+        <path d="M9 8h6"></path>
+        <path d="M9 11.5h4"></path>
+      </template>
+      <template v-else-if="name === 'metrics'">
+        <path d="M4 4.5h6.5a3 3 0 0 1 3 3V20a2.4 2.4 0 0 0-2.4-2.4H4z"></path>
+        <path d="M20 4.5h-6.5a3 3 0 0 0-3 3V20a2.4 2.4 0 0 1 2.4-2.4H20z"></path>
+      </template>
+      <template v-else-if="name === 'refresh'">
+        <path d="M20.5 12a8.5 8.5 0 1 1-2.5-6"></path>
+        <path d="M20.7 4.2v4.6h-4.6"></path>
+      </template>
+      <template v-else-if="name === 'search'">
+        <circle cx="10.8" cy="10.8" r="6.6"></circle>
+        <path d="M15.7 15.7L20.5 20.5"></path>
+      </template>
+      <template v-else-if="name === 'chevron'">
+        <path d="M8.5 5.5l6.8 6.5-6.8 6.5"></path>
+      </template>
+      <template v-else-if="name === 'close'">
+        <path d="M6.5 6.5l11 11"></path>
+        <path d="M17.5 6.5l-11 11"></path>
+      </template>
+    </svg>
+  </script>
+
+  <!-- 骨架屏：加载中占位，避免"空白窗口"造成的等待焦虑 -->
+  <script type="text/x-template" id="tpl-skeleton">
+    <div class="skeleton">
+      <div class="skeleton__row" v-for="n in rows" :key="n">
+        <div class="skeleton__bar" :style="{ width: barWidth(n) }"></div>
+      </div>
+    </div>
+  </script>
+
+  <!-- 空数据提示：与"加载中"、"出错"三态区分开 -->
+  <script type="text/x-template" id="tpl-empty">
+    <div class="empty">
+      <span class="empty__mark" aria-hidden="true">∅</span>
+      <p class="empty__text">{{ text || '当前筛选条件下暂无数据' }}</p>
+      <p class="empty__hint" v-if="hint">{{ hint }}</p>
+    </div>
+  </script>
+
+  <!-- 指标卡：value 为 null 时统一显示 —，与后端"比率分母为 0 返回 null"的约定对齐 -->
+  <script type="text/x-template" id="tpl-kpi">
+    <div class="kpi">
+      <div class="kpi__label">
+        <span>{{ label }}</span>
+        <span class="tip" v-if="tip" :data-tip="tip" tabindex="0" role="note" aria-label="指标口径">?</span>
+      </div>
+      <div class="kpi__value" :class="valueClass">{{ displayValue }}<span class="kpi__unit" v-if="unit && displayValue !== '—'">{{ unit }}</span></div>
+      <div class="kpi__sub" v-if="sub">{{ sub }}</div>
+    </div>
+  </script>
+
+  <!-- 下拉选择：原生 select 展开样式不可控，这里用轻量自绘下拉，保持大屏视觉统一 -->
+  <script type="text/x-template" id="tpl-select">
+    <div class="select" ref="root">
+      <button type="button" class="select__button" :class="{ 'is-open': open }"
+              :aria-expanded="open ? 'true' : 'false'" aria-haspopup="listbox"
+              @click="toggle" @keydown.escape.prevent="open = false">
+        <span class="select__value">{{ selectedLabel }}</span>
+        <svg class="icon select__arrow" viewBox="0 0 24 24" width="14" height="14" fill="none"
+             stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+          <path d="M6.5 9.5l5.5 5.5 5.5-5.5"></path>
+        </svg>
+      </button>
+      <ul class="select__list" role="listbox" v-if="open">
+        <li v-for="opt in options" :key="String(opt.value)" role="option"
+            :aria-selected="opt.value === modelValue ? 'true' : 'false'"
+            class="select__item" :class="{ 'is-active': opt.value === modelValue }"
+            @click="pick(opt)">
+          <span>{{ opt.label }}</span>
+          <span class="select__check" v-if="opt.value === modelValue">✓</span>
+        </li>
+      </ul>
+    </div>
+  </script>
+
+  <!-- ==================== 1. 总览 ==================== -->
+  <script type="text/x-template" id="tpl-overview">
+    <div class="page">
+      <section class="panel">
+        <div class="panel__head">
+          <div>
+            <h3 class="panel__title">核心指标</h3>
+            <p class="panel__desc">指标口径来自 <code>/api/meta/metrics</code>，可左键悬停「?」查看定义。</p>
+          </div>
+          <p class="panel__meta" v-if="overview">数据窗口 {{ fmtTime(overview.earliest_window) }} ~ {{ fmtTime(overview.latest_window) }}</p>
+        </div>
+        <skeleton v-if="loading && !overview" :rows="3"></skeleton>
+        <div class="kpi-grid" v-else-if="overview">
+          <kpi v-for="card in kpiCards" :key="card.label" :label="card.label" :value="card.value"
+               :unit="card.unit" :sub="card.sub" :tip="card.tip"></kpi>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel__head">
+          <h3 class="panel__title">交易趋势</h3>
+          <p class="panel__meta">GMV 折线（左轴，元） / 订单量柱状（右轴，笔）</p>
+        </div>
+        <div class="chart chart--md" ref="tradeEl" v-show="trade.length"></div>
+        <skeleton v-if="loading && !trade.length" :rows="5"></skeleton>
+        <empty v-else-if="!trade.length" text="所选窗口内没有交易数据"></empty>
+      </section>
+
+      <div class="grid grid--2">
+        <section class="panel">
+          <div class="panel__head">
+            <h3 class="panel__title">流量趋势</h3>
+            <p class="panel__meta">PV / UV（左轴，次）</p>
+          </div>
+          <div class="chart chart--md" ref="trafficEl" v-show="traffic.length"></div>
+          <skeleton v-if="loading && !traffic.length" :rows="5"></skeleton>
+          <empty v-else-if="!traffic.length" text="所选窗口内没有流量数据"></empty>
+        </section>
+
+        <section class="panel">
+          <div class="panel__head">
+            <h3 class="panel__title">类目销售 Top5</h3>
+            <p class="panel__meta">按 GMV 降序</p>
+          </div>
+          <div class="chart chart--md" ref="categoryEl" v-show="categoryTop.length"></div>
+          <skeleton v-if="loading && !categoryTop.length" :rows="5"></skeleton>
+          <empty v-else-if="!categoryTop.length" text="所选窗口内没有类目销售数据"></empty>
+        </section>
+      </div>
+
+      <section class="panel">
+        <div class="panel__head">
+          <h3 class="panel__title">明细快照</h3>
+          <p class="panel__meta">最近一个窗口的类目聚合结果</p>
+        </div>
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>类目</th><th class="num">订单量（笔）</th><th class="num">GMV（元）</th>
+                <th class="num">件数</th><th class="num">客单价（元）</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in categoryTop" :key="row.category_name">
+                <td>{{ row.category_name }}</td>
+                <td class="num">{{ fmtInt(row.order_cnt) }}</td>
+                <td class="num">{{ fmtMoney(row.gmv) }}</td>
+                <td class="num">{{ fmtInt(row.total_quantity) }}</td>
+                <td class="num">{{ fmtMoney(row.avg_order_amount) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </script>
+
+  <!-- ==================== 2. 交易分析 ==================== -->
+  <script type="text/x-template" id="tpl-trade">
+    <div class="page">
+      <section class="panel">
+        <div class="panel__head">
+          <h3 class="panel__title">交易指标</h3>
+          <p class="panel__desc">客单价按整数分口径重算：SUM(GMV) ÷ SUM(订单量)，不使用浮点累加。</p>
+        </div>
+        <skeleton v-if="loading && !series.length" :rows="3"></skeleton>
+        <div class="kpi-grid kpi-grid--4" v-else>
+          <kpi v-for="card in cards" :key="card.label" :label="card.label" :value="card.value"
+               :unit="card.unit" :sub="card.sub" :tip="card.tip"></kpi>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel__head">
+          <h3 class="panel__title">GMV 与支付金额趋势</h3>
+          <p class="panel__meta">双轴折线：左轴 GMV，右轴支付金额；X 轴仅显示 HH:MM</p>
+        </div>
+        <div class="chart chart--lg" ref="chartEl" v-show="series.length"></div>
+        <skeleton v-if="loading && !series.length" :rows="6"></skeleton>
+        <empty v-else-if="!series.length" text="所选窗口内没有交易数据"></empty>
+      </section>
+
+      <section class="panel">
+        <div class="panel__head">
+          <div>
+            <h3 class="panel__title">窗口明细</h3>
+            <p class="panel__desc">
+              接口按 window_start 升序返回，表格按时间倒序展示；最多保留最近 200 个窗口，每页 20 行。
+            </p>
+          </div>
+          <p class="panel__meta" v-if="series.length">共 {{ series.length }} 个窗口</p>
+        </div>
+        <skeleton v-if="loading && !series.length" :rows="6"></skeleton>
+        <template v-else-if="series.length">
+          <div class="table-wrap">
+            <table class="table table--compact">
+              <thead>
+                <tr>
+                  <th>窗口</th><th class="num">GMV（元）</th><th class="num">订单量</th>
+                  <th class="num">下单用户</th><th class="num">客单价（元）</th>
+                  <th class="num">支付笔数</th><th class="num">支付金额（元）</th>
+                  <th class="num">支付失败</th><th class="num">支付成功率</th>
+                  <th class="num">退款笔数</th><th class="num">退款金额（元）</th><th class="num">退款率</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in pagedRows" :key="row.window_start">
+                  <td class="mono">{{ fmtTime(row.window_start) }}</td>
+                  <td class="num">{{ fmtMoney(row.gmv) }}</td>
+                  <td class="num">{{ fmtInt(row.order_cnt) }}</td>
+                  <td class="num">{{ fmtInt(row.order_user_cnt) }}</td>
+                  <td class="num">{{ fmtMoney(row.avg_order_amount) }}</td>
+                  <td class="num">{{ fmtInt(row.payment_cnt) }}</td>
+                  <td class="num">{{ fmtMoney(row.payment_amount) }}</td>
+                  <td class="num">{{ fmtInt(row.payment_fail_cnt) }}</td>
+                  <td class="num">{{ fmtRate(row.payment_success_rate) }}</td>
+                  <td class="num">{{ fmtInt(row.refund_cnt) }}</td>
+                  <td class="num">{{ fmtMoney(row.refund_amount) }}</td>
+                  <td class="num">{{ fmtRate(row.refund_rate) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="pager">
+            <button type="button" class="btn btn--ghost" :disabled="page <= 1" @click="page = page - 1">上一页</button>
+            <span class="pager__info">第 {{ page }} / {{ pageCount }} 页</span>
+            <button type="button" class="btn btn--ghost" :disabled="page >= pageCount" @click="page = page + 1">下一页</button>
+          </div>
+        </template>
+      </section>
+    </div>
+  </script>
+
+  <!-- ==================== 3. 流量分析 ==================== -->
+  <script type="text/x-template" id="tpl-traffic">
+    <div class="page">
+      <section class="panel">
+        <div class="panel__head">
+          <h3 class="panel__title">流量规模</h3>
+          <p class="panel__desc">PV 口径为窗口内全部行为事件数（含 VIEW/CLICK/CART/FAVORITE/BUY），非狭义页面浏览。</p>
+        </div>
+        <skeleton v-if="loading && !series.length" :rows="3"></skeleton>
+        <div class="kpi-grid kpi-grid--4" v-else>
+          <kpi v-for="card in sizeCards" :key="card.label" :label="card.label" :value="card.value"
+               :unit="card.unit" :sub="card.sub" :tip="card.tip"></kpi>
+        </div>
+      </section>
+
+      <div class="grid grid--funnel">
+        <section class="panel">
+          <div class="panel__head">
+            <h3 class="panel__title">行为漏斗</h3>
+            <p class="panel__meta">浏览 → 点击 → 加购 → 购买（所选窗口累计）</p>
+          </div>
+          <div class="chart chart--md" ref="funnelEl" v-show="funnelTotal.view_cnt"></div>
+          <skeleton v-if="loading && !series.length" :rows="5"></skeleton>
+          <empty v-else-if="!funnelTotal.view_cnt" text="所选窗口内没有行为事件"></empty>
+        </section>
+
+        <section class="panel">
+          <div class="panel__head">
+            <h3 class="panel__title">转化率</h3>
+            <p class="panel__desc">按所选窗口累计分子分母重算，分母为 0 时显示 —。</p>
+          </div>
+          <skeleton v-if="loading && !series.length" :rows="3"></skeleton>
+          <div class="kpi-grid kpi-grid--2" v-else>
+            <kpi v-for="card in rateCards" :key="card.label" :label="card.label" :value="card.value"
+                 :unit="card.unit" :sub="card.sub" :tip="card.tip"></kpi>
+          </div>
+          <ul class="steps" v-if="steps.length">
+            <li class="steps__item" v-for="s in steps" :key="s.label">
+              <span class="steps__label">{{ s.label }}</span>
+              <span class="steps__value mono">{{ s.value }}</span>
+              <span class="steps__note">{{ s.note }}</span>
+            </li>
+          </ul>
+        </section>
+      </div>
+
+      <section class="panel">
+        <div class="panel__head">
+          <h3 class="panel__title">流量趋势</h3>
+          <p class="panel__meta">PV / UV / 浏览次数（左轴，次）</p>
+        </div>
+        <div class="chart chart--lg" ref="chartEl" v-show="series.length"></div>
+        <skeleton v-if="loading && !series.length" :rows="6"></skeleton>
+        <empty v-else-if="!series.length" text="所选窗口内没有流量数据"></empty>
+      </section>
+    </div>
+  </script>
+
+  <!-- ==================== 4. 类目销售 ==================== -->
+  <script type="text/x-template" id="tpl-category">
+    <div class="page">
+      <section class="panel">
+        <div class="panel__head">
+          <div>
+            <h3 class="panel__title">类目 GMV 排行</h3>
+            <p class="panel__desc">按 GMV 降序；切换时间范围会重新请求 <code>/api/metrics/category</code>。</p>
+          </div>
+          <div class="toolbar">
+            <div class="seg" role="group" aria-label="时间范围">
+              <button type="button" class="seg__btn" :class="{ 'is-active': windowLimit === 60 }"
+                      @click="setWindow(60)">最近 60 分钟</button>
+              <button type="button" class="seg__btn" :class="{ 'is-active': windowLimit === ALL_WINDOWS }"
+                      @click="setWindow(ALL_WINDOWS)">全部</button>
+            </div>
+            <label class="field">
+              <span class="field__label">条数</span>
+              <input class="input input--sm" type="number" min="3" max="50" step="1" v-model="topN" />
+            </label>
+          </div>
+        </div>
+        <skeleton v-if="loading && !rows.length" :rows="6"></skeleton>
+        <template v-else-if="rows.length">
+          <div class="chart chart--md" ref="barEl"></div>
+        </template>
+        <empty v-else text="所选时间范围内没有类目销售数据"></empty>
+      </section>
+
+      <div class="grid grid--2">
+        <section class="panel">
+          <div class="panel__head">
+            <h3 class="panel__title">GMV 占比</h3>
+            <p class="panel__meta">按排行条数取前 {{ list.length }} 个类目</p>
+          </div>
+          <div class="chart chart--md" ref="pieEl" v-show="list.length"></div>
+          <empty v-if="!list.length" text="没有可用于绘制占比的数据"></empty>
+        </section>
+
+        <section class="panel">
+          <div class="panel__head">
+            <h3 class="panel__title">合计</h3>
+            <p class="panel__desc">合计金额用整数分累加后再格式化，避免浮点误差。</p>
+          </div>
+          <div class="kpi-grid kpi-grid--2" v-if="list.length">
+            <kpi label="类目 GMV 合计" :value="totalGmv" unit="元" :sub="'覆盖 ' + list.length + ' 个类目'"></kpi>
+            <kpi label="类目订单合计" :value="totalOrders" unit="笔" :tip="'SUM(该类目订单量)'"></kpi>
+          </div>
+          <empty v-else text="没有可统计的类目数据"></empty>
+        </section>
+      </div>
+
+      <section class="panel">
+        <div class="panel__head">
+          <h3 class="panel__title">类目明细</h3>
+          <p class="panel__meta">客单价由类目 GMV ÷ 订单量重算</p>
+        </div>
+        <skeleton v-if="loading && !rows.length" :rows="5"></skeleton>
+        <div class="table-wrap" v-else-if="rows.length">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>排名</th><th>类目</th><th class="num">GMV（元）</th>
+                <th class="num">订单量（笔）</th><th class="num">件数</th><th class="num">客单价（元）</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(row, index) in list" :key="row.category_name">
+                <td class="mono">{{ index + 1 }}</td>
+                <td>{{ row.category_name }}</td>
+                <td class="num">{{ fmtMoney(row.gmv) }}</td>
+                <td class="num">{{ fmtInt(row.order_cnt) }}</td>
+                <td class="num">{{ fmtInt(row.total_quantity) }}</td>
+                <td class="num">{{ fmtMoney(row.avg_order_amount) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <empty v-else text="所选时间范围内没有类目销售数据"></empty>
+      </section>
+    </div>
+  </script>
+
+  <!-- ==================== 5. 订单明细 ==================== -->
+  <script type="text/x-template" id="tpl-orders">
+    <div class="page">
+      <section class="panel">
+        <div class="panel__head">
+          <h3 class="panel__title">订单筛选</h3>
+          <p class="panel__desc">三个条件均可留空；日期为闭区间，按订单事件时间过滤。</p>
+        </div>
+        <div class="filters">
+          <label class="field">
+            <span class="field__label">商品类目</span>
+            <select class="input" v-model="category">
+              <option value="">全部类目</option>
+              <option v-for="name in categoryOptions" :key="name" :value="name">{{ name }}</option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="field__label">开始日期</span>
+            <input class="input" type="date" v-model="startDate" />
+          </label>
+          <label class="field">
+            <span class="field__label">结束日期</span>
+            <input class="input" type="date" v-model="endDate" />
+          </label>
+          <div class="filters__actions">
+            <button type="button" class="btn btn--primary" @click="applyFilters">查询</button>
+            <button type="button" class="btn btn--ghost" @click="resetFilters">重置</button>
+          </div>
+        </div>
+        <p class="filters__note" v-if="filterSummary">{{ filterSummary }}</p>
+      </section>
+
+      <section class="panel">
+        <div class="panel__head">
+          <div>
+            <h3 class="panel__title">订单列表</h3>
+            <p class="panel__desc">点击任意一行查看该订单的支付与退款记录。</p>
+          </div>
+          <p class="panel__meta" v-if="result">共 {{ fmtInt(result.total) }} 条</p>
+        </div>
+        <skeleton v-if="loading && !result" :rows="8"></skeleton>
+        <template v-else-if="result && result.items.length">
+          <div class="table-wrap">
+            <table class="table table--clickable">
+              <thead>
+                <tr>
+                  <th>订单号</th><th>用户</th><th>商品</th><th>类目</th><th>会员等级</th>
+                  <th>省份</th><th class="num">数量</th><th class="num">金额（元）</th><th>下单时间</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in result.items" :key="row.order_id" tabindex="0"
+                    @click="openDetail(row.order_id)" @keydown.enter.prevent="openDetail(row.order_id)">
+                  <td class="mono link">{{ row.order_id }}</td>
+                  <td class="mono">{{ fmtInt(row.user_id) }}</td>
+                  <td class="mono">{{ fmtInt(row.product_id) }}</td>
+                  <td>{{ row.category_name || '—' }}</td>
+                  <td>{{ row.user_level || '—' }}</td>
+                  <td>{{ row.province || '—' }}</td>
+                  <td class="num">{{ fmtInt(row.quantity) }}</td>
+                  <td class="num">{{ fmtMoney(row.amount) }}</td>
+                  <td class="mono">{{ fmtTime(row.event_time) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="pager">
+            <button type="button" class="btn btn--ghost" :disabled="offset <= 0" @click="turnPage(-1)">上一页</button>
+            <span class="pager__info">第 {{ page }} / {{ pageCount }} 页</span>
+            <button type="button" class="btn btn--ghost" :disabled="offset + limit >= result.total" @click="turnPage(1)">下一页</button>
+          </div>
+        </template>
+        <empty v-else text="没有符合条件的订单" hint="可尝试放宽日期范围或清空类目筛选"></empty>
+      </section>
+
+      <div class="modal" v-if="detailOpen" @click.self="closeDetail">
+        <div class="modal__panel" role="dialog" aria-modal="true" aria-label="订单详情">
+          <div class="modal__head">
+            <h3 class="modal__title">订单详情 · <span class="mono">{{ detailId }}</span></h3>
+            <button type="button" class="btn btn--icon" aria-label="关闭" @click="closeDetail">
+              <icon name="close"></icon>
+            </button>
+          </div>
+          <div class="modal__body">
+            <skeleton v-if="detailLoading" :rows="4"></skeleton>
+            <template v-else-if="detail">
+              <dl class="dl">
+                <div class="dl__item"><dt>订单号</dt><dd class="mono">{{ detail.order.order_id }}</dd></div>
+                <div class="dl__item"><dt>用户 / 等级</dt><dd>{{ fmtInt(detail.order.user_id) }} · {{ detail.order.user_level || '—' }}</dd></div>
+                <div class="dl__item"><dt>商品</dt><dd>{{ fmtInt(detail.order.product_id) }} · {{ detail.order.category_name || '—' }}</dd></div>
+                <div class="dl__item"><dt>省份</dt><dd>{{ detail.order.province || '—' }}</dd></div>
+                <div class="dl__item"><dt>数量</dt><dd>{{ fmtInt(detail.order.quantity) }}</dd></div>
+                <div class="dl__item"><dt>订单金额</dt><dd>{{ fmtMoney(detail.order.amount) }} 元</dd></div>
+                <div class="dl__item"><dt>下单时间</dt><dd class="mono">{{ fmtTime(detail.order.event_time) }}</dd></div>
+              </dl>
+
+              <h4 class="modal__subtitle">支付记录（{{ detail.payments.length }}）</h4>
+              <div class="table-wrap" v-if="detail.payments.length">
+                <table class="table table--compact">
+                  <thead><tr><th>支付号</th><th class="num">金额（元）</th><th>方式</th><th>状态</th><th>时间</th></tr></thead>
+                  <tbody>
+                    <tr v-for="p in detail.payments" :key="p.payment_id">
+                      <td class="mono">{{ p.payment_id }}</td>
+                      <td class="num">{{ fmtMoney(p.amount) }}</td>
+                      <td>{{ p.payment_method || '—' }}</td>
+                      <td>{{ p.payment_status || '—' }}</td>
+                      <td class="mono">{{ fmtTime(p.event_time) }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p class="modal__none" v-else>该订单暂无支付记录（可能尚未支付）。</p>
+
+              <h4 class="modal__subtitle">退款记录（{{ detail.refunds.length }}）</h4>
+              <div class="table-wrap" v-if="detail.refunds.length">
+                <table class="table table--compact">
+                  <thead><tr><th>退款号</th><th class="num">金额（元）</th><th>状态</th><th>时间</th></tr></thead>
+                  <tbody>
+                    <tr v-for="r in detail.refunds" :key="r.refund_id">
+                      <td class="mono">{{ r.refund_id }}</td>
+                      <td class="num">{{ fmtMoney(r.amount) }}</td>
+                      <td>{{ r.refund_status || '—' }}</td>
+                      <td class="mono">{{ fmtTime(r.event_time) }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p class="modal__none" v-else>该订单暂无退款记录。</p>
+            </template>
+          </div>
+        </div>
+      </div>
+    </div>
+  </script>
+
+  <!-- ==================== 6. 指标口径 ==================== -->
+  <script type="text/x-template" id="tpl-metrics">
+    <div class="page">
+      <section class="panel panel--notice">
+        <h3 class="panel__title">口径来源声明</h3>
+        <p class="notice__text">
+          本页是 Agent 回答问题时<strong>必须引用</strong>的口径来源。指标字典与表结构均来自后端元数据接口，
+          与 <code>sql/metadata/metrics.md</code> 保持同源；任何口径变更都先改该文档，再改 Flink / Spark 作业。
+        </p>
+        <p class="notice__meta" v-if="docVersion">
+          口径文档版本 <strong>{{ docVersion }}</strong><span v-if="docUpdatedAt">（更新于 {{ docUpdatedAt }}）</span>
+          —— 接口在运行时解析该 Markdown 文档，不存在第二份口径副本。
+        </p>
+      </section>
+
+      <section class="panel">
+        <div class="panel__head">
+          <div>
+            <h3 class="panel__title">指标字典</h3>
+            <p class="panel__desc">来源：<code>/api/meta/metrics</code>，共 {{ metrics.length }} 条定义。</p>
+          </div>
+          <label class="field field--inline">
+            <icon name="search"></icon>
+            <input class="input input--sm" type="search" v-model="keyword" placeholder="按域 / 指标 / 字段 / 表筛选" />
+          </label>
+        </div>
+        <skeleton v-if="loading && !metrics.length" :rows="8"></skeleton>
+        <template v-else-if="filteredMetrics.length">
+          <div class="table-wrap">
+            <table class="table table--compact">
+              <thead>
+                <tr>
+                  <th>域</th><th>指标</th><th>字段</th><th>所在表</th>
+                  <th>口径说明</th><th>计算方式</th><th>空值约定</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="item in filteredMetrics" :key="item.domain + '|' + item.field + '|' + item.metric">
+                  <td><span class="chip">{{ item.domain }}</span></td>
+                  <td>{{ item.metric }}</td>
+                  <td class="mono">{{ item.field }}</td>
+                  <td class="mono dim">{{ item.table }}</td>
+                  <td class="wrap">{{ item.definition || '—' }}</td>
+                  <td class="mono wrap">{{ item.formula || '—' }}</td>
+                  <td class="wrap">{{ item.null_policy || '—' }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </template>
+        <empty v-else text="没有匹配的指标定义" hint="请清空筛选关键字后重试"></empty>
+      </section>
+
+      <section class="panel">
+        <div class="panel__head">
+          <div>
+            <h3 class="panel__title">表结构</h3>
+            <p class="panel__desc">来源：<code>/api/meta/tables</code>，共 {{ tables.length }} 张表。点击表头行展开字段清单。</p>
+          </div>
+          <button type="button" class="btn btn--ghost" @click="toggleAll">
+            {{ allOpen ? '全部折叠' : '全部展开' }}
+          </button>
+        </div>
+        <skeleton v-if="loading && !tables.length" :rows="6"></skeleton>
+        <div class="accordion" v-else-if="tables.length">
+          <div class="accordion__item" v-for="item in tables" :key="item.table">
+            <button type="button" class="accordion__head" :aria-expanded="isOpen(item.table) ? 'true' : 'false'"
+                    @click="toggle(item.table)">
+              <span class="accordion__arrow" :class="{ 'is-open': isOpen(item.table) }">
+                <icon name="chevron"></icon>
+              </span>
+              <span class="accordion__table mono">{{ item.table }}</span>
+              <span class="chip">{{ item.layer }}</span>
+              <span class="accordion__comment">{{ item.comment || '—' }}</span>
+              <span class="accordion__count">{{ item.columns ? item.columns.length : 0 }} 个字段</span>
+            </button>
+            <div class="accordion__body" v-if="isOpen(item.table)">
+              <table class="table table--compact">
+                <thead><tr><th>字段</th><th>类型</th><th>说明</th></tr></thead>
+                <tbody>
+                  <tr v-for="col in item.columns" :key="col.name">
+                    <td class="mono">{{ col.name }}</td>
+                    <td class="mono dim">{{ col.type }}</td>
+                    <td class="wrap">{{ col.comment || '—' }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <empty v-else text="元数据服务未返回表结构" hint="请确认后端 /api/meta/tables 可用"></empty>
+      </section>
+    </div>
+  </script>
+
+  <!-- ============================================================
+       应用挂载点
+       ============================================================ -->
+  <div id="app" v-cloak>
+    <div class="shell" v-if="route">
+      <aside class="sidebar" :class="{ 'is-collapsed': collapsed }">
+        <div class="sidebar__brand">
+          <span class="sidebar__logo" aria-hidden="true">批</span>
+          <div class="sidebar__titles" v-show="!collapsed">
+            <strong class="sidebar__name">批流一体智能数据分析平台</strong>
+            <span class="sidebar__sub">实时链路 · 1 分钟窗口</span>
+          </div>
+        </div>
+        <nav class="sidebar__nav" aria-label="主导航">
+          <a v-for="item in routes" :key="item.key" class="nav-item"
+             :class="{ 'is-active': item.key === page }" :href="'#/' + item.key"
+             :title="collapsed ? item.title : null">
+            <icon :name="item.key"></icon>
+            <span class="nav-item__text" v-show="!collapsed">{{ item.title }}</span>
+          </a>
+        </nav>
+        <div class="sidebar__foot">
+          <button type="button" class="btn btn--ghost btn--block" @click="collapsed = !collapsed">
+            {{ collapsed ? '展开导航' : '折叠导航' }}
+          </button>
+          <p class="sidebar__hint" v-show="!collapsed">
+            数据直接读取实时数仓 ADS 层（Doris），不做二次缓存。
+          </p>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div class="topbar__left">
+            <h1 class="topbar__title">{{ route.title }}</h1>
+            <p class="topbar__subtitle">{{ route.subtitle }}</p>
+          </div>
+          <div class="topbar__right">
+            <span class="topbar__time">最后更新：{{ updatedText }}</span>
+            <button type="button" class="btn btn--primary" :disabled="anyLoading" @click="refreshAll">
+              <icon name="refresh" :class="{ spin: anyLoading }"></icon>
+              <span>{{ anyLoading ? '加载中…' : '刷新' }}</span>
+            </button>
+          </div>
+        </header>
+
+        <div class="errorbar" role="alert" v-if="errorText">
+          <span class="errorbar__icon" aria-hidden="true">!</span>
+          <div class="errorbar__body">
+            <strong>数据加载失败</strong>
+            <p>{{ errorText }}</p>
+          </div>
+          <button type="button" class="btn btn--ghost" @click="refreshAll">重试</button>
+        </div>
+
+        <!-- 用 key 强制卸载旧页面：组件销毁时统一 dispose 图表实例，避免内存泄漏 -->
+        <overview-panel v-if="page === 'overview'" key="overview"></overview-panel>
+        <trade-panel v-else-if="page === 'trade'" key="trade"></trade-panel>
+        <traffic-panel v-else-if="page === 'traffic'" key="traffic"></traffic-panel>
+        <category-panel v-else-if="page === 'category'" key="category"></category-panel>
+        <orders-panel v-else-if="page === 'orders'" key="orders"></orders-panel>
+        <metrics-panel v-else-if="page === 'metrics'" key="metrics"></metrics-panel>
+
+        <footer class="foot">
+          <span>项目：基于 Lakehouse 与 AI Agent 的批流一体智能数据分析平台</span>
+          <span>指标口径唯一权威：sql/metadata/metrics.md</span>
+        </footer>
+      </main>
+    </div>
+  </div>
+
+  <!-- 依赖脚本：全部使用相对路径，兼容 Nginx 挂在 http://<ip>/data/ 的场景 -->
+  <script src="./vendor/vue.global.prod.js"></script>
+  <script src="./vendor/echarts.min.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>

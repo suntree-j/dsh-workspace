@@ -1,0 +1,352 @@
+"""数据服务（FastAPI）：只读指标 API。
+
+定位（对应 AGENTS.md 第 10 节 Agent 安全规范）：
+    这是「数据后台」—— 前端 Dashboard 与未来的 Agent 都通过它读数据。
+    它在架构上就**没有写权限**：只用 Doris 只读账号，且所有 SQL 先过安全守卫。
+
+为什么用 FastAPI 而不是 Spring Boot：
+    Sprint 6 的设计方案里写的是 "FastAPI / Spring Boot 二选一"。
+    本项目的实时链路（Flink SQL、数据生成器）已经是 Python 生态，
+    选 FastAPI 可以让"数据 + 服务"共用同一套语言与 venv，
+    不必为了一个只读接口再引入 JVM 技术栈（违反"不偷偷增加技术栈"）。
+
+启动：
+    uvicorn app.main:app --host 127.0.0.1 --port 8000
+    （生产由 systemd 托管，见 deploy/systemd/data-platform-api.service）
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from fastapi import FastAPI, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from .config import ConfigError, Settings, load_settings
+from .doris import DorisClient, DorisUnavailable
+from .envelope import envelope, error_body, now_iso
+from .metrics_doc import MetricsDoc, load_metrics_doc
+from .repository import Repository
+from .sqlguard import SqlRejected
+
+# ------------------------------------------------------------
+# 应用与依赖
+# ------------------------------------------------------------
+try:
+    SETTINGS: Settings = load_settings()
+    CONFIG_ERROR: str = ""
+except ConfigError as exc:  # 配置缺失：服务照常启动，但接口返回明确错误
+    SETTINGS = None  # type: ignore[assignment]
+    CONFIG_ERROR = str(exc)
+
+app = FastAPI(
+    title=SETTINGS.title if SETTINGS else "数据服务",
+    version=SETTINGS.version if SETTINGS else "0.0.0",
+    description=(
+        "批流一体智能数据分析平台的只读数据服务。\n\n"
+        "所有接口遵循同一响应信封，并在 `source` 中声明数据来源（表、指标口径、时间范围）。"
+    ),
+    root_path="/data/api",  # 经 Nginx 反向代理后的对外路径，保证 /docs 链接正确
+)
+
+# 演示环境：只读接口允许跨域，便于本地静态页面直接联调。
+# 注意：这里开放的只有 SELECT 能力，且带行数上限与超时。
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
+
+_metrics_cache: dict[str, Any] = {"mtime": None, "doc": None}
+
+
+def get_metrics_doc() -> MetricsDoc:
+    """读取指标口径文档（按 mtime 缓存）。
+
+    缓存键用文件修改时间：改了 metrics.md 不必重启服务，
+    但也不会每次请求都重新解析。
+    """
+    if SETTINGS is None:
+        raise DorisUnavailable(CONFIG_ERROR)
+    path: Path = SETTINGS.metrics_doc
+    mtime = path.stat().st_mtime if path.is_file() else None
+    if _metrics_cache["doc"] is None or _metrics_cache["mtime"] != mtime:
+        _metrics_cache["doc"] = load_metrics_doc(path)
+        _metrics_cache["mtime"] = mtime
+    return _metrics_cache["doc"]
+
+
+def get_repository() -> Repository:
+    if SETTINGS is None:
+        raise DorisUnavailable(CONFIG_ERROR)
+    return Repository(DorisClient(SETTINGS))
+
+
+# ------------------------------------------------------------
+# 统一异常处理
+# ------------------------------------------------------------
+@app.exception_handler(SqlRejected)
+async def _handle_sql_rejected(_: Request, exc: SqlRejected) -> JSONResponse:
+    return JSONResponse(
+        status_code=400,
+        content=error_body(exc.code, exc.message, exc.detail),
+    )
+
+
+@app.exception_handler(DorisUnavailable)
+async def _handle_doris_unavailable(_: Request, exc: DorisUnavailable) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content=error_body("DORIS_UNAVAILABLE", "数据仓库暂时不可用，请稍后重试", str(exc)),
+    )
+
+
+@app.exception_handler(ValueError)
+async def _handle_value_error(_: Request, exc: ValueError) -> JSONResponse:
+    return JSONResponse(
+        status_code=500,
+        content=error_body("INTERNAL_DATA_ERROR", "数据处理失败", str(exc)),
+    )
+
+
+def _limit(value: int, settings: Settings, default: int | None = None) -> int:
+    """把 limit 收敛到 [1, max_limit]，避免一次拉爆内存。"""
+    base = value or default or settings.default_limit
+    return max(1, min(int(base), settings.max_limit))
+
+
+# ------------------------------------------------------------
+# 接口
+# ------------------------------------------------------------
+@app.get("/", summary="接口索引")
+def index() -> dict[str, Any]:
+    return envelope(
+        {
+            "service": "数据服务（只读）",
+            "version": SETTINGS.version if SETTINGS else "unknown",
+            "endpoints": [
+                "/health", "/overview", "/metrics/trade", "/metrics/traffic",
+                "/metrics/category", "/funnel", "/orders", "/orders/{order_id}",
+                "/meta/metrics", "/meta/tables", "/categories",
+            ],
+            "docs": "/docs",
+        },
+        note="所有接口均为只读（Doris 只读账号 + SQL 安全守卫）",
+    )
+
+
+@app.get("/health", summary="健康检查")
+def health() -> dict[str, Any]:
+    """服务与数据仓库连通性。
+
+    同时报告是否使用了专用只读账号 —— 这是安全底线，
+    不应该等到出事故才发现服务在用 root 连库。
+    """
+    if SETTINGS is None:
+        return envelope({"status": "degraded", "doris": "unconfigured",
+                         "message": CONFIG_ERROR, "server_time": now_iso()})
+    elapsed = DorisClient(SETTINGS).ping()
+    return envelope(
+        {
+            "status": "ok",
+            "doris": "ok",
+            "doris_latency_ms": elapsed,
+            "doris_host": f"{SETTINGS.doris_host}:{SETTINGS.doris_port}",
+            "readonly_user": SETTINGS.doris_user,
+            "readonly_enforced": SETTINGS.is_readonly_user,
+            "version": SETTINGS.version,
+            "server_time": now_iso(),
+        },
+        tables=[],
+        note="只读账号 + SQL 守卫（仅 SELECT、强制 LIMIT）",
+    )
+
+
+@app.get("/overview", summary="总览 KPI")
+def overview(
+    window_limit: int = Query(60, ge=1, le=20160, description="类目排行的回看窗口数（分钟）"),
+) -> dict[str, Any]:
+    """总览页数据：全量 KPI + 类目排行 + 窗口新鲜度。"""
+    repo = get_repository()
+    doc = get_metrics_doc()
+    assert SETTINGS is not None
+
+    trade, trade_tables, trade_fields = repo.trade_kpi()
+    traffic, traffic_tables, traffic_fields = repo.traffic_kpi()
+    distinct, distinct_tables, distinct_fields = repo.distinct_users()
+    stats, stats_tables = repo.window_stats()
+    top, top_tables, top_fields = repo.category_top(limit=5)
+
+    kpi = {**(trade or {}), **(traffic or {}), **(distinct or {})}
+    return envelope(
+        {
+            "kpi": kpi,
+            "windows": {
+                "trade": stats.get("trade"),
+                "traffic": stats.get("traffic"),
+                "category": stats.get("category"),
+            },
+            "latest_window": stats.get("latest_window"),
+            "earliest_window": stats.get("earliest_window"),
+            "category_top": top,
+        },
+        tables=trade_tables + traffic_tables + distinct_tables + stats_tables + top_tables,
+        metric_definitions=doc.definitions_for(
+            [f for f in trade_fields + traffic_fields + distinct_fields + top_fields]
+        ),
+        time_range={"start": stats.get("earliest_window"), "end": stats.get("latest_window")},
+        note=(
+            "可加指标（GMV/订单量/支付/退款/PV 等）为全量口径：对所有 1 分钟窗口求和；"
+            "去重类指标（UV、下单用户数）取自 DWD 明细的 COUNT(DISTINCT user_id)，"
+            "**不能**用逐窗求和（那样得到的是人次）。"
+        ),
+    )
+
+
+@app.get("/metrics/trade", summary="交易指标时间序列")
+def metrics_trade(limit: int = Query(0, ge=0, le=1000)) -> dict[str, Any]:
+    repo = get_repository()
+    doc = get_metrics_doc()
+    assert SETTINGS is not None
+    rows, tables, fields = repo.trade_series(_limit(limit, SETTINGS))
+    return envelope(
+        rows,
+        tables=tables,
+        metric_definitions=doc.definitions_for(fields),
+        time_range={
+            "start": rows[0]["window_start"] if rows else None,
+            "end": rows[-1]["window_start"] if rows else None,
+        },
+        note="按 window_start 升序返回最近 N 个 1 分钟窗口",
+    )
+
+
+@app.get("/metrics/traffic", summary="流量指标时间序列")
+def metrics_traffic(limit: int = Query(0, ge=0, le=1000)) -> dict[str, Any]:
+    repo = get_repository()
+    doc = get_metrics_doc()
+    assert SETTINGS is not None
+    rows, tables, fields = repo.traffic_series(_limit(limit, SETTINGS))
+    return envelope(
+        rows,
+        tables=tables,
+        metric_definitions=doc.definitions_for(fields),
+        time_range={
+            "start": rows[0]["window_start"] if rows else None,
+            "end": rows[-1]["window_start"] if rows else None,
+        },
+        note="按 window_start 升序返回最近 N 个 1 分钟窗口",
+    )
+
+
+@app.get("/metrics/category", summary="类目销售排行")
+def metrics_category(
+    limit: int = Query(10, ge=1, le=100),
+    window_limit: int = Query(0, ge=0, le=20160, description="0 表示全量口径"),
+) -> dict[str, Any]:
+    repo = get_repository()
+    doc = get_metrics_doc()
+    assert SETTINGS is not None
+    rows, tables, fields = repo.category_top(limit=limit, window_limit=window_limit or None)
+    return envelope(
+        rows,
+        tables=tables,
+        metric_definitions=doc.definitions_for(fields),
+        note=("全量口径" if not window_limit else f"最近 {window_limit} 分钟窗口口径"),
+    )
+
+
+@app.get("/funnel", summary="行为漏斗")
+def funnel(window_limit: int = Query(1440, ge=1, le=20160)) -> dict[str, Any]:
+    repo = get_repository()
+    doc = get_metrics_doc()
+    data, tables, fields = repo.funnel(window_limit)
+    return envelope(
+        data,
+        tables=tables,
+        metric_definitions=doc.definitions_for(fields),
+        note=f"最近 {window_limit} 分钟窗口的行为漏斗（浏览→点击→加购→购买）",
+    )
+
+
+@app.get("/orders", summary="订单明细分页")
+def orders(
+    limit: int = Query(20, ge=1, le=200),
+    offset: int = Query(0, ge=0, le=100000),
+    category: str | None = Query(None, max_length=50),
+    start: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    end: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+) -> dict[str, Any]:
+    repo = get_repository()
+    doc = get_metrics_doc()
+    assert SETTINGS is not None
+    data, tables, fields = repo.orders(_limit(limit, SETTINGS), offset, category, start, end)
+    return envelope(
+        data,
+        tables=tables,
+        metric_definitions=doc.definitions_for(fields),
+        time_range={"start": start, "end": end},
+        note="DWD 明细层，按事件时间倒序；分页由 limit/offset 控制",
+    )
+
+
+@app.get("/orders/{order_id}", summary="订单详情（含支付与退款）")
+def order_detail(order_id: int) -> JSONResponse:
+    repo = get_repository()
+    data, tables, fields = repo.order_detail(order_id)
+    if data is None:
+        return JSONResponse(
+            status_code=404,
+            content=error_body("ORDER_NOT_FOUND", f"订单 {order_id} 不存在", "请检查订单号是否正确"),
+        )
+    return JSONResponse(
+        content=envelope(
+            data,
+            tables=tables,
+            metric_definitions=get_metrics_doc().definitions_for(fields),
+            note="订单 + 支付 + 退款三表关联（体现 DWD 明细层的可追溯性）",
+        )
+    )
+
+
+@app.get("/categories", summary="类目列表")
+def categories() -> dict[str, Any]:
+    rows, tables = get_repository().categories()
+    return envelope(rows, tables=tables, note="用于前端筛选下拉框")
+
+
+@app.get("/meta/metrics", summary="指标口径字典")
+def meta_metrics() -> dict[str, Any]:
+    """指标口径字典（解析自 sql/metadata/metrics.md）。
+
+    这是「Agent 必须知道指标定义」的落地：口径只有一份，
+    接口返回的就是文档里的原文，不存在第二份副本。
+    """
+    doc = get_metrics_doc()
+    return envelope(
+        {
+            "metrics": [m.as_dict() for m in doc.metrics],
+            "conventions": [c.as_dict() for c in doc.conventions],
+            "version": doc.version,
+            "updated_at": doc.updated_at,
+            "source_document": "sql/metadata/metrics.md",
+        },
+        tables=[],
+        note="口径唯一权威来源：sql/metadata/metrics.md（接口直接解析该文档）",
+    )
+
+
+@app.get("/meta/tables", summary="表结构与分层")
+def meta_tables() -> dict[str, Any]:
+    from .sqlguard import BUSINESS_TABLES
+
+    ordered = sorted(BUSINESS_TABLES)
+    rows, tables = get_repository().table_metadata(ordered)
+    return envelope(
+        rows,
+        tables=tables,
+        note="来自 Doris information_schema（只读），含字段注释与所属分层",
+    )

@@ -1,0 +1,17 @@
+# ============================================================
+# 数据服务（services/api）依赖
+# ============================================================
+#
+# 只装三样东西：
+#   fastapi      路由与参数校验（自带 pydantic）
+#   uvicorn      ASGI 服务器（纯 Python 版，不装 [standard]：
+#                避免 uvloop/httptools 的编译依赖，服务器上装得更稳）
+#   mysql-connector-python  访问 Doris（Doris 兼容 MySQL 协议）
+#
+# 版本用区间约束而不是 latest：Python 依赖允许小版本浮动，
+# 但必须可复现 —— 实际锁定版本见部署后的 requirements-freeze.txt。
+# ============================================================
+
+fastapi>=0.115,<1.0
+uvicorn>=0.30,<1.0
+mysql-connector-python>=9.0,<10.0

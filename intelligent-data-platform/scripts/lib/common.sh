@@ -150,6 +150,30 @@ service_container() {
 }
 
 # ------------------------------------------------------------
+# 探测对外访问 IP
+#
+# 为什么要单独探测：云服务器的 `hostname -I` 返回的是**内网地址**
+# （实测 172.16.0.10），把它当访问地址打印出来会误导使用者。
+# 顺序：显式环境变量 → 公网回显服务 → 内网地址（离线环境的兜底）。
+# ------------------------------------------------------------
+public_ip() {
+    if [ -n "${PUBLIC_IP:-}" ]; then
+        printf '%s' "${PUBLIC_IP}"
+        return 0
+    fi
+
+    local candidate
+    for endpoint in "https://ifconfig.me/ip" "https://ipinfo.io/ip"; do
+        candidate="$(curl -fsS --max-time 5 "${endpoint}" 2>/dev/null | tr -d '[:space:]')"
+        case "${candidate}" in
+            [0-9]*.[0-9]*.[0-9]*.[0-9]*) printf '%s' "${candidate}"; return 0 ;;
+        esac
+    done
+
+    hostname -I 2>/dev/null | awk '{print $1}'
+}
+
+# ------------------------------------------------------------
 # 重试执行命令直到成功或超时
 #   retry <超时秒> <间隔秒> <命令...>
 # ------------------------------------------------------------

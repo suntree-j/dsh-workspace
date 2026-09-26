@@ -1,0 +1,48 @@
+-- ============================================================
+-- Sprint 6 — Doris 只读账号（数据服务与未来 Agent 专用）
+-- ============================================================
+--
+-- 项目：基于 Lakehouse 与 AI Agent 的批流一体智能数据分析平台
+-- 依据：AGENTS.md 第 10.3 节「Agent 连接 Doris 必须使用专用只读账号，
+--       不得复用 root」
+--
+-- 为什么要在数据源头就把权限收掉：
+--   应用层（FastAPI）与未来的 Agent 都会有 SQL 拼接环节，
+--   只在应用层做字符串校验是**单点防御** —— 一旦某个查询绕过守卫，
+--   root 账号足以 DROP 整库。因此这里从数据库侧再上一道锁：
+--   只给 SELECT，连 INSERT 都不给。
+--
+-- 说明：
+--   1. 口令**不写在本文件里**，由部署脚本从 .env 读取后注入
+--      （见 scripts/install-web.sh，变量 API_DORIS_PASSWORD）；
+--   2. 本脚本幂等：账号已存在时先 DROP 再建，保证口令与 .env 一致；
+--   3. Doris 4.1 的权限模型：SELECT_PRIV 只读；
+--      另外授予 information_schema 的查询能力用于元数据接口。
+-- ============================================================
+
+-- 下面两条语句由部署脚本用真实口令替换 ${API_DORIS_PASSWORD} 后执行：
+--   CREATE USER 'agent_ro' IDENTIFIED BY '<口令>';
+--   GRANT SELECT_PRIV ON ecommerce.* TO 'agent_ro';
+--
+-- 为了让本文件可以被人直接阅读与手工执行，这里给出等价的手工步骤：
+--
+--   -- 1) 建账号（口令从 .env 取，不要硬编码）
+--   DROP USER IF EXISTS 'agent_ro'@'%';
+--   CREATE USER 'agent_ro'@'%' IDENTIFIED BY '<API_DORIS_PASSWORD>';
+--
+--   -- 2) 只给业务库的只读权限
+--   GRANT SELECT_PRIV ON ecommerce.* TO 'agent_ro'@'%';
+--
+--   -- 3) 元数据接口需要读 information_schema（Doris 内置库）
+--   GRANT SELECT_PRIV ON information_schema.* TO 'agent_ro'@'%';
+--
+--   -- 4) 不需要 FLUSH PRIVILEGES
+--   --    Doris **不支持** MySQL 的 `FLUSH PRIVILEGES`（实测报
+--   --    mismatched input 'FLUSH'），且 GRANT 立即生效。
+--   --    把它写进脚本会导致整个脚本在最后一行报错中断。
+--
+-- 验证（应只有 Select_priv，不能有 Admin_priv / Node_priv）：
+--   SHOW GRANTS FOR 'agent_ro'@'%';
+--
+-- 回收（如不再需要）：
+--   DROP USER 'agent_ro'@'%';
