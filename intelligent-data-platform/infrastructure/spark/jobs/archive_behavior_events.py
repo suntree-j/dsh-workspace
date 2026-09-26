@@ -143,8 +143,22 @@ def parse_events(raw: DataFrame) -> DataFrame:
         F.col("product_id").cast("long").alias("product_id"),
         F.col("device").cast("string").alias("device"),
         F.col("province").cast("string").alias("province"),
-        # 统一解析到 Asia/Shanghai，与 metrics.md 的时区约定一致
-        F.to_timestamp(F.col("event_time"), "yyyy-MM-dd'T'HH:mm:ssXXX").alias("event_time"),
+        # 统一解析到 Asia/Shanghai，与 metrics.md 的时区约定一致。
+        #
+        # !! 不要传格式串 !!
+        #   实测踩坑（Sprint 4，最难定位的一层）：原先写的是
+        #       F.to_timestamp(F.col("event_time"), "yyyy-MM-dd'T'HH:mm:ssXXX")
+        #   结果 **20000 行全部解析成 NULL**，进而被下游的
+        #   `WHERE event_time IS NOT NULL` 全部筛掉，写进表 0 行。
+        #
+        #   原因：Spark 3.x 的 to_timestamp(str, fmt) 走 DateTimeFormatter，
+        #   而格式串里的字面量 `T` **不是合法模式字母** —— 它不会抛错，
+        #   而是静默解析失败、整列变 NULL。这类"不报错但全错"最难查：
+        #   作业跑完、日志正常、自检里"无空值"还空洞地通过（空表里当然没空值）。
+        #
+        #   事件时间本身就是标准 ISO-8601（2026-09-26T10:05:00+08:00），
+        #   Spark 原生即可解析，**不传格式串才是正确做法**。
+        F.to_timestamp(F.col("event_time")).alias("event_time"),
     )
 
 
@@ -178,20 +192,31 @@ def verify(spark: SparkSession, kafka_count: int, events: DataFrame) -> int:
     checker.check("可解析行数 == Kafka 消息数", parsed_count, kafka_count)
 
     # ---- 2. 关键字段非空 ----
-    nulls = spark.sql(
-        f"""
-        SELECT
-            SUM(CASE WHEN event_id   IS NULL THEN 1 ELSE 0 END) AS null_id,
-            SUM(CASE WHEN event_type IS NULL THEN 1 ELSE 0 END) AS null_type,
-            SUM(CASE WHEN user_id    IS NULL THEN 1 ELSE 0 END) AS null_user,
-            SUM(CASE WHEN event_time IS NULL THEN 1 ELSE 0 END) AS null_time
-        FROM {ODS_TABLE}
-        """
+    #
+    # !! 断言必须打在**源数据**上，不能只打在目标表上 !!
+    #   实测踩坑（Sprint 4）：原先这里查的是 {ODS_TABLE}。
+    #   当写入实际发生 0 行时，目标表是空的，
+    #   于是"0 行里没有空值" → 4 条检查**空洞地全部通过**，
+    #   而真实情况是 20000 行全部解析失败、一条都没写进去。
+    #   一份"全绿"的自检报告配一个空表 —— 这比直接报错更危险。
+    #
+    #   现在先断言源非空（防空区间假通过），再在源上查非空。
+    checker.check_true(
+        "源数据非空（防空区间假通过）",
+        parsed_count > 0,
+        f"源行数={parsed_count}",
+    )
+
+    src_nulls = events.agg(
+        F.sum(F.col("event_id").isNull().cast("int")).alias("null_id"),
+        F.sum(F.col("event_type").isNull().cast("int")).alias("null_type"),
+        F.sum(F.col("user_id").isNull().cast("int")).alias("null_user"),
+        F.sum(F.col("event_time").isNull().cast("int")).alias("null_time"),
     ).first()
-    checker.check("event_id 无空值", int(nulls["null_id"] or 0), 0)
-    checker.check("event_type 无空值", int(nulls["null_type"] or 0), 0)
-    checker.check("user_id 无空值", int(nulls["null_user"] or 0), 0)
-    checker.check("event_time 无空值", int(nulls["null_time"] or 0), 0)
+    checker.check("源 event_id 无空值", int(src_nulls["null_id"] or 0), 0)
+    checker.check("源 event_type 无空值", int(src_nulls["null_type"] or 0), 0)
+    checker.check("源 user_id 无空值", int(src_nulls["null_user"] or 0), 0)
+    checker.check("源 event_time 无空值", int(src_nulls["null_time"] or 0), 0)
 
     # ---- 3. 枚举合法性 ----
     # 出现未登记的取值说明数据生成器或上游改了协议，必须立刻发现
