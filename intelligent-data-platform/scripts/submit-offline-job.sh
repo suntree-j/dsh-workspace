@@ -45,9 +45,9 @@ parse_args() {
                     exit 2
                 fi
                 case "${STAGE}" in
-                    ods|archive|dwd|dws|ads|reconcile) ;;
+                    ods|archive|iceberg-migrate|dwd|dws|ads|reconcile) ;;
                     *)
-                        log_error "未知阶段：${STAGE}（可选 ods|archive|dwd|dws|ads|reconcile）"
+                        log_error "未知阶段：${STAGE}（可选 ods|archive|iceberg-migrate|dwd|dws|ads|reconcile）"
                         printf '  提示：需要一次跑完请用 bash scripts/run-batch-pipeline.sh\n'
                         exit 2
                         ;;
@@ -68,6 +68,7 @@ parse_args() {
 
 STAGE_DESC_ods="MySQL → ODS（Spark JDBC 抽取，作业内逐表对账）"
 STAGE_DESC_archive="Kafka 行为事件 → ODS（Sprint 4 新增，补齐流量域离线源）"
+STAGE_DESC_iceberg_migrate="Parquet → Iceberg 迁移（Sprint 5；含逐表行数与金额核对）"
 STAGE_DESC_dwd="ODS → DWD（去重 / 清洗 / 维度补全）"
 STAGE_DESC_dws="DWD → DWS（按天轻度聚合）"
 STAGE_DESC_ads="DWD → ADS（指标口径，1 分钟 + 1 天）"
@@ -91,6 +92,13 @@ submit_stage() {
                 "infrastructure/spark/jobs/archive_behavior_events.py" \
                 --conf "spark.jobs.ddl=/opt/sql/hive/01_ods_tables.sql" \
                 --conf "spark.jobs.kafkaBootstrap=${KAFKA_CONTAINER_BOOTSTRAP:-kafka:9092}"
+            ;;
+        iceberg-migrate)
+            # Parquet 外部表 → Iceberg 表（Sprint 5）
+            # 作业从源表 schema 推导 Iceberg 定义并内建逐表核对，
+            # 不需要额外参数。
+            submit_spark_job "sprint5-migrate-parquet-to-iceberg" \
+                "infrastructure/spark/jobs/migrate_parquet_to_iceberg.py"
             ;;
         dwd)
             submit_spark_job "sprint3-build-dwd" "infrastructure/spark/jobs/build_dwd.py"
