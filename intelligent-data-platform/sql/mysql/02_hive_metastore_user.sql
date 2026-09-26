@@ -1,0 +1,26 @@
+-- ============================================================
+-- Sprint 2 — Hive Metastore 的元数据库与账号
+-- ============================================================
+--
+-- 项目：基于 Lakehouse 与 AI Agent 的批流一体智能数据分析平台
+--
+-- 为什么元数据放在业务库同一个 MySQL 实例：
+--   1) 服务器内存紧张（实测可用 ~2 GB），单开一个 MySQL 容器要多花 ~450 MB；
+--   2) 元数据量很小（几十张表），与业务库互不干扰；
+--   3) 用**独立库 + 独立账号**做了隔离：hive 账号只对 hive_metastore 库有权限，
+--      碰不到 ecommerce 库。
+--
+-- 口令不写在本文件里：由 scripts/init-lakehouse.sh 从 .env 读取
+-- （HIVE_METASTORE_USER / HIVE_METASTORE_PASSWORD）后注入执行。
+--
+-- 等价的手工步骤：
+--   CREATE DATABASE IF NOT EXISTS hive_metastore
+--     CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+--   CREATE USER IF NOT EXISTS 'hive'@'%' IDENTIFIED BY '<口令>';
+--   GRANT ALL PRIVILEGES ON hive_metastore.* TO 'hive'@'%';
+--   FLUSH PRIVILEGES;          -- MySQL 支持，Doris 不支持（见 20_readonly_user.sql）
+--
+-- 表结构（BUCKETING_COLS / TBLS / COLUMNS_V2 等）**不在这里建**：
+--   由 Hive 官方工具初始化，保证与 Hive 版本严格匹配：
+--     docker exec hive-metastore schematool -dbType mysql -initSchema
+--   手工建元数据表是这类项目最常见的"看起来能用、升级就炸"的坑。

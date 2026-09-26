@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<!--
+  ============================================================
+  Hive Metastore 配置（Sprint 2：离线链路）
+  ============================================================
+
+  只跑 Metastore 服务（thrift :9083），不跑 HiveServer2 / Tez：
+  两者各需数百 MB 到上 GB 内存，而 Spark 直接用 Metastore 目录即可，
+  不需要 HiveServer2 做 SQL 网关（服务器内存实测见 SPRINT_2.md 2.3）。
+
+  关键点：
+    1. 元数据存 MySQL（复用 Sprint 0 的 MySQL 容器，库名 hive_metastore）
+    2. 表数据存 S3A（MinIO 的 lakehouse bucket）：用 S3 而不是 HDFS 的
+       内存依据记录在 SPRINT_2.md 第 2.2 节
+    3. 口令不写死：用 Hadoop 配置的 ${env.VAR} 语法从环境变量注入，
+       与项目「凭据只从 .env 注入」的规范一致
+
+  注意：XML 注释里不能出现「连续两个减号」这一字符组合（XML 规范禁止）。
+  本文件最初用一排减号做分隔装饰，Hive 启动时报
+    WstxParsingException: String not allowed in comment
+  导致 Metastore 反复重启（RestartCount 一路涨到 16）——
+  因此下面统一改用等号做分隔。
+-->
+<configuration>
+
+  <!-- ========== 元数据库：MySQL ========== -->
+  <property>
+    <name>javax.jdo.option.ConnectionURL</name>
+    <value>jdbc:mysql://mysql:3306/hive_metastore?createDatabaseIfNotExist=true&amp;useSSL=false&amp;allowPublicKeyRetrieval=true&amp;characterEncoding=UTF-8</value>
+  </property>
+  <property>
+    <name>javax.jdo.option.ConnectionDriverName</name>
+    <value>com.mysql.cj.jdbc.Driver</value>
+  </property>
+  <property>
+    <name>javax.jdo.option.ConnectionUserName</name>
+    <value>${env.HIVE_METASTORE_USER}</value>
+  </property>
+  <property>
+    <name>javax.jdo.option.ConnectionPassword</name>
+    <value>${env.HIVE_METASTORE_PASSWORD}</value>
+  </property>
+
+  <!-- ========== Metastore 服务 ========== -->
+  <property>
+    <name>hive.metastore.uris</name>
+    <value>thrift://hive-metastore:9083</value>
+  </property>
+  <property>
+    <name>hive.metastore.warehouse.dir</name>
+    <value>s3a://lakehouse/warehouse</value>
+  </property>
+  <property>
+    <name>hive.metastore.schema.verification</name>
+    <value>false</value>
+  </property>
+  <property>
+    <name>hive.metastore.execute.setugi</name>
+    <value>false</value>
+  </property>
+
+  <!-- ========== S3A（MinIO）==========
+       Metastore 自身也需要：建表时要访问 warehouse 目录校验路径。 -->
+  <property>
+    <name>fs.s3a.endpoint</name>
+    <value>${env.S3_ENDPOINT}</value>
+  </property>
+  <property>
+    <name>fs.s3a.access.key</name>
+    <value>${env.S3_ACCESS_KEY}</value>
+  </property>
+  <property>
+    <name>fs.s3a.secret.key</name>
+    <value>${env.S3_SECRET_KEY}</value>
+  </property>
+  <property>
+    <name>fs.s3a.path.style.access</name>
+    <value>true</value>
+  </property>
+  <property>
+    <name>fs.s3a.connection.ssl.enabled</name>
+    <value>false</value>
+  </property>
+  <property>
+    <name>fs.s3a.impl</name>
+    <value>org.apache.hadoop.fs.s3a.S3AFileSystem</value>
+  </property>
+
+  <!-- ========== 时区：与全项目一致 ========== -->
+  <property>
+    <name>hive.metastore.timezone</name>
+    <value>Asia/Shanghai</value>
+  </property>
+
+</configuration>

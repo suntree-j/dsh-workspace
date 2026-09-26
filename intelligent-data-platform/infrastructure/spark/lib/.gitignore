@@ -1,0 +1,2 @@
+# Spark 依赖 JAR 由 download-jars.sh 从 Maven Central 获取（约 320 MB），不入 Git
+*.jar

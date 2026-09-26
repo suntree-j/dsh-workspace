@@ -1,0 +1,2 @@
+# 从 apache/hive 镜像提取的 Hive 客户端 JAR（约 400 MB）
+*.jar
