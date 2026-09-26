@@ -45,8 +45,28 @@ from _common import (
     clean_stale_spark_temp,
 )
 
-SRC_DB = "lakehouse"
-DST_DB = "lakehouse_iceberg"
+#: 源库：湖仓的 Parquet 侧（Hive 外部表），**必须写满三段**。
+#:
+#: !! 为什么源库要显式写 spark_catalog !!
+#:   Spark 的名字解析规则：一段名 = 当前目录 + 当前命名空间下的表；
+#:   两段名 = (命名空间, 表)，**永远属于当前目录**；只有三段名才是
+#:   (目录, 命名空间, 表)。
+#:   所以两段名 `lakehouse.ods_user` 并不自动指向"Hive 那一边"，
+#:   它指的是"当前目录里叫 lakehouse 的库"。当前目录恰好是
+#:   spark_catalog（Hive）时它是对的 —— 换个默认目录它就指向别处，
+#:   而且**不会报错**。写成三段名，结果与默认目录是谁无关。
+SRC_DB = "spark_catalog.lakehouse"
+
+#: Iceberg 目录名（见 infrastructure/spark/conf/spark-defaults.conf）。
+#: 注意它**不能**与下面的库名相同 —— 同名会让"建库"这句话产生二义。
+ICEBERG_CATALOG = "iceberg"
+
+#: 目标命名空间：HiveCatalog 的命名空间就是 Hive 库名，
+#: 因此沿用 `lakehouse_iceberg`，与 Parquet 侧的 `lakehouse` 并存。
+DST_NS = "lakehouse_iceberg"
+
+#: 目标前缀：**三段名**（目录.命名空间），拼上表名后与默认目录无关。
+DST_DB = f"{ICEBERG_CATALOG}.{DST_NS}"
 
 #: ODS 层落盘的 S3 路径（用于清理 Spark 写入残留目录）
 WAREHOUSE = "s3a://lakehouse/warehouse"
@@ -217,8 +237,17 @@ def main() -> int:
     if removed:
         print(f"[clean] 清理残留目录：{removed} 个", flush=True)
 
-    print("[migrate] 建 Iceberg 库", flush=True)
-    spark.sql(f"CREATE DATABASE IF NOT EXISTS {DST_DB} COMMENT 'Iceberg 湖仓表（Sprint 5）'")
+    # !! 这里必须用**一段名**，而且这个名字不能与任何 catalog 同名 !!
+    #   实测踩坑：写 `CREATE DATABASE IF NOT EXISTS lakehouse_iceberg` 时，
+    #   因为 lakehouse_iceberg **既是库名也是 catalog 名**，Spark 把它解析成
+    #   "目录 + 空命名空间"，报 `Cannot create namespace with invalid name: `
+    #   （冒号后面是空的 —— 这就是"命名空间没有名字"的样子）。
+    #   修法是把 catalog 改名成 iceberg（见 spark-defaults.conf），库名保持不变，
+    #   于是 `lakehouse_iceberg` 只可能是一个命名空间的名字，没有二义。
+    #   HiveCatalog 的命名空间 = Hive 库名，所以即便这条语句经 Hive 目录执行，
+    #   建出来的也正是 Iceberg 要用的那个库（两边同一个 Metastore）。
+    print(f"[migrate] 建 Iceberg 库 {DST_NS}", flush=True)
+    spark.sql(f"CREATE DATABASE IF NOT EXISTS {DST_NS}")
 
     plans: list[TablePlan] = []
     for name in MIGRATE_TABLES:
@@ -230,6 +259,12 @@ def main() -> int:
         ddl = create_iceberg_table(spark, plan)
         print(f"[ddl] {plan.dst}（分区：{plan.partition_cols or '无'}）", flush=True)
         print(f"      {ddl.splitlines()[0]} ...", flush=True)
+        # 建完立刻问表自己"你是什么表"，而不是相信 CREATE 没报错就等于建对了。
+        # 这一条正是这次踩坑的产物：命令成功、表也建出来了，
+        # 但建在**另一个目录的同名库**里 —— 只有问表自己才能发现。
+        rows = spark.sql(f"DESCRIBE EXTENDED {plan.dst}").where("col_name = 'Provider'").collect()
+        provider = rows[0]["data_type"] if rows else "<未取到>"
+        checker.check(f"{plan.name} 是 Iceberg 表（Provider）", provider, "iceberg")
 
     for plan in plans:
         print(f"[migrate] 搬数据 {plan.src} → {plan.dst}", flush=True)
