@@ -45,10 +45,27 @@ KAFKA_CLIENTS_VERSION="3.4.1"
 # commons-pool2：kafka-clients 的传递依赖
 COMMONS_POOL2_VERSION="2.12.0"
 
-# Iceberg：走 Maven Central 的正式发布版（Sprint 5）
-#   为什么是 1.11.0：Maven Central 上 iceberg-spark-runtime-3.5_2.12
-#   的最新发布版（2026-05-15）。查证方式与时间为项目记录在案。
-ICEBERG_VERSION="1.11.0"
+# Iceberg：**必须选字节码目标不高于 Java 11 的版本**（Sprint 5 实测结论）
+#
+# !! 为什么不是最新的 1.11.0 !!
+#   实测（读 jar 里 ExtendedParser.class 的 class file major version）：
+#       1.11.0  → major 61 = Java 17   ❌
+#       1.10.2  → major 55 = Java 11   ✅  ← 选它
+#       1.10.0 / 1.9.2 / 1.8.1 / 1.7.2 → 均为 55 ✅
+#   而 apache/spark:3.5.7 镜像里的 JRE 是 **Java 11**（Temurin 11.0.27）。
+#   用 1.11.0 会抛：
+#       UnsupportedClassVersionError: org/apache/iceberg/spark/ExtendedParser
+#       has been compiled by a more recent version of the Java Runtime
+#       (class file version 61.0), this version ... only recognizes ... up to 55.0
+#
+# !! 教训：不要用文档的"支持范围"代替字节码目标 !!
+#   Iceberg 官方支持在 Java 11 上运行，但 1.11.0 的**发布字节码是 Java 17 目标**
+#   —— "能在 Java 11 上跑" 与 "字节码要求 Java 17" 是两件事。
+#   判定方法只有一种：**实测 class file major version**（本脚本注释上方列出了结果）。
+#
+# 何时可以升到 1.11+：当 Spark 镜像换成 Java 17 之后（届时需回归
+# Sprint 2/3/4 的全部离线作业）。
+ICEBERG_VERSION="1.10.2"
 
 LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 MAVEN_BASE="https://repo1.maven.org/maven2"

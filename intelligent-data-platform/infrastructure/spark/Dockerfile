@@ -50,16 +50,22 @@ COPY lib/commons-pool2-2.12.0.jar /opt/spark/jars/
 
 # Iceberg 表格式（Sprint 5）
 #
+# !! 版本必须是 1.10.2，不能升到 1.11.0 !!
+#   实测各版本 ExtendedParser.class 的 class file major version：
+#       1.11.0  → 61 = Java 17   ← 会抛 UnsupportedClassVersionError
+#       1.10.2  → 55 = Java 11   ← 本镜像的 JRE 是 Java 11，选它
+#   教训：Iceberg 官方"支持 Java 11 运行"不等于"字节码是 Java 11 目标"。
+#   判定方法只有实测 class file major version，不能看文档的支持范围。
+#
 # !! 构件名里的 3.5 是 Spark 次版本、2.12 是 Scala 版本 !!
-#   两者都必须与运行的 Spark 一致。写错时不会在构建期报错，
-#   而是在运行期抛 NoSuchMethodError / ClassNotFoundException ——
-#   又是一类"构建成功但跑起来才炸"的问题。
+#   两者都必须与运行的 Spark 一致。写错时不在构建期报错，
+#   而是运行期抛 NoSuchMethodError / ClassNotFoundException。
 #
 # iceberg-spark-runtime 是**打好的胖包**（含 Iceberg 依赖），
 # 因此只需这一个 jar，不需要逐个补 iceberg-core 等。
 #
 # 获取方式：infrastructure/spark/lib/download-connector.sh
-COPY lib/iceberg-spark-runtime-3.5_2.12-1.11.0.jar /opt/spark/jars/
+COPY lib/iceberg-spark-runtime-3.5_2.12-1.10.2.jar /opt/spark/jars/
 
 # 项目统一的 Spark 默认配置（Metastore 地址、S3A、内存与并行度）
 COPY conf/spark-defaults.conf /opt/spark/conf/spark-defaults.conf
