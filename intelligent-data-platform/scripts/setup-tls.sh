@@ -47,16 +47,34 @@ main() {
         exit 1
     fi
 
-    # 服务器 IP：优先命令行/env，其次从 SSH 连接来源推断
+    # 服务器 IP：优先命令行/env，其次公网探测
+    #
+    # !! 不要用 `ip addr` 去取地址 !!
+    #   云服务器的网卡地址是**内网** IP（本机实测 172.16.0.10），
+    #   而使用者访问的是**公网** IP。用内网 IP 签出来的证书，
+    #   浏览器会报"证书对此地址无效" —— 那看起来像配置写错了，
+    #   而不是"自签名证书"的预期提示，会把人引到错误的方向。
+    #   common.sh 的 public_ip() 正是为这件事写的：
+    #   按 显式环境变量 → 公网回显服务 → 内网地址 的顺序探测。
     local ip="${SERVER_IP:-}"
     if [ -z "${ip}" ]; then
-        ip="$(ip -4 addr show scope global 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)"
+        ip="$(public_ip 2>/dev/null || true)"
     fi
     if [ -z "${ip}" ]; then
         log_error "无法确定服务器 IP，请显式传入： SERVER_IP=1.2.3.4 bash scripts/setup-tls.sh"
         exit 1
     fi
+
+    case "${ip}" in
+        10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*)
+            log_warn "探测到的是**内网地址** ${ip}，使用者多半访问的是公网 IP。"
+            log_warn "若浏览器提示「证书对此地址无效」，请用公网 IP 重新签发："
+            log_warn "  rm -f ${CERT} ${KEY} && SERVER_IP=<公网IP> bash scripts/setup-tls.sh"
+            ;;
+    esac
+
     log_info "证书将为下列地址签发： ${ip} / 127.0.0.1 / localhost"
+    log_info "请确认 ${ip} 就是浏览器里输入的地址（否则证书会被判为无效）"
 
     mkdir -p "${CERT_DIR}"
 
