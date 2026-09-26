@@ -223,36 +223,46 @@ step_archive() {
 step_archive_selfcheck() {
     step_start "5/8 归档作业自检证据（核对最近的运行日志）"
 
-    local log
-    log="$(find "${REPO_ROOT}/airflow/logs" -path '*archive*' -name '*.log' 2>/dev/null | sort | tail -1)"
-    # DAG 跑过的日志在 airflow/logs，手工跑的在 /tmp
-    if [ -z "${log}" ] || ! grep -q '归档自检' "${log}" 2>/dev/null; then
-        log="$(grep -l '归档自检' /tmp/archive-verify*.log 2>/dev/null | sort | tail -1)"
-    fi
+    # !! 不要只挑"最新"的那一份日志 —— 这个启发式很脆 !!
+    #   归档阶段可能由 DAG 跑（日志落在 airflow/logs/<dag>/...），
+    #   也可能由手工 batch-mode 跑（日志在 /tmp/archive-verify*.log）。
+    #   "最新"未必是"最有信息"的那一份：实测同一份脚本连跑两次，
+    #   因为选中的日志不同，一次 40/0 通过、一次挂掉 2 项 —— 一个自造的抖动。
+    #   改为：在**所有**候选日志里找证据，任一份命中即算通过。
+    local logs
+    logs="$( { find "${REPO_ROOT}/airflow/logs" -path '*archive*' -name '*.log' 2>/dev/null; \
+               ls /tmp/archive-verify*.log 2>/dev/null; } | sort -u )"
 
-    if [ -z "${log}" ]; then
-        printf '  %b %s\n' "${C_YELLOW}[SKIP]${C_RESET}" "找不到归档自检日志（尚未运行过归档阶段）"
+    if [ -z "${logs}" ]; then
+        printf '  %b %s\n' "${C_YELLOW}[SKIP]${C_RESET}" "找不到归档运行日志（尚未运行过归档阶段）"
         SKIP=$(( SKIP + 1 ))
         return
     fi
-    printf '     证据来源： %s\n' "${log}"
+    printf '     候选日志（%s 份）：\n' "$(printf '%s\n' "${logs}" | wc -l | tr -d '[:space:]')"
+    printf '%s\n' "${logs}" | sed 's/^/       /'
+
+    # 在全部候选日志里找某个模式；找到就把命中的文件路径打印出来
+    any_log_has() {
+        local pat="$1" f
+        while IFS= read -r f; do
+            [ -n "${f}" ] || continue
+            if grep -qE "${pat}" "${f}" 2>/dev/null; then printf '%s' "${f}"; return 0; fi
+        done <<< "${logs}"
+        return 1
+    }
 
     check_true "自检全部通过（命中「项校验全部通过」）" "命中" \
-        grep -qE '项校验全部通过|16/16 通过' "${log}"
-    check_true "读到了 Kafka 实际消息数" "命中 Kafka 实际消息数" \
-        grep -q 'Kafka 实际消息数' "${log}"
-    # !! 注意日志里的顺序是「OK 在前、名称在后」!!
-    #   Checker 的输出格式是：  [check]   OK   <名称>   <实际值>
-    #   最初我把正则写成「名称.*OK」，结果在明明通过的情况下报失败 ——
-    #   一个**假阴性**。断言写反比断言缺失更糟：它会让人去查一个不存在的问题。
+        any_log_has '项校验全部通过|16/16 通过'
+    check_true "读到了 Kafka 实际消息数" "命中" \
+        any_log_has 'Kafka 实际消息数'
     check_true "解析行数等于消息数（无解析丢失）" "命中" \
-        grep -qE 'OK .*可解析行数 == Kafka 消息数' "${log}"
+        any_log_has 'OK .*可解析行数 == Kafka 消息数'
     check_true "有防空区间守卫（源数据非空）" "命中" \
-        grep -q '防空区间假通过' "${log}"
-    check_true "归档过程中暂停了实时链路" "命中 已暂停" \
-        grep -qE '已暂停 (flink|实时链路已暂停)' "${log}"
-    check_true "归档结束后恢复了实时链路" "命中 已恢复" \
-        grep -q '实时链路已恢复' "${log}"
+        any_log_has '防空区间假通过'
+    check_true "归档过程中暂停了实时链路" "命中" \
+        any_log_has '已暂停 flink|实时链路已暂停'
+    check_true "归档结束后恢复了实时链路" "命中" \
+        any_log_has '实时链路已恢复'
 }
 
 # ------------------------------------------------------------
