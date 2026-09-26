@@ -1,0 +1,13 @@
+# ============================================================
+# Flink connector 二进制（不入 Git）
+# ============================================================
+#
+# 本目录的 JAR 由 download-connector.sh 从 Maven Central 获取，
+# 属第三方二进制产物（约 5.4 MB），不纳入版本库。
+#
+# 构建 Flink 镜像前请先执行一次：
+#   bash infrastructure/flink/lib/download-connector.sh
+# 或直接使用仓库根目录的脚本：
+#   bash scripts/fetch-flink-connector.sh
+# ============================================================
+*.jar

@@ -28,8 +28,11 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+# 锚定到仓库根：Python 构建产物只会出现在根目录。
+# 不能写成 `lib/` —— 那会连 infrastructure/flink/lib/ 一起忽略掉，
+# 导致 Flink 连接器下载脚本无法进入版本库。
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -38,6 +41,9 @@ wheels/
 .installed.cfg
 *.egg
 MANIFEST
+
+# 第三方二进制（JAR 由脚本从 Maven Central 获取，不入 Git）
+*.jar
 
 # Virtual environments
 .venv/
