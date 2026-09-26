@@ -9,6 +9,7 @@
 ## 目录
 
 - [2026-09-26 Sprint 0](#2026-09-26-sprint-0)
+- [2026-09-26 Sprint 1](#2026-09-26-sprint-1)
 - [运行环境](#运行环境)
 - [待办与下一步](#待办与下一步)
 
@@ -138,6 +139,105 @@
 | Kafka 监听器 | 双监听器 | 单监听器无法同时满足容器与宿主机客户端 |
 | MinIO 镜像 | 社区再托管 | 官方已停发；已固定 digest 并记录替代方案 |
 | 事件与业务库一致性 | 快照文件 | 保证 Kafka 事件必然对得上 MySQL 记录 |
+
+---
+
+## 2026-09-26 Sprint 1
+
+**主题**：Kafka + Flink + Doris 实时数仓
+**状态**：✅ 已完成并在服务器上通过全部验收
+**设计文档**：[`docs/sprint/SPRINT_1.md`](sprint/SPRINT_1.md)（含实现偏差记录）
+
+### 阶段 1：设计先行（口径与分层）
+
+先写文档再写代码，本 Sprint 只做一件事：**把一条实时链路跑通**。
+
+- `docs/sprint/SPRINT_1.md`：分层（DWD/DWS/ADS）、指标口径、验证方案、完成标准
+- `sql/metadata/metrics.md`：**指标口径字典**（唯一权威）
+  —— 同一个「GMV」在全项目只能有一个定义，实时与离线（Sprint 3）必须同口径
+- 明确**不引入** Spark / Hive / HDFS / Airflow / Iceberg / Agent 等后续 Sprint 组件
+
+### 阶段 2：Doris 数仓表与 Routine Load
+
+| 文件 | 内容 |
+| --- | --- |
+| `sql/doris/10_dwd_tables.sql` | 4 张 DWD 明细表 + 2 张维表（`dim_product` / `dim_user`） |
+| `sql/doris/11_dws_tables.sql` | 1 张 DWS 汇总表（流量总览） |
+| `sql/doris/12_ads_tables.sql` | 3 张 ADS 指标宽表（交易 / 流量 / 类目） |
+| `sql/doris/13_routine_load.sh` | 8 个 Routine Load 作业（幂等，可重复执行） |
+
+关键设计：所有明细/指标表统一 **UNIQUE KEY + merge-on-write**，
+以业务主键或窗口为 key —— 事件重放、重复投递、窗口更新都自动收敛，天然幂等。
+
+### 阶段 3：Flink 实时作业
+
+```text
+Kafka 事件 topic (4)
+   └─ Flink SQL：清洗 / 补维 / 字段裁剪 ──► Kafka dwd_* topic (4) ──► Doris DWD (4)
+   └─ Flink SQL：1 分钟滚动窗口聚合      ──► Kafka dws_*/ads_* topic (4) ──► Doris DWS/ADS (4)
+```
+
+**为什么不让 Flink 直写 Doris**：`doris-flink-connector` 需要 Doris / Flink /
+connector 三方版本严格匹配，升级任一组件都要重新验证；而 `Routine Load` 是
+Doris **内置**的 Kafka 导入能力，零额外依赖、天然断点续传与幂等。
+代价是多一层 Kafka topic，可以接受。
+
+### 阶段 4：踩坑与修复（本 Sprint 的主要工作量）
+
+| # | 现象 | 根因 | 修复 |
+| --- | --- | --- | --- |
+| 1 | connector JAR 下载 404 | 记录的 `3.2.0-1.20` 版本**不存在**（凭记忆写错） | 查 Maven Central 发布列表，改为 `3.4.0-1.20` |
+| 2 | Flink 解析事件报 `Fail to deserialize at field: event_time` | 生成器输出 ISO-8601 带时区（`2025-07-16T13:42:44+08:00`），Flink 的 JSON 格式要求 `yyyy-MM-dd HH:mm:ss[.SSS]` | 生成器改为 `%Y-%m-%d %H:%M:%S.000`；并给行为事件补时间上界，避免生成未来时间 |
+| 3 | 窗口作业编译失败：`Table sink ... doesn't support consuming update changes` | 窗口聚合产出的是 **update 流**（含撤回），普通 `kafka` sink 只支持 append | DWS/ADS sink 全部改为 `upsert-kafka` + `PRIMARY KEY` |
+| 4 | upsert-kafka 报「不认识的选项」 | `json.encode.decimal-as-plain-number` 在 upsert-kafka 上要加 `value.` 前缀 | 改为 `value.json.encode.decimal-as-plain-number` |
+| 5 | 作业提交报 `NoResourceAvailableException` | 8 个作业 × `parallelism.default=3` 远超 8 个 slot | source SQL 顶部 `SET 'parallelism.default' = '1'` |
+| 6 | 类目作业编译失败：`Column types of query result and sink ... do not match` | Flink 写入**按位置对齐**；Doris 要求 UNIQUE KEY 为有序前缀，因此 sink 列顺序是 `(window_start, category_name, window_end, ...)`，而 SELECT 写成了 `(window_start, window_end, category_name, ...)` | 调整 SELECT 列顺序与 sink 一致，并在注释里写明原因 |
+| 7 | **重启 `flink-jobs` 后指标翻倍**（PV 合计 39987，事件总数 20000） | SQL Gateway 是 **session 模式**：作业生命周期绑定在 session 上，**重启容器不会取消作业**。旧作业既占 slot（新作业拿不到资源而失败），又把重放的事件累加到旧窗口状态上 | 提交脚本启动时先取消所有非终态作业；新增 `scripts/cancel-flink-jobs.sh`；健康检查增加「作业唯一性」检查项 |
+| 8 | 健康检查误报「8 个 Routine Load 全部缺失」 | mysql 客户端 `-N` 会去掉 `Name:` / `State:` 字段标签，解析必然失败（作业其实是 RUNNING） | 解析 `SHOW ROUTINE LOAD\G` 时**不加 `-N`**；并补上 `USE ecommerce;`（否则报 `No database selected`） |
+| 9 | 某窗口 `gmv=23616` 但 `payment_cnt=NULL` | 支付发生时间与下单时间天然错位；NULL 会被下游 `SUM()` 忽略、被看板显示成空白，容易被误读为丢数据 | 明确口径：**可加指标补 0、比率指标留 NULL**，写入 `metrics.md` 第 2.1 节 |
+| 10 | Doris Routine Load 全部 PAUSED、`errorRows == 总行数` | 报错只有 `ErrorLogUrls` 里才看得到：`JSON data is not an array-object, 'strip_outer_array' must be FALSE` | Routine Load 增加 `"strip_outer_array" = "false"` |
+| 11 | DWD 行数比预期多一倍（12000 而不是 6000） | 早期失败的作业留下消费者位点 + 作业重复提交，同一批事件被消费两次 | 重建 topic 后重新生成事件；Doris 侧靠 UNIQUE KEY 保证最终幂等 |
+| 12 | Routine Load 把「墓碑消息」当成错误行？ | upsert-kafka 在撤回 key 时会写 value=null 的墓碑消息（实测 29475 条消息中有 25 条） | 实测 Doris 会**跳过**这些消息（`loadedRows` 29450 = 29475 − 25，`errorRows` 0），无需处理 |
+
+### 阶段 5：验收结果
+
+```text
+✅ 12 个 Kafka topic           4 个源 topic + 8 个下游 topic 全部就绪
+✅ Flink 集群                  8 个 sink 作业各 1 个实例，slots 8
+✅ Routine Load                8/8 RUNNING，errorRows 全部为 0
+✅ DWD 落库                    订单 6000 / 支付 5406 / 退款 254 / 行为 20000
+                               （与 MySQL 事实表、Kafka topic 偏移量三者一致）
+✅ ADS 交易指标                SUM(order_cnt)=6000  SUM(gmv)=51890375.77
+                               SUM(payment_cnt)=5287  SUM(refund_cnt)=254
+                               —— 与 MySQL **精确相等（到分）**
+✅ ADS 流量/类目指标           PV 合计 = behavior_event 事件数；类目 GMV 合计 = MySQL GMV
+✅ 健康检查                    10 项全部 [OK]（Sprint 0 五项 + Sprint 1 五项）
+✅ 冒烟测试                    tests/smoke 全部通过（含 47 个实时链路用例）
+```
+
+对账能做到**精确相等**而不是「允许误差」，是因为窗口按事件时间切分且不重叠：
+逐窗口可加指标求和必然回到全量。任何一次对账不相等都意味着真的丢数或重复计算。
+
+### 决策记录
+
+| 决策 | 选择 | 理由 |
+| --- | --- | --- |
+| Flink 结果如何进 Doris | 写回 Kafka + Doris Routine Load | 避免 doris-flink-connector 的三方版本绑定；Routine Load 是 Doris 内置能力且自带幂等与断点续传 |
+| sink 连接器类型 | `upsert-kafka` + PRIMARY KEY | 窗口聚合产出 update 流，普通 kafka sink 不支持 |
+| 类目维度怎么来 | 事件冗余字段，不做 lookup join | 避免 Sprint 1 引入外部系统依赖与启动时序问题；冗余字段表达的是"事件发生时点"的维度，语义比 lookup join 更准 |
+| DWS 表数量 | 只保留流量总览 1 张 | 类目/会员等级 DWS 与 ADS 口径重复，留到 Sprint 3 与维表 join 一起做 |
+| ADS 表形态 | 3 张宽表（交易/流量/类目） | 交易域指标共享同一窗口骨架，宽表一次查询即可；空窗口语义在写入侧统一 |
+| 可加指标的空值 | 补 0 | 1 分钟窗口是固定骨架，"这一分钟没有支付"就是 0，不是"未知" |
+| 时间语义 | 事件时间 + 5 秒水位线 | 乱序/重放结果一致；不用处理时间 |
+| 验收对账口径 | 精确相等 | 事件时间即业务时间，逐窗求和必回到全量；能精确就不留"允许偏差" |
+
+### 待办
+
+- [ ] 源 topic 改为按 `event_id` 去重，使实时链路对「重复生产同一批事件」也幂等
+      （当前 `earliest-offset` + 重复生产会让窗口指标累加）
+- [ ] 给窗口/去重状态配置 `table.exec.state.ttl`
+- [ ] Sprint 3 用 Spark 产出同名指标，与实时 ADS 交叉对账
+- [ ] 维表 join（`dim_product` / `dim_user`）与 `dws_trade_user_level_1m`
 
 ---
 

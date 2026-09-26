@@ -783,15 +783,16 @@ docker image prune -a       # 清理未使用镜像
 ## 16. 后续 Roadmap
 
 ```text
-Sprint 0  🔄 基础环境（代码已交付，容器验证待执行）
+Sprint 0  ✅ 基础环境（已在腾讯云服务器验收通过）
              MySQL / Kafka / MinIO / Doris / 数据生成器 / 脚本 / 测试
    ↓
-Sprint 1     Kafka → Flink → Doris 实时数仓
-             实时 GMV / 实时订单 / 实时用户数 / Dashboard 数据接口
+Sprint 1  ✅ Kafka → Flink → Doris 实时数仓
+             实时 GMV / 订单量 / 支付 / 退款 / UV-PV / 类目销售
+             8 个 Flink 作业 + 8 个 Routine Load，指标与 MySQL 精确对账
    ↓
 Sprint 2     Spark + Hive + HDFS
    ↓
-Sprint 3     ODS / DWD / DWS / ADS 分层建模
+Sprint 3     ODS / DWD / DWS / ADS 分层建模（离线链路，与实时同口径对账）
    ↓
 Sprint 4     Airflow 调度
    ↓
@@ -814,8 +815,9 @@ Sprint 12    测试 + 性能优化
 Sprint 13    毕业论文 + 答辩
 ```
 
-**下一步：先执行 `bash scripts/verify-sprint-0.sh` 完成 Sprint 0 容器验收，
-通过后再进入 Sprint 1 —— Kafka + Flink + Doris 实时数仓。**
+**下一步：Sprint 2 —— Spark + Hive + HDFS（离线链路）。**
+Sprint 1 的实时链路已验收（`bash scripts/verify-sprint-1.sh`），
+验收报告见 [`docs/sprint/SPRINT_1_VERIFICATION_STATUS.md`](docs/sprint/SPRINT_1_VERIFICATION_STATUS.md)。
 
 ---
 
@@ -826,7 +828,12 @@ Sprint 13    毕业论文 + 答辩
 | [`AGENTS.md`](AGENTS.md) | 项目规范、编码规范、Agent 安全规范 |
 | [`docs/PROJECT_DESIGN_V1.md`](docs/PROJECT_DESIGN_V1.md) | 总体架构基线（V1） |
 | [`docs/development-environment.md`](docs/development-environment.md) | 环境实测、镜像版本与选型依据 |
+| [`docs/DEVELOPMENT_LOG.md`](docs/DEVELOPMENT_LOG.md) | 开发日志（每个阶段做了什么、踩了什么坑） |
+| [`docs/data-source-design.md`](docs/data-source-design.md) | 数据来源设计与后续演进 |
 | [`docs/sprint/SPRINT_0.md`](docs/sprint/SPRINT_0.md) | Sprint 0 任务书 |
 | [`docs/sprint/SPRINT_0_VERIFICATION_STATUS.md`](docs/sprint/SPRINT_0_VERIFICATION_STATUS.md) | Sprint 0 逐项验证状态（已实测 / 待执行） |
+| [`docs/sprint/SPRINT_1.md`](docs/sprint/SPRINT_1.md) | Sprint 1 设计（含实现偏差记录） |
+| [`docs/sprint/SPRINT_1_VERIFICATION_STATUS.md`](docs/sprint/SPRINT_1_VERIFICATION_STATUS.md) | Sprint 1 逐项验证状态与证据 |
+| [`sql/metadata/metrics.md`](sql/metadata/metrics.md) | **指标口径字典（唯一权威）** |
 | [`sql/metadata/kafka_topics.md`](sql/metadata/kafka_topics.md) | Topic 与事件格式定义 |
 | [`data-generator/README.md`](data-generator/README.md) | 数据生成器使用说明 |

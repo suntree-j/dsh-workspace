@@ -52,21 +52,23 @@
 
 ## 2. 技术栈
 
-### 2.1 当前（Sprint 0）
+### 2.1 当前（Sprint 0 + Sprint 1）
 
 | 组件 | 版本 | 用途 |
 | --- | --- | --- |
 | Docker / Docker Compose | Compose v2+ | 容器编排 |
-| MySQL | `8.4.11` LTS | 电商业务库 |
+| MySQL | `8.4.11` LTS | 电商业务库（唯一事实源） |
 | Apache Kafka | `4.2.1` KRaft | 事件总线（无 ZooKeeper） |
 | MinIO | `RELEASE.2025-10-15T17-29-55Z` | S3 兼容对象存储 |
 | Apache Doris | `4.1.4`（FE + BE） | OLAP 查询与指标 |
+| Apache Flink | `1.20.1`（SQL + SQL Gateway） | 实时清洗与窗口聚合（Sprint 1 引入） |
+| flink-sql-connector-kafka | `3.4.0-1.20` | Flink 读写 Kafka |
 | Python | 3.13 | 数据生成器 |
 | pytest | 9.x | 测试 |
 
 ### 2.2 后续 Sprint 引入
 
-Flink（S1）、Spark + Hive + HDFS（S2）、Airflow（S4）、Iceberg（S5）、
+Spark + Hive + HDFS（S2）、Airflow（S4）、Iceberg（S5）、
 FastAPI / Spring Boot / Vue（S6）、LLM + Tool Calling（S7）、LangGraph（S8）、
 RAG（S9）、MCP（S10）、Prometheus + Grafana（S11）。
 
@@ -439,6 +441,9 @@ bash scripts/stop.sh                 # 停止（保留数据卷）
 bash scripts/stop.sh --volumes       # 停止并删除数据卷（会丢数据！）
 bash scripts/health-check.sh         # 健康检查，失败 exit 1
 bash scripts/verify-sprint-0.sh      # Sprint 0 全链路验收（config+up+ps+health+pytest）
+bash scripts/verify-sprint-1.sh      # Sprint 1 实时链路验收（就绪+health+pytest+对账）
+bash scripts/verify-sprint-1.sh --replay   # 重建链路并重放数据后再验收
+bash scripts/cancel-flink-jobs.sh    # 取消全部 Flink 作业（重新提交作业前必跑）
 
 # ---------- 编排校验 ----------
 docker compose config                # 校验并打印解析后的配置
@@ -484,8 +489,8 @@ docker compose exec doris-be mysql -h 172.28.0.10 -P 9030 -uroot -e "SHOW BACKEN
 | Sprint | 主题 | 状态 |
 | --- | --- | --- |
 | **0** | **项目初始化与基础数据环境** | ✅ **已完成并验收通过** |
-| 1 | Kafka + Flink + Doris 实时数仓 | ⏳ 下一步 |
-| 2 | Spark + Hive + HDFS | 未开始 |
+| **1** | **Kafka + Flink + Doris 实时数仓** | ✅ **已完成并验收通过** |
+| 2 | Spark + Hive + HDFS | ⏳ 下一步 |
 | 3 | ODS / DWD / DWS / ADS | 未开始 |
 | 4 | Airflow | 未开始 |
 | 5 | Iceberg Lakehouse | 未开始 |
@@ -515,7 +520,25 @@ docker compose exec doris-be mysql -h 172.28.0.10 -P 9030 -uroot -e "SHOW BACKEN
 逐项证据见
 [`docs/sprint/SPRINT_0_VERIFICATION_STATUS.md`](docs/sprint/SPRINT_0_VERIFICATION_STATUS.md)。
 
-### 15.2 边界要求
+### 15.2 Sprint 1 验收结果
 
-> **未经确认，不要开始 Sprint 1。**
-> Sprint 0 已稳定，下一层可以从 Kafka + Flink + Doris 实时数仓开始。
+同一服务器上完成实时链路验收（Kafka → Flink → Doris）：
+
+```text
+✅ 8 个 Flink sink 作业各 1 个实例，8 个 Routine Load 全部 RUNNING、errorRows=0
+✅ scripts/health-check.sh       11/11 [OK]（Sprint 0 五项 + Sprint 1 六项）
+✅ python -m pytest -m smoke     74 passed（27 基础设施 + 47 实时链路）
+✅ DWD 落库                      订单 6000 / 支付 5406 / 退款 254 / 行为 20000
+✅ ADS 与 MySQL 精确对账         GMV 51,890,375.77 == 51,890,375.77（精确到分）
+```
+
+一键复现：`bash scripts/verify-sprint-1.sh`（详见
+[`docs/sprint/SPRINT_1_VERIFICATION_STATUS.md`](docs/sprint/SPRINT_1_VERIFICATION_STATUS.md)）。
+
+### 15.3 边界要求
+
+> **Sprint 1 已稳定，下一层是 Sprint 2（Spark + Hive + HDFS）。**
+> 仍然禁止提前实现 Sprint 3 及以后的内容（Airflow / Iceberg / Agent /
+> RAG / MCP / 前端 / 监控）。
+> 指标口径以 [`sql/metadata/metrics.md`](sql/metadata/metrics.md) 为唯一权威，
+> 离线链路（Sprint 3 起）必须产生同名同口径指标并与实时链路交叉对账。
