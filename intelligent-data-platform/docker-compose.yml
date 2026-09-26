@@ -749,6 +749,17 @@ services:
     volumes:
       - ./infrastructure/spark/jobs:/opt/jobs:ro
       - ./sql/hive:/opt/sql/hive:ro
+      # Spark 自身的配置（Iceberg catalog 就在这里定义）。
+      #
+      # !! 为什么必须挂载，而不能只靠镜像里的 COPY !!
+      #   实测踩坑（Sprint 5 阶段 4）：把 catalog 从 lakehouse_iceberg 改名成
+      #   iceberg、同步了仓库、重跑了作业 —— 报错一模一样，改名像没发生过。
+      #   因为 Dockerfile 里是 `COPY conf/spark-defaults.conf`（**构建期**烧进镜像），
+      #   而这个服务是 `docker compose run` 起来的临时容器：
+      #   不重建镜像，改 conf 就等于没改，而且**不会有任何提示**。
+      #   挂载之后 conf 与 jobs / sql 一样"改完即生效"，
+      #   镜像里那份退化成默认值（重建镜像时仍会被覆盖，无害）。
+      - ./infrastructure/spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
       # 分层作业自带的 SQL（ODS→DWD→DWS→ADS→对账）。
       #
       # !! 不能挂在 /opt/jobs/sql（实测踩坑）!!

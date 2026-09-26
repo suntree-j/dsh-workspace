@@ -196,7 +196,28 @@ def create_iceberg_table(spark: SparkSession, plan: TablePlan) -> str:
 def migrate(spark: SparkSession, plan: TablePlan) -> None:
     """搬数据。用 INSERT OVERWRITE + 动态分区覆盖，因此重跑幂等。"""
     cols = ", ".join(n for n, _ in plan.columns)
-    spark.sql(f"INSERT OVERWRITE TABLE {plan.dst} SELECT {cols} FROM {plan.src}")
+    sql = f"INSERT OVERWRITE TABLE {plan.dst} SELECT {cols} FROM {plan.src}"
+
+    if plan.partition_cols:
+        # !! 分区表必须显式 DISTRIBUTE BY 分区列 !!
+        #
+        #   实测踩坑（Sprint 5 阶段 4）：ods_behavior_event 有 703 个 dt 分区，
+        #   直接 INSERT 时执行器连续 OOM 退出，重试 4 次全挂，最后报
+        #   MetadataFetchFailedException（shuffle 输出跟着执行器一起没了）：
+        #     java.lang.OutOfMemoryError: Java heap space
+        #     Lost executor 1 on 172.28.0.4: Command exited with code 52
+        #
+        #   原因不在数据量（总共才 2 万行），而在**同时打开的分区写入器个数**：
+        #   一个 task 可能碰到几百个不同的 dt，每个 dt 一个写入器，
+        #   每个写入器都要占一份内存缓冲 —— 768m 的堆装不下几百份。
+        #
+        #   DISTRIBUTE BY 之后同一个 dt 只会落到同一个 task，
+        #   一个 task 同时持有的写入器从"几百个"降到"几个"。
+        #   这是**结构**问题而不是内存不足：调大内存只是掩盖症状，
+        #   分区数再涨上去还会复发。
+        sql += " DISTRIBUTE BY " + ", ".join(plan.partition_cols)
+
+    spark.sql(sql)
 
 
 def money_sum(spark: SparkSession, table: str, col: str) -> str | None:
@@ -230,6 +251,22 @@ def verify_table(spark: SparkSession, plan: TablePlan, checker: Checker) -> None
 def main() -> int:
     spark = build_spark("sprint5-migrate-parquet-to-iceberg")
     checker = Checker("Sprint 5 阶段 4：Parquet → Iceberg 迁移核对")
+
+    # !! 让"一个 task ≈ 一个分区"，这是分区表迁移不 OOM 的前提 !!
+    #
+    #   实测踩坑（Sprint 5 阶段 4，连续两轮失败）：
+    #   写入器占的内存与"一个 task 同时碰到多少个分区"成正比。
+    #   默认 shuffle 分区 200 个、dt 分区却有 703 个，AQE 又会把小分区
+    #   合并成更少的大分区 —— 结果是少数 task 各自持有几百个写入器，
+    #   768m 执行器堆直接爆掉（连续 4 次 Lost executor ... code 52）。
+    #
+    #   所以两件事一起做：
+    #     ① shuffle 分区数抬到**高于分区数**（1000 > 703），
+    #        配合 DISTRIBUTE BY，一个 dt 落到一个 task；
+    #     ② 关掉 AQE 的合并，否则它会把上面白算的分区又并回去。
+    #   注意这是结构问题：只调大内存，分区数一涨还会复发。
+    spark.conf.set("spark.sql.shuffle.partitions", "1000")
+    spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "false")
 
     # 上次写入残留会干扰后续装载（Sprint 3 踩过）
     paths = tuple(f"{WAREHOUSE}/iceberg/{t}" for t in MIGRATE_TABLES)
