@@ -593,7 +593,7 @@ docker compose exec doris-be mysql -h 172.28.0.10 -P 9030 -uroot -e "SHOW BACKEN
 | **2** | **Spark + Hive + 湖仓存储（离线链路）** | ✅ **已完成并验收通过**（HDFS 因内存不足改用 S3A，见 SPRINT_2.md 2.2） |
 | **3** | **ODS / DWD / DWS / ADS（离线分层 + 批流交叉对账）** | ✅ **已完成并验收通过**（11458 个分钟窗口零差异，见 SPRINT_3.md） |
 | **7** | **LLM + Tool Calling（数据问答 Agent）** | ✅ **已完成并验收通过**（验收 49/49，见 SPRINT_7.md） |
-| 4 | Airflow 调度 + 流量域归档 | 🔄 **进行中**（Airflow `3.3.2`，元数据库用 MySQL，见 SPRINT_4.md） |
+| **4** | **Airflow 调度 + 流量域归档** | ✅ **已完成并验收通过**（验收 40/0/0，见 15.8 与 SPRINT_4.md） |
 | 5 | Iceberg Lakehouse | 未开始 |
 | 8 | LangGraph Data Agent | 未开始 |
 | 9 | RAG + Metadata | 未开始 |
@@ -787,18 +787,68 @@ bash scripts/verify-sprint-2.sh`（详见
 > 5. **明文形态下有一个前提**：演示时**不要挂 VPN / 代理**，
 >    否则那个偶发 502 可能回来。此时要么关代理，要么临时启用 TLS。
 
-### 15.8 边界要求
+### 15.8 Sprint 4 验收结果（Airflow 调度 + 流量域归档）
 
-> **Sprint 0 / 1 / 2 / 3 / 6 / 7 已稳定，下一层是 Sprint 4（Airflow 调度）。**
-> 禁止提前实现 Sprint 5 及以后的内容（Iceberg / LangGraph / RAG / MCP / 监控）。
+把离线流水线从**手工触发**变成**按依赖调度**，并关闭 Sprint 3 记录的流量域缺口：
+
+```text
+✅ bash scripts/verify-sprint-4.sh   通过 40 / 失败 0 / 跳过 0（8 步）
+    服务状态 / 元数据库 / DAG 定义 / 流量域归档 /
+    归档自检证据 / 内存取证 / 网关与回归 / 自动化测试
+✅ Airflow 3.3.2                    宿主机 systemd 三单元
+    apiserver(180MB) / scheduler(175MB) / dagprocessor(125MB)
+    **不部署 triggerer**（只为 deferrable operator 服务，本项目用不到）
+✅ 元数据库用 MySQL                 未引入 PostgreSQL（符合 2.3 节）
+    专用账号 airflow：对 ecommerce 被拒绝（最小权限实证）
+✅ DAG 真实驱动离线流水线            9 任务
+    pause → ods → archive → dwd → dws → ads → reconcile → load → restore
+✅ 批流对账（交易域）                11458 个分钟窗口，**不一致 0 个**
+                                    GMV 实时 51,890,375.77 == 离线 51,890,375.77
+✅ 流量域归档（本 Sprint 新增）       **20000 行 == Kafka latest offset 合计（零丢失）**
+    703 个 dt 分区；16/16 作业内自检全过
+    漏斗 VIEW 10472 > CLICK 5759 > CART 2095 > BUY 628（FAVORITE 1046 旁支）
+✅ 内存闸门                          暂停实时链路释放 1.65 GB（2282 → 3935 MB）
+    曾主动拒绝一次批处理（可用 2258 MB）——**拒绝而非硬跑**
+```
+
+**架构约束（Sprint 4 起成为硬规范）**：
+
+> 1. **调度必须复用人工入口**。DAG 的每个 stage 都调
+>    `run-batch-pipeline.sh --stage X`，闸门（内存 / 不叠加作业）都在脚本里。
+>    这样"手工跑"与"调度跑"受**同一套**约束，不存在两条路径行为不一致。
+> 2. **重试与超时必须显式写在算子上**。Airflow 3.3.2 里
+>    `@dag(default_args={...})` 的 `retries` / `execution_timeout` **不生效** ——
+>    实测会导致 DAG run **永久卡死**（状态停在 `up_for_retry` 却已无重试次数），
+>    而恢复任务依赖它，于是实时链路一直停着。
+> 3. **暂停与恢复必须是两个独立任务**，恢复用 `trigger_rule=all_done` ——
+>    任一上游失败也必须恢复实时链路，否则看板会永久停在暂停状态。
+> 4. **切换站点协议（SITE_SCHEME）后必须重跑 `deploy-airflow.sh`**，
+>    否则 `api.base_url` 残留旧协议，任务执行回调会静默失效。
+> 5. **人工敲 airflow 命令一律用 `scripts/airflow.sh`**，不要用裸 `airflow` ——
+>    裸命令不加载 `airflow.env`，会静默落到 sqlite 并报"需要迁移"（极具误导性）。
+> 6. **不要覆盖正在运行的 shell 脚本**（bash 边读边执行），
+>    **也不要在 DAG run 进行中改 DAG 文件**（新任务会被注入到该 run 里）。
+
+**本 Sprint 实测排掉的坑**（完整复盘见 SPRINT_4.md 第 10 节）：
+任务执行回调地址（三连坑）、暂停被静默跳过、systemd 沙箱让 `docker compose` 失效、
+`default_args` 不生效、归档阶段静默空转、Spark 镜像缺 Kafka 连接器、
+重建镜像 ≠ 容器换镜像、时间格式串非法导致全 NULL、自检在空表上空洞通过。
+
+> **贯穿其中的一条**：**「成功信号」不可信**。命令返回成功、构建报成功、
+> 自检全绿，都不能替代**回到目标状态去验证**（表里到底多少行、
+> 镜像里到底有没有那个 jar）。六层障碍里有三层属于这一类。
+
+### 15.9 边界要求
+
+> **Sprint 0 / 1 / 2 / 3 / 4 / 6 / 7 已稳定，下一层是 Sprint 5（Iceberg）。**
+> 禁止提前实现 Sprint 8 及以后的内容（LangGraph / RAG / MCP / 监控）。
 > 指标口径以 [`sql/metadata/metrics.md`](sql/metadata/metrics.md) 为唯一权威，
 > 实时链路、离线链路与 Agent 都必须引用该口径，不得自建第二份定义。
 > **Agent 侧额外约束**：SQL 只能经过 `POST /query`（受守卫与只读账号约束），
 > 禁止让 Agent 直连数据库或持有凭据；回答必须能给出 `tables` 与 `executed_sql`。
 >
-> **已知设计缺口（必须写进论文，不得隐瞒）**：
-> 流量域（UV / PV / 转化率）的事实来源只有 Kafka 事件，MySQL 无对应业务表，
-> 因此离线侧**无源可算**，Sprint 3 未对其对账；Sprint 7 的 Agent 在回答里
-> 也会如实说明"这类指标不在对账范围内"。
-> 补齐路径：Sprint 4 增加"Kafka → 湖仓 ODS"归档作业后再纳入对账。
-> **禁止**为了"看起来完整"而伪造离线流量指标。
+> **流量域：原设计缺口已由 Sprint 4 关闭**（归档 20000 行、零丢失）。
+> 流量域的 DWD / DWS / ADS 分层**尚未建模** —— 这是 Sprint 5 的一部分：
+> Iceberg 会改变湖仓的存储与表管理方式，先按 Parquet 分层再迁表等于做两遍，
+> 因此并入 Sprint 5 一起做（记于 `docs/DECISIONS.md`）。
+> 在此之前，Agent 若被问到流量域的去重类指标，仍应如实说明其口径范围。
