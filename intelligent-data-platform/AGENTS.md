@@ -469,6 +469,18 @@ bash scripts/init-lakehouse.sh       # 初始化（元数据库/镜像/服务/Me
 bash scripts/submit-offline-job.sh   # 抽取 MySQL → Parquet(S3A) → Hive 外部表（作业内自带逐表对账）
 bash scripts/verify-sprint-2.sh      # 离线链路验收（8 步）
 bash scripts/spark-sql.sh -e 'SHOW TABLES IN lakehouse;'   # 用一次性容器查湖仓表
+
+# ---------- 离线分层 + 批流对账（Sprint 3） ----------
+# ⚠️ 内存受限：一律走错峰模式（暂停 Flink 栈 → 跑批 → 自动恢复并自检）
+bash scripts/batch-mode.sh                     # 全链路：抽取→DWD→DWS→ADS→对账→装载
+bash scripts/batch-mode.sh --stage ads          # 只跑一层
+bash scripts/batch-mode.sh --restore-only       # 只恢复实时链路（上次异常中断后用）
+bash scripts/run-batch-pipeline.sh --list       # 查看阶段顺序与依赖
+bash scripts/load-batch-to-doris.sh             # 离线结果装载进 Doris（S3() TVF）
+bash scripts/verify-sprint-3.sh                 # 离线分层 + 批流对账验收（8 步）
+bash scripts/setup-swap.sh                      # 配置 swap 兜底（内存事故后引入）
+bash scripts/spark-sql.sh -e 'SELECT * FROM lakehouse.ads_reconcile_summary;'  # 对账结论
+
 # ---------- 服务层（Sprint 6：Nginx + FastAPI + 前端） ----------
 bash scripts/install-web.sh          # 首次安装（nginx/依赖/只读账号/systemd）
 bash scripts/deploy-web.sh           # 更新代码后同步配置并重启服务
@@ -525,8 +537,8 @@ docker compose exec doris-be mysql -h 172.28.0.10 -P 9030 -uroot -e "SHOW BACKEN
 | **1** | **Kafka + Flink + Doris 实时数仓** | ✅ **已完成并验收通过** |
 | **6** | **数据后台 + 前后端（服务层）** | ✅ **已完成并验收通过**（顺序前移，见 2.2 节说明） |
 | **2** | **Spark + Hive + 湖仓存储（离线链路）** | ✅ **已完成并验收通过**（HDFS 因内存不足改用 S3A，见 SPRINT_2.md 2.2） |
-| 3 | ODS / DWD / DWS / ADS（离线分层 + 交叉对账） | ⏳ 下一步 |
-| 4 | Airflow | 未开始 |
+| **3** | **ODS / DWD / DWS / ADS（离线分层 + 批流交叉对账）** | ✅ **已完成并验收通过**（11458 个分钟窗口零差异，见 SPRINT_3.md） |
+| 4 | Airflow | ⏳ 下一步 |
 | 5 | Iceberg Lakehouse | 未开始 |
 | 7 | LLM + Tool Calling | 未开始 |
 | 8 | LangGraph Data Agent | 未开始 |
@@ -601,10 +613,44 @@ Spark + Hive 直接以容器形式接入既有编排（湖仓存储用 MinIO/S3A
 bash scripts/verify-sprint-2.sh`（详见
 [`docs/sprint/SPRINT_2.md`](docs/sprint/SPRINT_2.md)，含 11 条版本/时序踩坑记录）。
 
-### 15.5 边界要求
+### 15.5 Sprint 3 验收结果（离线分层 + 批流交叉对账）
 
-> **Sprint 0 / 1 / 2 / 6 已稳定，下一层是 Sprint 3（离线分层建模 + 与实时指标交叉对账）。**
-> 禁止提前实现 Sprint 4 及以后的内容（Airflow / Iceberg / LLM / Agent / RAG / MCP / 监控）。
+在 Sprint 2 的 ODS 之上建成 ODS → DWD → DWS → ADS 四层，
+并用**逐窗口对账**证明离线与实时算的是同一个数：
+
+```text
+✅ bash scripts/verify-sprint-3.sh   8/8 PASS
+    表清单 / 层间行数 / 类型正确 / 幂等 / 批流对账 / 服务装载 / 回归 / 自动化测试
+✅ 层间行数                          DWD == ODS 逐表相等（1200/600/6000/5406/254）
+✅ 批流对账                          11458 个分钟窗口，**不一致 0 个**
+                                    GMV 实时 51,890,375.77 == 离线 51,890,375.77（精确到分）
+✅ 服务装载                          Doris lakehouse_ads 6 张表行数 == 湖仓；
+                                    agent_ro 可查、写操作被 Doris 拒绝
+✅ 回归                              实时链路 health-check 11/11、数据服务 /health 正常
+✅ 自动化测试                        pytest **172 passed**（含离线接口与对账契约用例）
+✅ 真实浏览器验收                    7 个页面渲染正常（新增「离线与对账」页）
+```
+
+一键复现：`bash scripts/batch-mode.sh && bash scripts/verify-sprint-3.sh`
+（详见 [`docs/sprint/SPRINT_3.md`](docs/sprint/SPRINT_3.md)，
+含 10 条踩坑记录与一次**整机失联事故**的完整复盘）。
+
+> ⚠️ **内存约束（Sprint 3 事故后成为硬规范）**：
+> 本机实时链路常驻约 13.7 GB，离线 Spark 驱动跑在宿主机（client 模式）。
+> **禁止**在实时链路运行时直接跑离线流水线 —— 必须先经
+> `scripts/lib/memory-guard.sh` 的内存闸门。推荐一律走错峰模式：
+> `bash scripts/batch-mode.sh`（暂停 Flink 栈 → 跑批 → 自动恢复并自检）。
+
+### 15.6 边界要求
+
+> **Sprint 0 / 1 / 2 / 3 / 6 已稳定，下一层是 Sprint 4（Airflow 调度）。**
+> 禁止提前实现 Sprint 5 及以后的内容（Iceberg / LLM / Agent / RAG / MCP / 监控）。
 > 指标口径以 [`sql/metadata/metrics.md`](sql/metadata/metrics.md) 为唯一权威，
-> 离线链路（Sprint 3 起）必须产生同名同口径指标并与实时链路交叉对账；
+> 离线链路与实时链路必须产生同名同口径指标并**逐窗口交叉对账**；
 > 服务层接口（`services/api`）同样只能引用该口径，不得自建第二份定义。
+>
+> **已知设计缺口（必须写进论文，不得隐瞒）**：
+> 流量域（UV / PV / 转化率）的事实来源只有 Kafka 事件，MySQL 无对应业务表，
+> 因此离线侧**无源可算**，Sprint 3 未对其对账。
+> 补齐路径：Sprint 4 增加"Kafka → 湖仓 ODS"归档作业后再纳入对账。
+> **禁止**为了"看起来完整"而伪造离线流量指标。
