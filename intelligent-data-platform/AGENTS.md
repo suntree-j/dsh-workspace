@@ -71,8 +71,16 @@
 | Nginx | `1.24.0`（apt） | 静态托管 + 反向代理 + **TLS 终止**（Sprint 6 引入，Sprint 7 启用 HTTPS） |
 | Vue + ECharts | `3.5.13` / `5.6.0`（本地 vendor，无构建步骤） | 数据看板（Sprint 6 引入） |
 | systemd | 系统自带 | 守护 `data-platform-api` / `data-platform-agent`（Sprint 6/7 引入） |
-| Python | 3.13 | 数据生成器 / 数据服务 |
+| Python（宿主机） | `3.12.3` | 数据服务 / Agent / 调度（宿主 venv `.venv`、`.venv-agent`、`.venv-airflow`） |
+| Python（容器） | `3.13.14` | 仅 data-generator 容器（`python:3.13.14-slim-bookworm`） |
 | pytest | 9.x | 测试 |
+
+> ⚠️ **Python 版本有两条线，不要合并成一句**（Sprint 4 修正）：
+> 原表写「Python | 3.13 | 数据生成器 / 数据服务」是**错的**。
+> 宿主机实测 `python3 --version` = **3.12.3**（Ubuntu 24.04 自带），
+> 数据服务、Agent 与 Airflow 都跑在宿主机的 venv 上；
+> `3.13` 只属于 data-generator 容器。混为一谈会在排查
+> "某个包在本地能装、在服务器装不上"时把人引向错误方向。
 
 > **部署分层原则**（Sprint 6 起）：
 > **数据层**（MySQL/Kafka/MinIO/Doris/Flink）继续用 Docker Compose；
@@ -562,7 +570,7 @@ docker compose exec doris-be mysql -h 172.28.0.10 -P 9030 -uroot -e "SHOW BACKEN
 | **2** | **Spark + Hive + 湖仓存储（离线链路）** | ✅ **已完成并验收通过**（HDFS 因内存不足改用 S3A，见 SPRINT_2.md 2.2） |
 | **3** | **ODS / DWD / DWS / ADS（离线分层 + 批流交叉对账）** | ✅ **已完成并验收通过**（11458 个分钟窗口零差异，见 SPRINT_3.md） |
 | **7** | **LLM + Tool Calling（数据问答 Agent）** | ✅ **已完成并验收通过**（验收 49/49，见 SPRINT_7.md） |
-| 4 | Airflow | ⏳ 下一步 |
+| 4 | Airflow 调度 + 流量域归档 | 🔄 **进行中**（Airflow `3.3.2`，元数据库用 MySQL，见 SPRINT_4.md） |
 | 5 | Iceberg Lakehouse | 未开始 |
 | 8 | LangGraph Data Agent | 未开始 |
 | 9 | RAG + Metadata | 未开始 |
