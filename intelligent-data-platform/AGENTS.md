@@ -66,9 +66,11 @@
 | Apache Spark | `3.5.7` | 离线计算（Sprint 2 引入） |
 | Apache Hive Metastore | `3.1.3` | 湖仓表目录（Sprint 2 引入，只跑 Metastore） |
 | FastAPI + uvicorn | `0.141.1` / `0.54.0` | 只读数据服务（Sprint 6 引入） |
+| openai（SDK） | `2.54.0` | 调用 DeepSeek（OpenAI 兼容协议，Tool Calls）（Sprint 7 引入） |
+| DeepSeek API | `deepseek-flash`（模型名） | 数据问答 Agent 的 LLM（Sprint 7 引入） |
 | Nginx | `1.24.0`（apt） | 静态托管 + 反向代理（Sprint 6 引入） |
 | Vue + ECharts | `3.5.13` / `5.6.0`（本地 vendor，无构建步骤） | 数据看板（Sprint 6 引入） |
-| systemd | 系统自带 | 守护 `data-platform-api`（Sprint 6 引入） |
+| systemd | 系统自带 | 守护 `data-platform-api` / `data-platform-agent`（Sprint 6/7 引入） |
 | Python | 3.13 | 数据生成器 / 数据服务 |
 | pytest | 9.x | 测试 |
 
@@ -81,8 +83,7 @@
 ### 2.2 后续 Sprint 引入
 
 Airflow（S4）、Iceberg（S5）、
-LLM + Tool Calling（S7）、LangGraph（S8）、RAG（S9）、MCP（S10）、
-Prometheus + Grafana（S11）。
+LangGraph（S8）、RAG（S9）、MCP（S10）、Prometheus + Grafana（S11）。
 
 > Sprint 6（数据后台 + 前后端）已按项目负责人要求**前移**到 Sprint 2~5 之前，
 > 理由是让数据"可访问、可验收"并为智能层预留只读接口，详见
@@ -113,6 +114,7 @@ Kubernetes / Nacos / RabbitMQ / MongoDB ...
 | `scripts/` | 启停、状态、健康检查 | Bash，兼容 Git Bash / WSL / Linux |
 | `data-generator/` | Python 数据生成器 | 业务关系必须正确 |
 | `services/api/` | 只读数据服务（FastAPI，Sprint 6） | 只允许 SELECT；使用只读账号 `agent_ro` |
+| `services/agent/` | 数据问答 Agent（FastAPI + LLM，Sprint 7） | **不允许持有数据库凭据**；只能经 HTTP 调 `services/api` |
 | `services/web/` | 数据看板前端（Vue + ECharts，无构建步骤，Sprint 6） | 不引用外部 CDN；`vendor/` 不入 Git |
 | `deploy/` | 宿主机部署配置（Nginx / systemd，Sprint 6） | 只放配置模板，不在服务器上直接改 |
 | `tests/` | 单元测试与冒烟测试 | 冒烟测试必须真实执行 |
@@ -490,6 +492,19 @@ journalctl -u data-platform-api -n 100 --no-pager   # 数据服务日志
 nginx -t && systemctl reload nginx   # 站点配置校验与重载
 curl -s http://127.0.0.1/data/api/health             # 接口健康检查
 
+# ---------- 数据问答 Agent（Sprint 7：LLM + Tool Calling） ----------
+bash scripts/deploy-agent.sh          # 部署（幂等；会一并重启数据服务）
+bash scripts/verify-sprint-7.sh       # 验收（8 步 49 项：守卫/网关/工具/端到端问答）
+systemctl status data-platform-agent  # Agent 状态
+journalctl -u data-platform-agent -n 100 --no-pager  # Agent 日志（含每次工具调用）
+curl -s http://127.0.0.1:8100/health | python3 -m json.tool   # 是否已配置 LLM
+curl -s http://127.0.0.1:8100/tools                           # Agent 能力面（4 个工具）
+curl -s -X POST http://127.0.0.1:8100/ask \
+     -H 'Content-Type: application/json' \
+     -d '{"question":"最近一周每天的 GMV 是多少？"}'           # 提问
+# 配置 LLM Key：在 .env 设 LLM_API_KEY 后 systemctl restart data-platform-agent
+# 详见 services/agent/README.md
+
 # ---------- 编排校验 ----------
 docker compose config                # 校验并打印解析后的配置
 docker compose config --quiet        # 仅校验语法
@@ -538,9 +553,9 @@ docker compose exec doris-be mysql -h 172.28.0.10 -P 9030 -uroot -e "SHOW BACKEN
 | **6** | **数据后台 + 前后端（服务层）** | ✅ **已完成并验收通过**（顺序前移，见 2.2 节说明） |
 | **2** | **Spark + Hive + 湖仓存储（离线链路）** | ✅ **已完成并验收通过**（HDFS 因内存不足改用 S3A，见 SPRINT_2.md 2.2） |
 | **3** | **ODS / DWD / DWS / ADS（离线分层 + 批流交叉对账）** | ✅ **已完成并验收通过**（11458 个分钟窗口零差异，见 SPRINT_3.md） |
+| **7** | **LLM + Tool Calling（数据问答 Agent）** | ✅ **已完成并验收通过**（验收 49/49，见 SPRINT_7.md） |
 | 4 | Airflow | ⏳ 下一步 |
 | 5 | Iceberg Lakehouse | 未开始 |
-| 7 | LLM + Tool Calling | 未开始 |
 | 8 | LangGraph Data Agent | 未开始 |
 | 9 | RAG + Metadata | 未开始 |
 | 10 | MCP | 未开始 |
@@ -641,16 +656,51 @@ bash scripts/verify-sprint-2.sh`（详见
 > `scripts/lib/memory-guard.sh` 的内存闸门。推荐一律走错峰模式：
 > `bash scripts/batch-mode.sh`（暂停 Flink 栈 → 跑批 → 自动恢复并自检）。
 
-### 15.6 边界要求
+### 15.6 Sprint 7 验收结果（LLM + Tool Calling：数据问答 Agent）
 
-> **Sprint 0 / 1 / 2 / 3 / 6 已稳定，下一层是 Sprint 4（Airflow 调度）。**
-> 禁止提前实现 Sprint 5 及以后的内容（Iceberg / LLM / Agent / RAG / MCP / 监控）。
+新增一个**只读查询节点**与一个**独立部署的问答 Agent**：
+
+```text
+✅ bash scripts/verify-sprint-7.sh   49/49 通过，0 失败，0 跳过
+    服务状态 / Agent 自身 / 只读查询节点 / 网关契约 / Agent 能力面 /
+    端到端问答 / 看板接入 / 自动化测试
+✅ 四类攻击全部被拒（且原因正确）
+    DELETE → NOT_SELECT；未授权表 → TABLE_NOT_ALLOWED；
+    多语句 → MULTI_STATEMENT；注释注入 → COMMENT
+✅ 强制 LIMIT                       请求 5 行 → executed_sql 带 LIMIT 5、row_count=5
+✅ 网关契约                         POST /data/api/query 200；GET 同路径 403；
+                                    POST /data/api/overview 仍 403（未被误伤）
+✅ 端到端问答                       实测三问全部正确，且回答附
+                                    tables / executed_sql / steps（可逐条核对）
+✅ 自动化测试                       Agent 单元测试 19 passed；/query 冒烟测试 21 passed
+```
+
+**架构约束（Sprint 7 起成为硬规范）**：
+
+> **Agent 进程里不允许有数据库凭据。**
+> 它只能经 HTTP 调只读数据服务取数，因此「Agent 不得拥有数据库管理员权限」
+> 由**进程边界**保证，而不是靠代码自觉。
+> 新增可查表必须同时改两处：
+> `services/api/app/sqlguard.py` 的 `BUSINESS_TABLES`（权限边界）
+> 与 `services/agent/app/agent.py` 系统提示词的「数据地图」（模型认知）——
+> 只改一处会出现"模型知道有表却不知道有哪些列"。
+
+一键复现：`bash scripts/deploy-agent.sh && bash scripts/verify-sprint-7.sh`
+（详见 [`docs/sprint/SPRINT_7.md`](docs/sprint/SPRINT_7.md)，
+含 7 条踩坑记录；配置操作见 [`services/agent/README.md`](services/agent/README.md)）。
+
+### 15.7 边界要求
+
+> **Sprint 0 / 1 / 2 / 3 / 6 / 7 已稳定，下一层是 Sprint 4（Airflow 调度）。**
+> 禁止提前实现 Sprint 5 及以后的内容（Iceberg / LangGraph / RAG / MCP / 监控）。
 > 指标口径以 [`sql/metadata/metrics.md`](sql/metadata/metrics.md) 为唯一权威，
-> 离线链路与实时链路必须产生同名同口径指标并**逐窗口交叉对账**；
-> 服务层接口（`services/api`）同样只能引用该口径，不得自建第二份定义。
+> 实时链路、离线链路与 Agent 都必须引用该口径，不得自建第二份定义。
+> **Agent 侧额外约束**：SQL 只能经过 `POST /query`（受守卫与只读账号约束），
+> 禁止让 Agent 直连数据库或持有凭据；回答必须能给出 `tables` 与 `executed_sql`。
 >
 > **已知设计缺口（必须写进论文，不得隐瞒）**：
 > 流量域（UV / PV / 转化率）的事实来源只有 Kafka 事件，MySQL 无对应业务表，
-> 因此离线侧**无源可算**，Sprint 3 未对其对账。
+> 因此离线侧**无源可算**，Sprint 3 未对其对账；Sprint 7 的 Agent 在回答里
+> 也会如实说明"这类指标不在对账范围内"。
 > 补齐路径：Sprint 4 增加"Kafka → 湖仓 ODS"归档作业后再纳入对账。
 > **禁止**为了"看起来完整"而伪造离线流量指标。

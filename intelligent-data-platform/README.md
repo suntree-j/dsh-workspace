@@ -5,20 +5,25 @@
 > 的智能数据分析 Agent。
 >
 > **当前进度：Sprint 0（基础环境）、Sprint 1（实时数仓）、Sprint 2（离线链路）、
-> Sprint 3（离线分层 + 批流交叉对账）、Sprint 6（数据后台 + 前后端）
+> Sprint 3（离线分层 + 批流交叉对账）、Sprint 6（数据后台 + 前后端）、
+> Sprint 7（LLM + Tool Calling 数据问答 Agent）
 > 均已在腾讯云服务器上验收通过。**
 >
 > 核心原则：**先工程，再智能。**
 > 数据可靠 → 数据准确 → 数据可查询 → 数据可治理 → Agent 使用数据。
 
 > 🖥 **在线数据大屏**：<http://36.151.150.140/data/>
-> 接口文档：<http://36.151.150.140/data/api/docs>
+> 数据问答 Agent：<http://36.151.150.140/data/#/ask>
+> 接口文档：<http://36.151.150.140/data/api/docs> ｜
+> Agent 文档：<http://36.151.150.140/data/agent/docs>
 >
-> 架构：`浏览器 → Nginx(:80) → /data/ 静态看板 + /data/api/ 只读数据服务 → Doris`
+> 架构：`浏览器 → Nginx(:80) → /data/ 静态看板 + /data/api/ 只读数据服务 + /data/agent/ 问答 Agent → Doris`
 > 数据服务使用**专用只读账号**（`agent_ro`）+ SQL 安全守卫（仅 SELECT、强制 LIMIT），
 > 指标与 MySQL 事实源精确对账（GMV 51,890,375.77 元，精确到分）。
 > 看板含**实时链路**与**离线链路**两套视角，并展示两者的逐窗口对账结论
 > （11458 个分钟窗口，不一致 0）。
+> **Agent 进程里没有数据库凭据** —— 它只能经只读数据服务取数，
+> 回答附"用了哪些表 + 实际执行的 SQL"，可逐条核对。
 
 > ✅ **Sprint 0 / 1 / 2 / 6 验收结果**（腾讯云 36.151.150.140 / Ubuntu 24.04.2 LTS）
 >
@@ -815,11 +820,14 @@ Sprint 3  ✅ 离线分层建模 ODS → DWD → DWS → ADS + **批流交叉对
              Spark 分层计算 → Parquet on S3A → Doris S3() TVF 装载
              11458 个分钟窗口逐条比对：不一致 0，GMV 两条链路均为 51,890,375.77
    ↓
+Sprint 7  ✅ LLM + Tool Calling：**数据问答 Agent**
+             自然语言 → 查口径 → 生成 SQL → 过守卫 → 只读执行 → 带来源的回答
+             Agent 进程无数据库凭据；回答附"用了哪些表 + 实际执行的 SQL"可核对
+             验收 49/49；实测三问（日 GMV / 支付成功率与退款率 / 数据准不准）全部正确
+   ↓
 Sprint 4     Airflow 调度
    ↓
 Sprint 5     Iceberg Lakehouse
-   ↓
-Sprint 7     LLM + Tool Calling
    ↓
 Sprint 8     LangGraph Data Agent
    ↓
@@ -835,18 +843,20 @@ Sprint 13    毕业论文 + 答辩
 ```
 
 **下一步：Sprint 4 —— Airflow 调度。**
-Sprint 3 已经证明"离线链路能算出与实时链路完全一致的指标"，
-但这条链路目前靠 `scripts/batch-mode.sh` 手工触发。
-Sprint 4 要把它变成按依赖编排的定时任务，并顺带补齐**流量域的离线化**：
+目前有两条链路可以跑通：实时（Flink 常驻）与离线（`scripts/batch-mode.sh` 手工触发）。
+Sprint 4 要做两件事：
+
+1. 把离线流水线变成按依赖编排的定时任务（现在靠手工触发，无法无人值守）；
+2. 顺带补齐**流量域的离线化** —— 这是 Sprint 3 就记录的设计缺口：
 
 ```text
 交易域  MySQL 有事实表           →  离线已可算、已对账  ✅
 流量域  仅 Kafka 有行为事件      →  需要"Kafka → 湖仓 ODS"归档作业后才能离线化  ⚠️
 ```
 
-流量域是本 Sprint 明确记录的**设计缺口**（不是实现失败）：
-MySQL 里没有行为事实表，离线侧无源，因此**不伪造**离线流量指标。
-补齐路径与影响见 [`docs/sprint/SPRINT_3.md`](docs/sprint/SPRINT_3.md) 第 5 节。
+流量域是**设计缺口**而非实现失败：MySQL 里没有行为事实表，离线侧无源，
+因此**不伪造**离线流量指标。Sprint 7 的 Agent 在回答里已如实说明了这一点
+（见 [`docs/sprint/SPRINT_7.md`](docs/sprint/SPRINT_7.md) 第 8.1 节）。
 
 一键验收：
 
@@ -855,6 +865,7 @@ bash scripts/verify-sprint-1.sh     # 实时数仓（Kafka → Flink → Doris�
 bash scripts/verify-sprint-2.sh     # 离线链路（MySQL → Spark → 湖仓 → Hive）
 bash scripts/verify-sprint-3.sh     # 离线分层 + 批流交叉对账（8 步）
 bash scripts/verify-sprint-6.sh     # 数据服务与前端（Nginx + API + 对账 + 安全）
+bash scripts/verify-sprint-7.sh     # 数据问答 Agent（守卫 + 工具 + 端到端问答）
 ```
 
 离线链路重跑（内存受限，走错峰模式）：
@@ -862,6 +873,22 @@ bash scripts/verify-sprint-6.sh     # 数据服务与前端（Nginx + API + 对�
 ```bash
 bash scripts/batch-mode.sh          # 暂停实时链路 → 跑完整离线流水线 → 恢复并自检
 ```
+
+Agent 部署与配置：
+
+```bash
+bash scripts/deploy-agent.sh        # 部署（幂等；会一并重启数据服务）
+# 配置 LLM Key： 在 .env 设置 LLM_API_KEY 后 systemctl restart data-platform-agent
+# 详见 services/agent/README.md
+```
+
+> ⚠️ **公网访问偶发 502（已知，非应用问题）**：
+> 客户端经公网访问 `/data/*` 时约 15~40% 概率收到 502，
+> 但服务器 nginx 访问日志里**没有任何 502**、`ListenOverflows` 为 0、
+> 服务端自测全部 200 —— 请求在到达服务器之前就被中间链路拒绝了。
+> 演示或验收时建议走 SSH 隧道绕开抖动：
+> `ssh -N -L 18080:127.0.0.1:80 root@<ip>`，然后访问 `http://127.0.0.1:18080/data/`。
+> 排查证据见 [`docs/sprint/SPRINT_7.md`](docs/sprint/SPRINT_7.md) 第 9.7 节。
 
 ---
 
@@ -881,7 +908,9 @@ bash scripts/batch-mode.sh          # 暂停实时链路 → 跑完整离线流�
 | [`docs/sprint/SPRINT_2.md`](docs/sprint/SPRINT_2.md) | Sprint 2 设计：离线链路（含 11 条踩坑记录） |
 | [`docs/sprint/SPRINT_3.md`](docs/sprint/SPRINT_3.md) | Sprint 3 设计：离线分层建模 + 批流交叉对账（含 10 条踩坑与内存事故记录） |
 | [`docs/sprint/SPRINT_6.md`](docs/sprint/SPRINT_6.md) | Sprint 6 设计：数据后台 + 前后端（服务层） |
+| [`docs/sprint/SPRINT_7.md`](docs/sprint/SPRINT_7.md) | Sprint 7 设计：LLM + Tool Calling 数据问答 Agent（含 7 条踩坑） |
 | [`services/api/README.md`](services/api/README.md) | 数据服务说明（接口、安全、部署） |
+| [`services/agent/README.md`](services/agent/README.md) | **Agent 配置说明（申请 Key、写入、验证、排查）** |
 | [`services/web/README.md`](services/web/README.md) | 前端看板说明（无构建步骤、部署、空值约定） |
 | [`sql/metadata/metrics.md`](sql/metadata/metrics.md) | **指标口径字典（唯一权威）** |
 | [`sql/metadata/kafka_topics.md`](sql/metadata/kafka_topics.md) | Topic 与事件格式定义 |
