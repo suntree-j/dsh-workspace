@@ -124,6 +124,18 @@ class DockerRunner:
         )
         return result.stdout.strip() == "true"
 
+    def inspect(self, container: str, template: str) -> str:
+        """按模板读取容器信息（注意：这是 docker inspect，不是 docker exec）。"""
+        result = subprocess.run(
+            [self.cli, "inspect", "-f", template, container],
+            capture_output=True, text=True, check=False,
+        )
+        return result.stdout.strip()
+
+    def health(self, container: str) -> str:
+        """容器 healthcheck 状态：healthy / starting / unhealthy / missing。"""
+        return self.inspect(container, "{{.State.Health.Status}}") or "missing"
+
 
 # ------------------------------------------------------------
 # fixtures
