@@ -75,23 +75,33 @@ REPO = "/opt/data-platform"
 #: 每天凌晨 3 点（Asia/Shanghai）。理由见模块文档。
 SCHEDULE = "0 3 * * *"
 
+# !! 不要把 retries / execution_timeout 只写在这里 !!
+#
+#   实测（Airflow 3.3.2）：`@dag(default_args=...)` 里的这些键**不生效**。
+#   证据：任务实例日志里 `try_number=1, max_tries=1` ——
+#   即 retries 实际为 0，尽管 default_args 里写的是 1。
+#   后果不是"少重试一次"这么轻：
+#     状态会停在 `up_for_retry` 却已无重试次数，
+#     于是**永久卡在中间态** —— DAG run 永不结束、restore_realtime 永不执行、
+#     实时链路一直停着，而且 max_active_runs=1 还会挡住后续所有 run。
+#     实测就是这样卡住的。
+#
+#   所以：重试与超时一律**显式写在每个算子上**（见 _stage 与 restore）。
+#   这里只保留不影响调度的元信息。
 DEFAULT_ARGS = {
     "owner": "data-platform",
-    # 只重试 1 次：Spark 作业失败通常是数据或环境问题，重试多次只会
-    # 反复吃内存、拉长实时链路的暂停时间。
-    "retries": 1,
-    "retry_delay": timedelta(minutes=3),
     "depends_on_past": False,
     "email_on_failure": False,
-    # !! 每个任务都必须有执行超时（实测发现的设计缺口）!!
-    #   最初没设超时。后果不是"任务慢"，而是：
-    #   **一个挂死的 stage 会永久占着位置，而 restore_realtime 依赖它，
-    #   于是实时链路一直停在暂停状态，且没有任何机制把它救回来。**
-    #   "任务永久挂住"比"任务失败"严重得多 —— 失败至少会触发 all_done 恢复。
-    #   实测基线：dwd 3.4 分钟 / dws 5.7 分钟 / ads 约 6 分钟。
-    #   给 45 分钟：足够容纳数据量增长，又能在真挂死时及时止损。
-    "execution_timeout": timedelta(minutes=45),
 }
+
+#: 单层的重试策略。放在常量里是为了让每个算子引用同一份值，
+#: 而不是各处手写导致不一致。
+STAGE_RETRIES = 1
+STAGE_RETRY_DELAY = timedelta(minutes=3)
+#: 单层执行超时。实测基线：dwd 3.4 分钟 / dws 5.7 分钟 / ads 约 6~8 分钟。
+#: 给 45 分钟：足够容纳数据量增长，又能在真挂死时及时止损 ——
+#: 没有超时时，"任务永久挂住"比"任务失败"严重得多（失败至少会触发恢复）。
+STAGE_TIMEOUT = timedelta(minutes=45)
 
 
 def _stage(task_id: str, stage: str, doc: str) -> BashOperator:
@@ -108,6 +118,10 @@ def _stage(task_id: str, stage: str, doc: str) -> BashOperator:
         bash_command=f"bash {REPO}/scripts/run-batch-pipeline.sh --stage {stage}",
         cwd=REPO,
         append_env=True,
+        # 显式写在算子上，不依赖 default_args（理由见 DEFAULT_ARGS 上方的说明）
+        retries=STAGE_RETRIES,
+        retry_delay=STAGE_RETRY_DELAY,
+        execution_timeout=STAGE_TIMEOUT,
         doc_md=doc,
     )
 
@@ -130,8 +144,14 @@ def offline_lakehouse_pipeline() -> None:
         bash_command=f"bash {REPO}/scripts/batch-mode.sh --pause-only",
         cwd=REPO,
         append_env=True,
+        # 显式写在算子上（不依赖 default_args，理由见文件上方说明）。
+        # 暂停本身很快，但失败必须重试：暂停不成功的话后面每个 stage
+        # 都会被内存闸门拒绝，整条 DAG 白跑。
+        retries=STAGE_RETRIES,
+        retry_delay=STAGE_RETRY_DELAY,
+        execution_timeout=timedelta(minutes=15),
         doc_md=(
-            "暂停 Flink 栈，释放约 2.8 GB 内存。\n\n"
+            "暂停 Flink 栈，释放约 1.65 GB 内存（实测 2282 → 3935 MB）。\n\n"
             "不会丢数据：Kafka 是缓冲（Flink 停了事件继续堆在 topic 里），"
             "Flink 的消费位点在 checkpoint 里，重启后从上次位置继续，"
             "重复的部分由 Doris 的 UNIQUE KEY 幂等覆盖。\n\n"
