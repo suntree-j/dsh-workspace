@@ -1,0 +1,41 @@
+fix: correct minio healthcheck and init for busybox image
+
+在腾讯云服务器上实测发现并修复 MinIO 相关缺陷（均为真实运行才暴露）。
+
+## 问题
+minio 镜像基于 BusyBox，实测**不含 sed / awk / grep / curl / wget / tar**，
+只有 sh 内建、busybox 基础工具与 /usr/bin/mc。此前代码依赖这些工具：
+
+1. `infrastructure/minio/init/01-create-bucket.sh` 用 `sed` 剥离协议前缀，
+   sed 不存在导致 `MC_HOST_local` 为空，所有 mc 命令失败，
+   minio-init 卡在重试直到超时（exit 1），lakehouse bucket 从未创建。
+2. compose 中 minio 的 healthcheck 用 `curl`，镜像内不存在，永远失败；
+   且 `mc ready <url>` 在未配置别名时**打印错误却返回退出码 0**，
+   会把不健康的服务误判为健康。
+
+## 修复
+- init 脚本改用 POSIX 参数展开 `${var#http://}` 剥离前缀，
+  就绪探测改用 `mc ls <alias>`（服务不可用时返回非 0），
+  校验改用 mc 退出码而不用 grep。
+- 新增 `infrastructure/minio/healthcheck.sh`：显式用容器内凭据构造
+  MC_HOST_<alias> 后执行 `mc ls`，作为 compose healthcheck。
+- compose 挂载该脚本并改用 `CMD ["/bin/sh", ...]`。
+
+## 同时修正
+- Doris FE/BE 增加 `ulimits.nofile: 65536`
+  （容器默认 soft nofile 仅 1024，Doris 需要更高上限）。
+- 冒烟测试改为 Doris 非全局前置条件：核心服务（MySQL/Kafka/MinIO）
+  与 Doris 分开判定，Doris 未就绪时仅跳过 Doris 用例，
+  其余仍可验证（新增 require_doris fixture）。
+- 修正冒烟测试自身 3 个缺陷：
+  * test_mysql_version_is_8x 漏声明 fixture 参数；
+  * test_kafka_topic_partitions 误把 describe 的概要行计入分区数
+    （分区行以制表符开头），改为统计同时含 Partition: 与 Leader: 的行；
+  * test_minio_healthy 使用镜像内不存在的 curl，改为读取
+    compose healthcheck 的实际状态。
+
+## 实测结果（腾讯云 Ubuntu 24.04 / Docker 29.8.1）
+- minio-init：exit 0，bucket lakehouse 创建成功
+- minio healthcheck：healthy
+- 冒烟测试：21 passed, 6 skipped（Doris 镜像仍在拉取）
+- 单元测试：24 passed

@@ -177,12 +177,19 @@ services:
       - "${MINIO_CONSOLE_HOST_PORT:-9001}:9001"
     volumes:
       - minio-data:/data
+      # 健康检查脚本（镜像内无 curl，只能用 mc，详见脚本内注释）
+      - ./infrastructure/minio/healthcheck.sh:/usr/local/bin/minio-healthcheck.sh:ro
     networks:
       - data-platform
     healthcheck:
-      test: ["CMD-SHELL", "mc ready local >/dev/null 2>&1 || curl -fsS http://localhost:9000/minio/health/live >/dev/null 2>&1"]
+      # 说明：minio 镜像基于 BusyBox，**不含 curl / wget / nc / sed / awk / grep**，
+      #       只有 sh 内建、busybox 基础工具与 /usr/bin/mc。
+      #       且 `mc ready <url>` 在未配置别名时打印错误却返回退出码 0，
+      #       会把不健康的服务误判为健康。
+      #       因此使用脚本显式构造别名后执行 `mc ls`。
+      test: ["CMD", "/bin/sh", "/usr/local/bin/minio-healthcheck.sh"]
       interval: 10s
-      timeout: 5s
+      timeout: 10s
       retries: 10
       start_period: 20s
 
@@ -234,6 +241,12 @@ services:
     volumes:
       - doris-fe-meta:/opt/apache-doris/fe/doris-meta
       - doris-fe-log:/opt/apache-doris/fe/log
+    # Doris 需要较高的文件描述符上限。
+    # 容器默认 soft nofile 仅 1024，会导致启动或高并发查询失败。
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     networks:
       data-platform:
         ipv4_address: ${DORIS_FE_IP:-172.28.0.10}
@@ -273,6 +286,11 @@ services:
       - doris-be-log:/opt/apache-doris/be/log
       # BE 的 entry_point.sh 会自动执行此目录下的 *.sql / *.sh
       - ./sql/doris:/docker-entrypoint-initdb.d:ro
+    # Doris 需要较高的文件描述符上限（容器默认 soft nofile 仅 1024）
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     networks:
       data-platform:
         ipv4_address: ${DORIS_BE_IP:-172.28.0.11}

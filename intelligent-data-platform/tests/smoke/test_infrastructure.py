@@ -143,9 +143,18 @@ def container_running(name: str) -> bool:
 # ------------------------------------------------------------
 # 会话级前置检查
 # ------------------------------------------------------------
+CORE_CONTAINERS = ("mysql", "kafka", "minio")
+DORIS_CONTAINERS = ("doris-fe", "doris-be")
+
+
 @pytest.fixture(scope="session", autouse=True)
 def require_infrastructure() -> None:
-    """所有冒烟测试的前置条件：Docker 可用且核心容器在运行。"""
+    """核心服务前置条件：Docker 可用且 MySQL / Kafka / MinIO 在运行。
+
+    设计说明：Doris 首次启动需要初始化元数据、注册 BE，耗时较长，
+    因此**不作为全部冒烟测试的前置条件**；Doris 相关用例自行判断
+    （见 require_doris），这样在 Doris 尚未就绪时仍能验证其余组件。
+    """
     if not DOCKER:
         pytest.skip(
             "未找到 docker 可执行文件。\n"
@@ -167,15 +176,23 @@ def require_infrastructure() -> None:
             "然后执行 docker compose up -d"
         )
 
-    missing = [
-        name
-        for name in ("mysql", "kafka", "minio", "doris-fe", "doris-be")
-        if not container_running(name)
-    ]
+    missing = [name for name in CORE_CONTAINERS if not container_running(name)]
     if missing:
         pytest.skip(
-            f"以下容器未运行：{', '.join(missing)}。\n"
+            f"以下核心容器未运行：{', '.join(missing)}。\n"
             "  请先执行： bash scripts/start.sh  （或 docker compose up -d）"
+        )
+
+
+@pytest.fixture(scope="session")
+def require_doris() -> None:
+    """Doris 相关用例的前置条件。"""
+    missing = [name for name in DORIS_CONTAINERS if not container_running(name)]
+    if missing:
+        pytest.skip(
+            f"以下 Doris 容器未运行：{', '.join(missing)}。\n"
+            "  Doris 首次启动需要 1~3 分钟，请稍后重试：\n"
+            "  docker compose logs --tail=50 doris-fe doris-be"
         )
 
 
@@ -196,7 +213,7 @@ def test_mysql_connection(mysql_creds: tuple[str, str]) -> None:
     assert "alive" in out.lower()
 
 
-def test_mysql_version_is_8x() -> None:
+def test_mysql_version_is_8x(mysql_creds: tuple[str, str]) -> None:
     user, password = mysql_creds
     out = docker_exec_out(
         "mysql", "mysql", "-h", "127.0.0.1", "-u", user, f"-p{password}", "-N", "-B",
@@ -289,13 +306,22 @@ def test_kafka_topic_exists(topic: str) -> None:
 
 @pytest.mark.parametrize("topic", KAFKA_TOPICS)
 def test_kafka_topic_partitions(topic: str) -> None:
-    """每个 Topic 必须有 3 个分区（SPRINT_0.md 第 8 节）。"""
+    """每个 Topic 必须有 3 个分区（SPRINT_0.md 第 8 节）。
+
+    注意：kafka-topics.sh --describe 的输出首行是 Topic 概要行
+    （Topic: xxx  TopicId: ...  PartitionCount: 3 ...），
+    其后每个分区一行且**以制表符开头**。因此不能用
+    "以 Topic: 开头" 来数分区（那样会多算首行），
+    而应统计同时含 Partition: 与 Leader: 的行。
+    """
     out = docker_exec_out(
         "kafka", "/opt/kafka/bin/kafka-topics.sh",
         "--bootstrap-server", "kafka:9092", "--describe", "--topic", topic,
     )
+
     partition_lines = [
-        line for line in out.splitlines() if line.strip().startswith("Topic:")
+        line for line in out.splitlines()
+        if "Partition:" in line and "Leader:" in line
     ]
     assert len(partition_lines) == 3, (
         f"Topic {topic} 分区数为 {len(partition_lines)}，期望 3\n{out}"
@@ -370,16 +396,27 @@ def test_kafka_produce_and_consume() -> None:
 # 7. MinIO Bucket 存在
 # ============================================================
 def test_minio_healthy() -> None:
-    out = docker_exec_out("minio", "curl", "-fsS", "http://localhost:9000/minio/health/live")
-    assert out.strip() == "" or "live" in out.lower() or out is not None
+    """MinIO 必须处于 healthy 状态。
+
+    注意：minio 镜像基于 BusyBox，**不含 curl / wget / nc**，
+    因此不能用 `docker exec minio curl .../minio/health/live`。
+    这里读取 compose healthcheck 的实际结果（该 healthcheck 本身
+    用 mc 探测，见 infrastructure/minio/healthcheck.sh）。
+    """
+    result = subprocess.run(
+        [DOCKER, "inspect", "-f", "{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}", "minio"],
+        capture_output=True, text=True, check=False,
+    )
+    status = result.stdout.strip()
+    assert status == "healthy", f"MinIO 健康状态为 {status!r}，期望 'healthy'"
 
 
 def test_minio_bucket_exists() -> None:
     """通过 mc 校验 lakehouse bucket 存在。"""
     assert MINIO_ROOT_USER and MINIO_ROOT_PASSWORD, "MinIO 凭据未设置"
     script = (
-        f'MC_HOST_local="http://{MINIO_ROOT_USER}:{MINIO_ROOT_PASSWORD}@localhost:9000" '
-        f"mc ls local/"
+        f'MC_HOST_local="http://{MINIO_ROOT_USER}:{MINIO_ROOT_PASSWORD}@localhost:9000"; '
+        f"export MC_HOST_local; mc ls local/"
     )
     out = docker_exec_out("minio", "sh", "-c", script)
     assert MINIO_BUCKET in out, f"bucket {MINIO_BUCKET} 不存在\n{out}"
@@ -388,7 +425,7 @@ def test_minio_bucket_exists() -> None:
 # ============================================================
 # 8. Doris 可以连接
 # ============================================================
-def test_doris_fe_reachable() -> None:
+def test_doris_fe_reachable(require_doris: None) -> None:
     """FE 应能通过 MySQL 协议连接。"""
     out = docker_exec_out(
         "doris-be", "mysql", "-h", DORIS_FE_IP, "-P", "9030", "-uroot",
@@ -397,7 +434,7 @@ def test_doris_fe_reachable() -> None:
     assert out == "1", f"Doris FE 连接异常，返回 {out!r}"
 
 
-def test_doris_ecommerce_database_exists() -> None:
+def test_doris_ecommerce_database_exists(require_doris: None) -> None:
     out = docker_exec_out(
         "doris-be", "mysql", "-h", DORIS_FE_IP, "-P", "9030", "-uroot",
         "--connect-timeout=10", "-N", "-B",
@@ -409,7 +446,7 @@ def test_doris_ecommerce_database_exists() -> None:
 # ============================================================
 # 9. Doris 可以建表
 # ============================================================
-def test_doris_can_create_table() -> None:
+def test_doris_can_create_table(require_doris: None) -> None:
     table = f"smoke_test_{uuid.uuid4().hex[:8]}"
     ddl = (
         f"CREATE TABLE ecommerce.{table} ("
@@ -440,7 +477,7 @@ def test_doris_can_create_table() -> None:
 # ============================================================
 # 10. Doris 可以查询测试数据
 # ============================================================
-def test_doris_test_connection_table_query() -> None:
+def test_doris_test_connection_table_query(require_doris: None) -> None:
     """验证 SPRINT_0.md 第 11 节要求的 test_connection 表与数据。"""
     out = docker_exec_out(
         "doris-be", "mysql", "-h", DORIS_FE_IP, "-P", "9030", "-uroot",
@@ -453,7 +490,7 @@ def test_doris_test_connection_table_query() -> None:
     )
 
 
-def test_doris_backend_alive() -> None:
+def test_doris_backend_alive(require_doris: None) -> None:
     """BE 必须已注册且 Alive。"""
     out = docker_exec_out(
         "doris-be", "mysql", "-h", DORIS_FE_IP, "-P", "9030", "-uroot",
@@ -463,7 +500,7 @@ def test_doris_backend_alive() -> None:
     assert "true" in out, f"BE 未存活\n{out}"
 
 
-def test_doris_default_replication_num_is_one() -> None:
+def test_doris_default_replication_num_is_one(require_doris: None) -> None:
     """单 BE 环境必须把 default_replication_num 设为 1。"""
     out = docker_exec_out(
         "doris-be", "mysql", "-h", DORIS_FE_IP, "-P", "9030", "-uroot",
