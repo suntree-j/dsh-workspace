@@ -113,3 +113,38 @@ CREATE EXTERNAL TABLE IF NOT EXISTS lakehouse.ods_refund (
 COMMENT 'ODS-退款事实（贴源，未清洗）'
 STORED AS PARQUET
 LOCATION 's3a://lakehouse/warehouse/ods/refund';
+
+-- ------------------------------------------------------------
+-- ODS：行为事件（源：Kafka topic `behavior_event`，Sprint 4 新增）
+--
+-- !! 为什么这张表的来源是 Kafka 而不是 MySQL !!
+--   这是 Sprint 3 明确记录下来的**设计缺口**：
+--   交易域（订单/支付/退款）在 MySQL 里有事实表，离线侧有源可算；
+--   而**流量域（UV / PV / 转化率）的事实来源只有 Kafka 行为事件**，
+--   MySQL 里没有对应业务表 —— 离线侧"无源可算"，
+--   因此 Sprint 3 的批流对账只覆盖交易域，流量域无法参与。
+--
+--   Sprint 4 补上这一环：把 Kafka 里的行为事件归档进湖仓 ODS，
+--   流量域从此也能离线计算并与实时链路逐窗口对账。
+--   在此之前，Agent 在回答"这类指标准不准"时会如实说明
+--   "UV 等去重指标不在对账范围内" —— 那不是托词，是真的没有源。
+--
+-- !! 为什么按 dt 分区、且用事件时间而不是处理时间 !!
+--   与 sql/metadata/metrics.md 的时间语义一致（事件时间，保证乱序/重放
+--   结果一致），也让离线窗口与 Flink 的窗口**可比** —— 这是能对账的前提。
+--
+-- 字段与 sql/metadata/kafka_topics.md 第 8 节的 behavior_event 信封一一对应。
+-- ------------------------------------------------------------
+CREATE EXTERNAL TABLE IF NOT EXISTS lakehouse.ods_behavior_event (
+    event_id   STRING        COMMENT '事件ID（幂等键）',
+    event_type STRING        COMMENT '事件类型：VIEW/CLICK/CART/BUY/FAVORITE/SEARCH',
+    user_id    BIGINT        COMMENT '用户ID',
+    product_id BIGINT        COMMENT '商品ID（SEARCH 事件可为空）',
+    device     STRING        COMMENT '设备：PC/APP/H5/MINI_PROGRAM',
+    province   STRING        COMMENT '省份',
+    event_time TIMESTAMP     COMMENT '事件时间（窗口计算基准，Asia/Shanghai）'
+)
+COMMENT 'ODS-行为事件（源：Kafka behavior_event，Sprint 4 归档）'
+PARTITIONED BY (dt STRING COMMENT '分区日期，由 event_time 推导')
+STORED AS PARQUET
+LOCATION 's3a://lakehouse/warehouse/ods/behavior_event';

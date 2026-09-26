@@ -11,6 +11,7 @@
 #
 # 阶段依赖：
 #   ods   MySQL  → ODS（Sprint 2 的抽取作业）
+#   archive       Kafka → ODS（Sprint 4 新增：行为事件归档，补齐流量域离线源）
 #   dwd   ODS    → DWD   去重 / 清洗 / 维度补全
 #   dws   DWD    → DWS   按天轻度聚合
 #   ads   DWD    → ADS   指标口径（含 1 分钟粒度）
@@ -23,7 +24,12 @@
 #   结果前 4 张表装载成功、第 5 张报"装载失败"——
 #   因为它的 Parquet 目录此时还不存在（S3() TVF 匹配不到文件，静默返回空）。
 #   顺序即依赖：先算出来，再搬进服务库。
-STAGES=(ods dwd dws ads reconcile load)
+#
+# !! 为什么 archive 排在 ods 之后、dwd 之前 !!
+#   ods 与 archive 是**两个互不依赖的取数源**（MySQL 业务库 / Kafka 事件流），
+#   理论上可并行；这里串行是为了内存 —— 本机可用内存只够一次一个 Spark 作业。
+#   两者都必须在 dwd 之前：dwd 要同时读交易域与流量域的 ODS。
+STAGES=(ods archive dwd dws ads reconcile load)
 
 # shellcheck source=lib/common.sh
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
@@ -32,7 +38,7 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/spark-job.sh"
 # shellcheck source=lib/memory-guard.sh
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/memory-guard.sh"
 
-STAGES=(ods dwd dws ads reconcile load)
+STAGES=(ods archive dwd dws ads reconcile load)
 SELECTED=()
 SKIP_RECONCILE=0
 
@@ -41,7 +47,7 @@ usage() {
 用法： bash scripts/run-batch-pipeline.sh [选项]
 
 选项：
-  --stage <name>      只跑指定阶段（可重复）；name ∈ ods|dwd|dws|ads|load|reconcile
+  --stage <name>      只跑指定阶段（可重复）；name ∈ ods|archive|dwd|dws|ads|load|reconcile
   --skip-reconcile    全链路模式下跳过对账阶段（离线链路自身仍会自检）
   --list              打印阶段与依赖，然后退出
   -h, --help          显示本帮助
@@ -71,6 +77,7 @@ parse_args() {
             --list)
                 printf '阶段顺序与依赖：\n'
                 printf '  %-10s %s\n' ods "MySQL → ODS（Spark JDBC 抽取，作业内逐表对账）"
+                printf '  %-10s %s\n' archive "Kafka 行为事件 → ODS（Sprint 4：补齐流量域离线源）"
                 printf '  %-10s %s\n' dwd "ODS → DWD（去重 / 清洗 / 维度补全）"
                 printf '  %-10s %s\n' dws "DWD → DWS（按天轻度聚合，只出可加指标）"
                 printf '  %-10s %s\n' ads "DWD → ADS（指标口径，1 分钟 + 1 天）"

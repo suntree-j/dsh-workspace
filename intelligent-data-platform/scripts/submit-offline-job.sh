@@ -6,6 +6,7 @@
 # 用法（服务器上，仓库根目录）：
 #   bash scripts/submit-offline-job.sh                 # 等价 --stage ods（Sprint 2 的抽取作业）
 #   bash scripts/submit-offline-job.sh --stage dwd     # 只跑 ODS → DWD
+#   bash scripts/submit-offline-job.sh --stage archive # 只跑 Kafka → ODS（Sprint 4）
 #   bash scripts/submit-offline-job.sh --stage dws     # 只跑 DWD → DWS
 #   bash scripts/submit-offline-job.sh --stage ads     # 只跑 DWD → ADS
 #   bash scripts/submit-offline-job.sh --stage reconcile
@@ -44,9 +45,9 @@ parse_args() {
                     exit 2
                 fi
                 case "${STAGE}" in
-                    ods|dwd|dws|ads|reconcile) ;;
+                    ods|archive|dwd|dws|ads|reconcile) ;;
                     *)
-                        log_error "未知阶段：${STAGE}（可选 ods|dwd|dws|ads|reconcile）"
+                        log_error "未知阶段：${STAGE}（可选 ods|archive|dwd|dws|ads|reconcile）"
                         printf '  提示：需要一次跑完请用 bash scripts/run-batch-pipeline.sh\n'
                         exit 2
                         ;;
@@ -66,6 +67,7 @@ parse_args() {
 }
 
 STAGE_DESC_ods="MySQL → ODS（Spark JDBC 抽取，作业内逐表对账）"
+STAGE_DESC_archive="Kafka 行为事件 → ODS（Sprint 4 新增，补齐流量域离线源）"
 STAGE_DESC_dwd="ODS → DWD（去重 / 清洗 / 维度补全）"
 STAGE_DESC_dws="DWD → DWS（按天轻度聚合）"
 STAGE_DESC_ads="DWD → ADS（指标口径，1 分钟 + 1 天）"
@@ -79,6 +81,16 @@ submit_stage() {
                 --conf "spark.mysql.user=root" \
                 --conf "spark.mysql.password=$(_spark_job_env_value MYSQL_ROOT_PASSWORD)" \
                 --conf "spark.jobs.ddl=/opt/sql/hive/01_ods_tables.sql"
+            ;;
+        archive)
+            # !! Kafka 地址必须用容器服务名 !!
+            #   本作业跑在 spark-submit 容器里，用 localhost:19092 会连到
+            #   容器自己（AGENTS.md 6.2：容器间禁止 localhost）。
+            #   .env 里的 KAFKA_BOOTSTRAP_SERVERS 是给宿主机 Python 用的。
+            submit_spark_job "sprint4-archive-behavior-events" \
+                "infrastructure/spark/jobs/archive_behavior_events.py" \
+                --conf "spark.jobs.ddl=/opt/sql/hive/01_ods_tables.sql" \
+                --conf "spark.jobs.kafkaBootstrap=${KAFKA_CONTAINER_BOOTSTRAP:-kafka:9092}"
             ;;
         dwd)
             submit_spark_job "sprint3-build-dwd" "infrastructure/spark/jobs/build_dwd.py"

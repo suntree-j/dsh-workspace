@@ -146,7 +146,25 @@ def offline_lakehouse_pipeline() -> None:
         "MySQL 业务库 → 湖仓 ODS（Spark JDBC 抽取，作业内自带逐表对账）。",
     )
 
-    # ---- 3~6. 分层建模 ----
+    # ---- 3. 归档：Kafka 行为事件 → ODS（Sprint 4 新增）----
+    # 补齐 Sprint 3 记录的设计缺口：流量域在 MySQL 里没有事实表，
+    # 离线侧"无源可算"，因此当时只有交易域参与批流对账。
+    # 归档落地后，流量域也能离线计算并与实时链路逐窗口对账。
+    #
+    # 为什么与 ods_extract **串行**而不是并行：
+    #   两者数据源不同、确实互不依赖，但本机可用内存只够一次跑一个 Spark 作业
+    #   （实测：暂停实时链路后约 3.9 GB，单个 Spark 驱动+执行器约 1.5 GB）。
+    #   并行会同时拉起两个驱动，直接打穿内存 —— 那正是 Sprint 3 整机失联的形态。
+    #   DAG 里没有并行，是**有意的**。
+    archive = _stage(
+        "archive_behavior",
+        "archive",
+        "Kafka `behavior_event` → 湖仓 ODS（批读 earliest→latest，按 dt 动态分区覆盖，幂等）。\n\n"
+        "作业内自检：归档行数 == Kafka 实际消息数、漏斗单调收窄、"
+        "枚举合法、`user_id` 均存在于 `ods_user`。",
+    )
+
+    # ---- 4~6. 分层建模 ----
     dwd = _stage("dwd_layers", "dwd", "ODS → DWD：去重 / 清洗 / 维度补全。")
     dws = _stage("dws_layers", "dws", "DWD → DWS：按天轻度聚合，只出可加指标。")
     ads = _stage("ads_layers", "ads", "DWD → ADS：指标口径（1 分钟 + 1 天）。")
@@ -194,7 +212,7 @@ def offline_lakehouse_pipeline() -> None:
         ),
     )
 
-    pause >> ods >> dwd >> dws >> ads >> reconcile >> load >> restore
+    pause >> ods >> archive >> dwd >> dws >> ads >> reconcile >> load >> restore
 
 
 offline_lakehouse_pipeline()
