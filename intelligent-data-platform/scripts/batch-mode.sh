@@ -39,6 +39,7 @@ PIPELINE_ARGS=()
 KEEP_REALTIME=0
 NO_RESTORE=0
 RESTORE_ONLY=0
+PAUSE_ONLY=0
 
 usage() {
     cat <<'TXT'
@@ -49,8 +50,18 @@ usage() {
   --skip-reconcile   透传给 run-batch-pipeline.sh
   --keep-realtime    不暂停实时链路（仅在内存充裕时使用）
   --no-restore       跑完不自动恢复实时链路
+  --pause-only       只暂停实时链路，不跑批（Sprint 4：给 Airflow 用）
   --restore-only     只恢复实时链路，不跑批
   -h, --help         显示本帮助
+
+为什么需要 --pause-only 与 --restore-only 这一对：
+  Airflow 的 DAG 要把"暂停实时链路"和"恢复实时链路"做成两个**独立任务**，
+  中间夹着逐层的批处理任务。这样做的收益是：
+    - 每一层都能单独看到成功/失败并单独重试；
+    - 恢复任务可以用 trigger_rule=all_done，保证**任一环节失败也会恢复**
+      实时链路 —— 否则一次失败的批处理会让看板一直停在那里，
+      那比批处理失败本身严重得多。
+  把整个 batch-mode.sh 塞进一个任务就退化成 cron 了，失去上述两点。
 TXT
 }
 
@@ -60,6 +71,7 @@ parse_args() {
             --keep-realtime) KEEP_REALTIME=1; shift ;;
             --no-restore)    NO_RESTORE=1; shift ;;
             --restore-only)  RESTORE_ONLY=1; shift ;;
+            --pause-only)    PAUSE_ONLY=1; shift ;;
             --stage|--skip-reconcile)
                 PIPELINE_ARGS+=("$1")
                 if [ "$1" = "--stage" ]; then
@@ -140,6 +152,17 @@ main() {
     if [ "${RESTORE_ONLY}" -eq 1 ]; then
         restore_realtime
         exit $?
+    fi
+
+    if [ "${PAUSE_ONLY}" -eq 1 ]; then
+        # 暂停前也过一遍"没有正在跑的 Spark 作业"闸门：
+        # 暂停实时链路本身不危险，但若此时已有作业在跑，
+        # 说明有人正在手工跑批，两边叠加会打穿内存（Sprint 3 的事故形态）。
+        require_no_running_jobs || exit 1
+        pause_realtime
+        printf '\n'
+        log_ok "实时链路已暂停；跑完批处理后请执行： bash scripts/batch-mode.sh --restore-only"
+        exit 0
     fi
 
     # 闸门：不要叠加第二个 Spark 作业

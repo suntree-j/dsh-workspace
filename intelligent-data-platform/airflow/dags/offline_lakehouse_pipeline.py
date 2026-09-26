@@ -1,0 +1,189 @@
+"""
+离线湖仓流水线（Sprint 4）
+==========================
+
+把 Sprint 3 的**手工**批处理变成按依赖调度的 DAG。
+
+在 Sprint 4 之前，离线链路的执行方式是：
+
+    bash scripts/batch-mode.sh          # 人手工敲，跑完就完了
+
+这带来两个问题：无法无人值守；没有「哪一层失败了、重试了几次」的记录。
+
+本 DAG 的做法
+-------------
+
+    pause_realtime ── ods_extract ── dwd ── dws ── ads ── reconcile ── load ── restore_realtime
+
+三个关键设计点
+--------------
+
+**1. 每个阶段是独立的 Airflow 任务，而不是把 batch-mode.sh 整个塞进一个任务**
+
+    Airflow 的价值在于每一层的可见性、独立重试与失败定位。
+    塞成一个任务的话，Airflow 就只是个定时器，退化成 cron 了。
+
+**2. 暂停与恢复必须是 DAG 里的两个独立任务**
+
+    因为恢复任务要能用 ``trigger_rule=all_done``：**任一上游失败也必须恢复
+    实时链路**。否则一次失败的批处理会让看板一直停在暂停状态 ——
+    那比批处理失败本身严重得多（看板停了没人知道，比任务红了没人看更糟）。
+
+**3. max_active_runs=1：绝不允许两次批处理重叠**
+
+    本机实时链路常驻约 12 GB，可用内存只有约 2.5 GB，而批处理的内存闸门是
+    MIN_AVAILABLE_MB_FOR_BATCH=3000。所以必须「先暂停实时链路（释放约 2.8 GB）
+    再跑批」。两次重叠 = 必然打穿内存 = Sprint 3 那次整机失联的形态。
+
+为什么调度在凌晨三点
+--------------------
+
+    批处理期间实时链路是暂停的（看板曲线会延后追上）。
+    选在使用者最少的时间窗，把「暂停」的影响降到最低。
+
+闸门在哪里
+----------
+
+    不在这个文件里，而在 ``scripts/run-batch-pipeline.sh`` 里 ——
+    它 source 了 ``lib/memory-guard.sh``，每个阶段开跑前都会过：
+
+      - require_no_running_jobs()   不允许叠加第二个 Spark 作业
+      - require_memory_for_batch()  可用内存必须 >= 3000 MB
+
+    这样「手工跑」和「调度跑」受**同一套**闸门约束，不存在两条路径行为不一致。
+    这一点是刻意的：调度必须复用人工入口，不能平行实现一套。
+"""
+
+from __future__ import annotations
+
+from datetime import timedelta
+
+import pendulum
+
+# Airflow 3 的公开 DAG 编写接口是 airflow.sdk（不再是 airflow.models）
+from airflow.providers.standard.operators.bash import BashOperator
+from airflow.sdk import dag
+
+# ---------------------------------------------------------------------------
+# 常量
+# ---------------------------------------------------------------------------
+
+#: 仓库根目录。DAG 只调用仓库里的脚本，不自己实现业务逻辑 ——
+#: 这样「人手工跑的命令」与「调度跑的命令」永远是同一个东西。
+REPO = "/opt/data-platform"
+
+#: 每天凌晨 3 点（Asia/Shanghai）。理由见模块文档。
+SCHEDULE = "0 3 * * *"
+
+DEFAULT_ARGS = {
+    "owner": "data-platform",
+    # 只重试 1 次：Spark 作业失败通常是数据或环境问题，重试多次只会
+    # 反复吃内存、拉长实时链路的暂停时间。
+    "retries": 1,
+    "retry_delay": timedelta(minutes=3),
+    "depends_on_past": False,
+    "email_on_failure": False,
+}
+
+
+def _stage(task_id: str, stage: str, doc: str) -> BashOperator:
+    """构造一个「跑某一层」的任务。
+
+    为什么统一走 ``run-batch-pipeline.sh --stage``：
+        它是 Sprint 3 建立的**人工入口**。调度复用它，两个好处：
+
+        1. 不存在「手工能跑、调度跑不了」的行为分叉；
+        2. 内存闸门与「不叠加作业」闸门自动生效（在脚本里，不在这里）。
+    """
+    return BashOperator(
+        task_id=task_id,
+        bash_command=f"bash {REPO}/scripts/run-batch-pipeline.sh --stage {stage}",
+        cwd=REPO,
+        append_env=True,
+        doc_md=doc,
+    )
+
+
+@dag(
+    dag_id="offline_lakehouse_pipeline",
+    description="离线湖仓流水线：暂停实时链路 → 逐层批处理 → 对账 → 装载 → 恢复实时链路",
+    schedule=SCHEDULE,
+    start_date=pendulum.datetime(2026, 9, 1, tz="Asia/Shanghai"),
+    catchup=False,
+    max_active_runs=1,
+    default_args=DEFAULT_ARGS,
+    tags=["sprint4", "offline", "lakehouse"],
+    doc_md=__doc__,
+)
+def offline_lakehouse_pipeline() -> None:
+    # ---- 1. 暂停实时链路（为批处理腾出约 2.8 GB）----
+    pause = BashOperator(
+        task_id="pause_realtime",
+        bash_command=f"bash {REPO}/scripts/batch-mode.sh --pause-only",
+        cwd=REPO,
+        append_env=True,
+        doc_md=(
+            "暂停 Flink 栈，释放约 2.8 GB 内存。\n\n"
+            "不会丢数据：Kafka 是缓冲（Flink 停了事件继续堆在 topic 里），"
+            "Flink 的消费位点在 checkpoint 里，重启后从上次位置继续，"
+            "重复的部分由 Doris 的 UNIQUE KEY 幂等覆盖。\n\n"
+            "唯一影响是暂停期间看板上的实时曲线会延后追上。"
+        ),
+    )
+
+    # ---- 2. 抽取：MySQL → ODS ----
+    ods = _stage(
+        "ods_extract",
+        "ods",
+        "MySQL 业务库 → 湖仓 ODS（Spark JDBC 抽取，作业内自带逐表对账）。",
+    )
+
+    # ---- 3~6. 分层建模 ----
+    dwd = _stage("dwd_layers", "dwd", "ODS → DWD：去重 / 清洗 / 维度补全。")
+    dws = _stage("dws_layers", "dws", "DWD → DWS：按天轻度聚合，只出可加指标。")
+    ads = _stage("ads_layers", "ads", "DWD → ADS：指标口径（1 分钟 + 1 天）。")
+
+    # ---- 7. 批流交叉对账 ----
+    reconcile = _stage(
+        "reconcile",
+        "reconcile",
+        "实时 ADS ↔ 离线 ADS 逐窗口比对，差异不为 0 即失败。\n\n"
+        "这是整条离线链路存在的意义所在：不是「也算了一遍」，"
+        "而是「算出同一个数，并且有证据」。",
+    )
+
+    # ---- 8. 装载进服务库 ----
+    # 必须排在 reconcile 之后：要装载的表里包含对账结果表。
+    # 顺序错了会表现为「前几张表成功、对账表报装载失败」
+    # （S3() TVF 匹配不到文件时静默返回空）。
+    load = _stage(
+        "load_to_doris",
+        "load",
+        "离线结果 → Doris lakehouse_ads（S3() TVF 直读 Parquet），供只读服务查询。",
+    )
+
+    # ---- 9. 恢复实时链路 ----
+    # !! trigger_rule="all_done" 是这里最要紧的一个参数 !!
+    #   默认的 all_success 会让「上游一失败就不恢复」，
+    #   结果是实时链路被永久留在暂停状态，看板一直不动。
+    #   用 all_done：无论成功、失败还是被跳过，都会执行恢复。
+    restore = BashOperator(
+        task_id="restore_realtime",
+        bash_command=f"bash {REPO}/scripts/batch-mode.sh --restore-only",
+        cwd=REPO,
+        append_env=True,
+        trigger_rule="all_done",
+        # 恢复比批处理本身更「不能失败」，所以多给两次重试
+        retries=2,
+        retry_delay=timedelta(minutes=2),
+        doc_md=(
+            "恢复 Flink 集群并跑 health-check 自检（退出码即任务结果）。\n\n"
+            "`trigger_rule=all_done`：**任一上游失败也必须执行**。"
+            "否则一次失败的批处理会让看板永久停在暂停状态。"
+        ),
+    )
+
+    pause >> ods >> dwd >> dws >> ads >> reconcile >> load >> restore
+
+
+offline_lakehouse_pipeline()
