@@ -354,8 +354,89 @@ lakehouse.ods_behavior_event
 
 ---
 
-## 10. 变更记录
+## 10. 实施记录与验收状态
+
+> 状态：**进行中**。以下严格区分「已在服务器上实测通过」与「代码就位、待实测」，
+> 不把未验证的东西写成结论。
+
+### 10.1 已实测通过
+
+```text
+✅ Airflow 3.3.2 安装并运行
+     .venv-airflow 独立 venv（275 MB）；MySQL 元数据库迁移出 58 张表
+     三个 systemd 单元 active：apiserver(180MB) / scheduler(175MB) / dagprocessor(125MB)
+     未部署 triggerer（有意的取舍）
+
+✅ 元数据库用 MySQL（未引入 PostgreSQL）
+     官方支持 MySQL 8.0/8.4，本机 8.4.11
+     专用账号 airflow：可连、可在自己库内建表、**对 ecommerce 被拒绝**（最小权限已实证）
+
+✅ Web UI 经 Nginx 可用： http://36.151.150.140/airflow/
+     GET /airflow/ → 200；静态资源(7.1MB JS) → 200；
+     未登录访问 /airflow/api/v2/dags → 401；
+     POST /airflow/auth/token → 201（**登录穿过反代成功**）
+
+✅ DAG 编排真实驱动了离线流水线
+     9 个任务：pause → ods → archive → dwd → dws → ads → reconcile → load → restore
+     实测单阶段耗时：ods 45s / dwd 3.4min / dws 5.7min / ads 7.7min / reconcile 2.5min
+
+✅ **批流对账在 Airflow 编排下通过**（整条离线链路的核心价值）
+     [scope] 对账窗口 11458 个，一致 11458 个，不一致 0 个
+     [scope] GMV 合计：实时 51890375.77 vs 离线 51890375.77
+     [check] 5/5 通过
+
+✅ 内存闸门按设计工作
+     实测：暂停实时链路释放 1.65 GB（2282 → 3935 MB）；阈值 3000 MB
+     曾主动拒绝过一次批处理（可用 2258 MB）——**拒绝而不是硬跑**，
+     避免了 Sprint 3 那种整机事故
+```
+
+### 10.2 代码就位、待实测
+
+```text
+⏳ 归档阶段的真实运行
+     作业、DDL、流水线阶段、DAG 任务均已就位；
+     尚未拿到「ods_behavior_event 有 ~20000 行且 6 项自检全过」的实测结果
+⏳ 流量域 DWD / DWS / ADS 与逐窗口对账
+⏳ scripts/verify-sprint-4.sh
+```
+
+### 10.3 本 Sprint 实测发现并修复的 5 个缺陷
+
+都属"看起来已经好了"的类型，完整记下来供论文使用：
+
+| # | 缺陷 | 表现 | 根因 | 为什么难查 |
+| --- | --- | --- | --- | --- |
+| 1 | 任务执行回调地址错 | DAG 第一个任务必然失败 | Airflow 3 的任务要回调自己的 API server，地址由 `api.base_url` 推导；站点切回 http 后 base_url 残留 https，443 已不监听 | **UI 打开完全正常**（走 80），只有任务回调走那个没人听的 443。随后又连踩两坑：漏 `/execution/` 报 405、漏 `/airflow` 前缀报 404。最终靠 `PATCH /airflow/execution/task-instances/{id}/run` 返回 **401（说明路由存在）** 才定位 |
+| 2 | 暂停实时链路被静默跳过 | "已暂停 0 个容器"但任务 success | `compose stop ... >/dev/null 2>&1 && {...}` 失败时 `&&` 短路，既不打"已暂停"也不打错误 | 被吞掉的错误表现为"任务成功但什么都干不了" |
+| 3 | `docker compose` 在 systemd 沙箱里失效 | 同上 | `ProtectHome=yes` 让 `/home/dpaiflow` 不可访问 → docker 读不到 `$HOME/.docker/config.json` → **认不出 `compose` 子命令**（`unknown shorthand flag: 'f' in -f`） | 手工以 dpaiflow 执行完全正常；用 `systemd-run` 逐属性复现才分清（`ProtectHome=yes` 失败 / `ProtectSystem=full` 正常） |
+| 4 | 重试与超时完全没生效 | DAG run **永久卡死**，实时链路一直停着 | Airflow 3.3.2 的 `@dag(default_args={...})` 里 `retries` / `execution_timeout` **不生效** | 状态是 `up_for_retry` 却已无重试次数——既不是 failed 也不是 running。靠一条干净对照定位：显式写在算子上 → `max_tries=2` ✅；只写在 default_args → `max_tries=1` ❌ |
+| 5 | 归档阶段"静默空转还报成功" | 任务 0.6 秒 success，ODS 表 0 行 | `run-batch-pipeline.sh` 有一套**自己的** `case` 派发（与 `submit-offline-job.sh` 重复），只加了 STAGES 数组与 `--list`，**漏加 case 分支** → 穿透、`rc` 保持 0 | 没有兜底分支的 `case` 就是一个静默 no-op 制造机 |
+
+**共同原则**：
+
+```text
+1. 「什么都没做」与「做成功了」必须能区分开        （缺陷 2、5）
+2. 重试与超时不能依赖框架的隐式合并                （缺陷 4）
+3. 探测路由要用真实存在的端点，401 说明路由存在    （缺陷 1）
+4. 不要覆盖正在运行的 shell 脚本 —— bash 边读边执行。
+   实测中 reconcile 对账明明成功却被判失败，是纯粹的人为假故障
+```
+
+### 10.4 结构性改进方向（记入 Sprint 12）
+
+```text
+run-batch-pipeline.sh 与 submit-offline-job.sh 各有一份相同的阶段派发，
+缺陷 5 正是"改了一处、漏了另一处"造成的。
+更彻底的做法是让前者直接委托后者（单一事实来源）。
+当前先用「case 兜底必须失败」把风险压住。
+```
+
+---
+
+## 11. 变更记录
 
 | 日期 | 版本 | 变更 |
 | --- | --- | --- |
 | 2026-09-26 | V1.0 | 建立 Sprint 4 任务书：Airflow 3.3.2 + MySQL 元数据库 + 宿主机 systemd；流量域 Kafka→湖仓归档；含内存预算与风险清单 |
+| 2026-09-27 | V1.1 | 补第 10 节：实施记录与验收状态（严格区分已实测/待实测）、5 个实测缺陷的完整复盘、结构性改进方向 |
