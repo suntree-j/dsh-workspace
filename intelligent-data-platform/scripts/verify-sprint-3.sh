@@ -345,7 +345,7 @@ step_regression() {
         bash "${REPO_ROOT}/scripts/health-check.sh"
 
     local health
-    health="$(curl -fsS --max-time 10 http://127.0.0.1/data/api/health 2>/dev/null || true)"
+    health="$(curl_site -fsS --max-time 10 "$(site_base)/data/api/health" 2>/dev/null || true)"
     if printf '%s' "${health}" | grep -q '"status":"ok"'; then
         printf '  %b %-46s %s\n' "${C_GREEN}[ OK ]${C_RESET}" "数据服务 /data/api/health" "ok"
         PASS=$(( PASS + 1 ))
@@ -356,7 +356,7 @@ step_regression() {
     fi
 
     local web_code
-    web_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1/data/ 2>/dev/null || true)"
+    web_code="$(curl_site -s -o /dev/null -w '%{http_code}' --max-time 10 "$(site_base)/data/" 2>/dev/null || true)"
     check "看板首页 HTTP 状态" "200" "${web_code}"
 }
 

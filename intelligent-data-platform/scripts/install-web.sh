@@ -274,6 +274,21 @@ install_frontend_vendor() {
 install_nginx_site() {
     log_step "6/7 安装 Nginx 站点与 systemd 单元"
 
+    # 先备证书：站点配置里的 443 段引用了它。
+    # setup-tls.sh 是幂等的（证书已存在且未过期就复用），
+    # 放在这里是为了让"首次安装"一条命令就能跑完，而不是让使用者
+    # 撞上 nginx -t 的证书报错再回来补 —— 那时站点配置已经写进
+    # sites-available，机器会停在"配置已换、nginx 起不来"的状态。
+    if [ ! -s "${TLS_CERT_PATH}" ] || [ ! -s "${TLS_KEY_PATH}" ]; then
+        log_info "未找到 TLS 证书，先生成自签证书（HTTPS 入口所需）"
+        bash "${REPO_ROOT}/scripts/setup-tls.sh" || {
+            log_error "证书生成失败；HTTPS 无法启用"
+            exit 1
+        }
+    else
+        log_ok "TLS 证书已存在，复用"
+    fi
+
     install -m 644 "${REPO_ROOT}/deploy/nginx/data-platform.conf" "${NGINX_SITE}"
     ln -sf "${NGINX_SITE}" /etc/nginx/sites-enabled/data-platform.conf
 
@@ -321,17 +336,18 @@ self_check() {
         log_error "API 直连失败"
     fi
 
-    local code
-    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1/data/api/health)"
+    local code site
+    site="$(site_base)"
+    code="$(curl_site -s -o /dev/null -w '%{http_code}' --max-time 10 "${site}/data/api/health")"
     if [ "${code}" = "200" ]; then
-        log_ok "经 Nginx 访问正常：http://${ip}/data/api/health"
+        log_ok "经 Nginx 访问正常：${site}/data/api/health"
     else
         log_error "经 Nginx 访问返回 ${code}"
     fi
 
-    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1/data/)"
+    code="$(curl_site -s -o /dev/null -w '%{http_code}' --max-time 10 "${site}/data/")"
     if [ "${code}" = "200" ]; then
-        log_ok "前端页面可访问：http://${ip}/data/"
+        log_ok "前端页面可访问：${site}/data/"
     else
         log_error "前端页面返回 ${code}（检查 services/web/index.html 是否存在）"
     fi
@@ -348,8 +364,8 @@ self_check() {
 
     printf '\n'
     printf '%b\n' "${C_GREEN}${C_BOLD} 安装完成${C_RESET}"
-    printf '  访问地址： http://%s/data/\n' "${ip}"
-    printf '  接口文档： http://%s/data/api/docs\n' "${ip}"
+    printf '  访问地址： %s://%s/data/\n' "$(site_scheme)" "${ip}"
+    printf '  接口文档： %s://%s/data/api/docs\n' "$(site_scheme)" "${ip}"
     printf '  健康检查： bash scripts/verify-sprint-6.sh\n'
 }
 

@@ -44,11 +44,11 @@ step_record() {
 }
 
 http_code() {
-    curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$1" || echo "000"
+    curl_site -s -o /dev/null -w '%{http_code}' --max-time 10 "$1" || echo "000"
 }
 
 api_get() {
-    curl -fsS --max-time 15 "$1" || echo "{}"
+    curl_site -fsS --max-time 15 "$1" || echo "{}"
 }
 
 main() {
@@ -99,11 +99,13 @@ main() {
     if nginx -t >/dev/null 2>&1; then
         log_ok "nginx -t 通过"
         local c_root c_page c_api c_docs c_health
-        c_root="$(http_code "http://127.0.0.1/")"
-        c_page="$(http_code "http://127.0.0.1/data/")"
-        c_api="$(http_code "http://127.0.0.1/data/api/health")"
-        c_docs="$(http_code "http://127.0.0.1/data/api/docs")"
-        c_health="$(http_code "http://127.0.0.1/data/healthz")"
+        local site
+        site="$(site_base)"
+        c_root="$(http_code "${site}/")"
+        c_page="$(http_code "${site}/data/")"
+        c_api="$(http_code "${site}/data/api/health")"
+        c_docs="$(http_code "${site}/data/api/docs")"
+        c_health="$(http_code "${site}/data/healthz")"
         printf '  /              → %s（期望 302）\n' "${c_root}"
         printf '  /data/         → %s（期望 200）\n' "${c_page}"
         printf '  /data/api/health → %s（期望 200）\n' "${c_api}"
@@ -260,9 +262,9 @@ summary() {
     if [ "${OVERALL}" -eq 0 ]; then
         printf '%b\n' "${C_GREEN}${C_BOLD} Sprint 6 验收通过${C_RESET}"
         printf '\n'
-        printf '  数据大屏： http://%s/data/\n' "${ip}"
-        printf '  接口文档： http://%s/data/api/docs\n' "${ip}"
-        printf '  健康检查： http://%s/data/api/health\n' "${ip}"
+        printf '  数据大屏： %s://%s/data/\n' "$(site_scheme)" "${ip}"
+        printf '  接口文档： %s://%s/data/api/docs\n' "$(site_scheme)" "${ip}"
+        printf '  健康检查： %s://%s/data/api/health\n' "$(site_scheme)" "${ip}"
     else
         printf '%b\n' "${C_RED}${C_BOLD} Sprint 6 验收未通过，请按上方提示排查${C_RESET}"
     fi

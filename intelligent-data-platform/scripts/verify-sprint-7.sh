@@ -168,14 +168,14 @@ section() { printf '\n%b\n' "${C_BOLD}$*${C_RESET}"; }
 # 说明：这里用 `-w '\n%{http_code}'` 把状态码附在末尾。
 # 直接解析需要 JSON 工具，脚本里不想依赖 python；用"末行是状态码"这种约定最简单。
 # ------------------------------------------------------------
-api() { curl -s --max-time 30 "$@"; }
+api() { curl_site -s --max-time 30 "$@"; }
 
-http_code() { curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$@"; }
+http_code() { curl_site -s -o /dev/null -w '%{http_code}' --max-time 30 "$@"; }
 
 post_json() {
     local url="$1" body="$2"; shift 2
     # 允许追加 curl 参数（例如 -w '\n%{http_code}' 把状态码附在末行）
-    curl -s --max-time 60 -X POST "${url}" -H 'Content-Type: application/json' -d "${body}" "$@"
+    curl_site -s --max-time 60 -X POST "${url}" -H 'Content-Type: application/json' -d "${body}" "$@"
 }
 
 # ============================================================
@@ -295,24 +295,25 @@ step_gateway() {
     section "4/8 网关契约（Nginx 方法限制与路径）"
 
     # 只走回环访问 Nginx，避开公网抖动（那是链路问题，不是应用问题）
-    local code
+    local code site
+    site="$(site_base)"
 
-    code="$(http_code -X POST "http://127.0.0.1/data/api/query" \
+    code="$(http_code -X POST "${site}/data/api/query" \
             -H 'Content-Type: application/json' \
             -d '{"sql":"SELECT COUNT(*) AS c FROM ecommerce.ads_realtime_trade_1m","limit":5}')"
     check "POST /data/api/query 经 Nginx 可用" "200" "${code}"
 
-    code="$(http_code "http://127.0.0.1/data/api/query")"
+    code="$(http_code "${site}/data/api/query")"
     check "GET /data/api/query 被拒（只放行 POST）" "403" "${code}"
 
     # 其它接口仍必须是 GET-only：POST 不应被放行
-    code="$(http_code -X POST "http://127.0.0.1/data/api/overview")"
+    code="$(http_code -X POST "${site}/data/api/overview")"
     check "POST /data/api/overview 仍被拒" "403" "${code}"
 
-    code="$(http_code "http://127.0.0.1/data/agent/health")"
+    code="$(http_code "${site}/data/agent/health")"
     check "GET /data/agent/health 可达" "200" "${code}"
 
-    code="$(http_code "http://127.0.0.1/data/api/health")"
+    code="$(http_code "${site}/data/api/health")"
     check "GET /data/api/health 仍正常（未被新规则误伤）" "200" "${code}"
 }
 
@@ -398,7 +399,7 @@ step_dashboard() {
 
     # 静态资源经 Nginx 可取（页面能加载）
     local code
-    code="$(http_code "http://127.0.0.1/data/")"
+    code="$(http_code "$(site_base)/data/")"
     check "看板首页可访问" "200" "${code}"
 }
 

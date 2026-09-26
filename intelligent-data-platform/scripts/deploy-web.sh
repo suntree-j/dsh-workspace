@@ -75,15 +75,41 @@ update_python_deps() {
 reload_services() {
     step "4/5 重新加载配置并重启服务"
 
+    # 证书是 HTTPS 站点的前置条件。缺证书时 `nginx -t` 必然失败，
+    # 而那时新配置已经写进 sites-available —— 机器会停在
+    # "配置已换、nginx 却起不来"的状态。所以先补齐证书再动配置。
+    local tls_ok=1
+    if [ ! -s "${TLS_CERT_PATH}" ] || [ ! -s "${TLS_KEY_PATH}" ]; then
+        log_warn "未找到 TLS 证书，尝试生成（scripts/setup-tls.sh）"
+        if [ "$(id -u)" -eq 0 ] && bash "${REPO_ROOT}/scripts/setup-tls.sh" >/dev/null 2>&1; then
+            log_ok "TLS 证书已就绪"
+        else
+            log_error "证书不可用：请先执行 sudo bash scripts/setup-tls.sh"
+            FAILED=1
+            tls_ok=0
+        fi
+    fi
+
     # Nginx 配置有变化才 reload（避免无意义的中断）
-    if ! diff -q "${REPO_ROOT}/deploy/nginx/data-platform.conf" "${NGINX_SITE}" >/dev/null 2>&1; then
+    if [ "${tls_ok}" -eq 0 ]; then
+        log_error "跳过 Nginx 配置更新（证书缺失，强行更新会让 nginx 无法重载）"
+    elif ! diff -q "${REPO_ROOT}/deploy/nginx/data-platform.conf" "${NGINX_SITE}" >/dev/null 2>&1; then
+        # 先备份：`nginx -t` 失败时新配置已经落在磁盘上，
+        # 若不还原，机器会停在"文件是坏的、进程还在跑旧的"这种
+        # 最尴尬的状态 —— 下一次 nginx 重启就直接起不来。
+        cp -a "${NGINX_SITE}" "${NGINX_SITE}.bak" 2>/dev/null || true
         install -m 644 "${REPO_ROOT}/deploy/nginx/data-platform.conf" "${NGINX_SITE}"
         if nginx -t >/tmp/nginx-config-test.log 2>&1; then
             systemctl reload nginx
+            rm -f "${NGINX_SITE}.bak"
             log_ok "Nginx 配置已更新并 reload"
         else
             log_error "Nginx 配置校验失败："
             cat /tmp/nginx-config-test.log
+            if [ -s "${NGINX_SITE}.bak" ]; then
+                mv -f "${NGINX_SITE}.bak" "${NGINX_SITE}"
+                log_warn "已还原原配置（nginx 仍按原配置运行，服务未中断）"
+            fi
             FAILED=1
         fi
     else
@@ -108,17 +134,31 @@ reload_services() {
 
 verify() {
     step "5/5 自检"
-    local ip
+    local ip site
     ip="$(public_ip)"
+    site="$(site_base)"
 
     local code
-    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1/data/api/health)"
-    [ "${code}" = "200" ] && log_ok "API：http://${ip}/data/api/health → 200" \
+    code="$(curl_site -s -o /dev/null -w '%{http_code}' --max-time 10 "${site}/data/api/health")"
+    [ "${code}" = "200" ] && log_ok "API：${site}/data/api/health → 200" \
                           || { log_error "API 返回 ${code}"; FAILED=1; }
 
-    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1/data/)"
-    [ "${code}" = "200" ] && log_ok "前端：http://${ip}/data/ → 200" \
+    code="$(curl_site -s -o /dev/null -w '%{http_code}' --max-time 10 "${site}/data/")"
+    [ "${code}" = "200" ] && log_ok "前端：${site}/data/ → 200" \
                           || { log_error "前端返回 ${code}"; FAILED=1; }
+
+    # HTTP 应当跳转到 HTTPS；否则说明 80 上还挂着旧配置，
+    # 用户仍会走到"明文被中间设备改写"那条路上（偶发空 502）。
+    if [ "${site}" = "https://127.0.0.1" ]; then
+        code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1/data/)"
+        [ "${code}" = "302" ] && log_ok "HTTP 跳转：http://127.0.0.1/data/ → 302" \
+                              || { log_error "HTTP 未跳转（返回 ${code}），请检查证书与 Nginx 配置"; FAILED=1; }
+    fi
+
+    printf '\n'
+    if [ "${FAILED}" -eq 0 ]; then
+        log_ok "对外访问： https://${ip}/data/"
+    fi
 }
 
 main() {

@@ -251,8 +251,8 @@ main() {
 
     printf '\n'
     log_ok "Agent 部署完成"
-    printf '  站内地址： http://<服务器IP>/data/agent/health\n'
-    printf '  接口文档： http://<服务器IP>/data/agent/docs\n'
+    printf '  站内地址： %s://<服务器IP>/data/agent/health\n' "$(site_scheme)"
+    printf '  接口文档： %s://<服务器IP>/data/agent/docs\n' "$(site_scheme)"
     printf '  提问示例：\n'
     printf '    curl -s -X POST http://127.0.0.1:%s/ask \\\n' "$(grep -E '^AGENT_PORT=' "${ENV_FILE}" | head -1 | cut -d= -f2- || echo 8100)"
     printf '      -H "Content-Type: application/json" \\\n'
