@@ -285,10 +285,12 @@ UV 是去重指标   → **逐窗口比对成立，但窗口之间不能相加**
 
 ## 6. 验收标准（DoD）
 
-- [ ] `iceberg-spark-runtime` 在 Spark 镜像与**执行器容器**里都存在（两处都要验）
-- [ ] HiveCatalog 实测可用，能建出第一张 Iceberg 表
-- [ ] `lakehouse_iceberg` 四层表建立，DDL 落盘 `sql/iceberg/` 并进 Git
-- [ ] 迁移后**逐表行数与金额与 Parquet 版精确一致**
+- [x] `iceberg-spark-runtime` 在 Spark 镜像与**执行器容器**里都存在（两处都要验）
+- [x] HiveCatalog 实测可用，能建出第一张 Iceberg 表（阶段 3 冒烟：`format-version=2`、生成 snapshot id）
+- [x] 四层 18 张表建立（`iceberg.lakehouse_iceberg`）
+      ⚠️ **偏差**：DDL **没有**落盘 `sql/iceberg/`，改为**从源表 schema 推导**（见第 8 节第 3 条）。
+      理由：手写 18 张表的 DDL 会与源表定义分叉，而分叉只会在迁移后才被发现。
+- [x] 迁移后**逐表行数与金额与 Parquet 版精确一致**（60/60 项；行数见第 8 节表）
 - [ ] Iceberg 表支持时间旅行（`SELECT ... VERSION AS OF` 可查历史快照）—— 有实证
 - [ ] 流量域 DWD/DWS/ADS 建成，漏斗逐级收窄
 - [ ] **`ads_traffic_1m` 与实时侧逐窗口对账，差异为 0**（或如实说明覆盖区间）
@@ -313,8 +315,77 @@ UV 是去重指标   → **逐窗口比对成立，但窗口之间不能相加**
 
 ---
 
-## 8. 变更记录
+## 8. 实施记录（阶段 3~4 实测）
+
+### 8.1 阶段 4 结果：Parquet → Iceberg 迁移
+
+命令：`bash scripts/batch-mode.sh --stage iceberg-migrate`
+（阶段序列里排**最后** —— 它迁移的是"这一轮已建完整"的湖仓）
+
+```text
+✅ 18 张表全部迁移到 iceberg.lakehouse_iceberg（Iceberg v2，HiveCatalog，snappy parquet）
+✅ [check] ===== 60/60 通过 =====
+✅ 每张表建完后取 DESCRIBE EXTENDED 的 Provider == iceberg（18 项）
+✅ Iceberg 库表数 == 迁移清单表数（18）—— 顺带证明没有多余残留表
+✅ 实时链路：错峰批处理完成，恢复后 health-check 11/11 [OK]
+```
+
+逐表行数与 Parquet 侧（阶段 1 基线）**完全一致**：
+
+| 层 | 表 | 行数 | 表 | 行数 |
+| --- | --- | --- | --- | --- |
+| ODS | ods_user | 1200 | ods_product | 600 |
+| ODS | ods_orders | 6000 | ods_payment | 5406 |
+| ODS | ods_refund | 254 | ods_behavior_event | 20000 |
+| DWD | dwd_user_detail | 1200 | dwd_product_detail | 600 |
+| DWD | dwd_trade_order_detail | 6000 | dwd_trade_payment_detail | 5406 |
+| DWD | dwd_trade_refund_detail | 254 | — | — |
+| DWS | dws_trade_overview_1d | 626 | dws_trade_category_1d | 2834 |
+| DWS | dws_trade_user_1d | 5883 | — | — |
+| ADS | ads_batch_trade_1m | 11459 | ads_batch_trade_1d | 626 |
+| ADS | ads_batch_category_1m | 5998 | ads_batch_category_1d | 2834 |
+
+金额核对：每张含金额的表都做了 `SUM(金额) 源 == 目标`。
+行数相同不代表内容没坏（截断/转型出错时行数照样相等），金额是最敏感的探针。
+
+### 8.2 阶段 4 挖出的五个缺陷（都不是"环境问题"，都是设计问题）
+
+| # | 现象 | 根因 | 修法 |
+| --- | --- | --- | --- |
+| 1 | `CREATE DATABASE` 报 `Cannot create namespace with invalid name:`，**冒号后是空的** | 该一段名与已注册 catalog **同名**：Spark 解析一段名时先当目录名，解析成"目录 + 空命名空间"。**库名与 catalog 同名时，"建库"这句话没有唯一含义** | catalog 改名 `iceberg`，库名 `lakehouse_iceberg` 不动（HiveCatalog 的命名空间就是 Hive 库名） |
+| 2 | catalog 改名后**报错一字不差**，像没改过 | `spark-defaults.conf` 是 Dockerfile **构建期 `COPY`** 进镜像的，而 spark-submit 是 `docker compose run` 的临时容器，只挂了 `jobs`/`sql` | 把 conf 挂进 spark-submit：与 jobs/sql 一样"改完即生效" |
+| 3 | 表建出来了，但可能建在**另一个目录的同名库**里 | Spark 的**两段名 = (命名空间, 表)，永远属于当前目录**，不会因为名字像就跳到别处 | 源 `spark_catalog.lakehouse.*`、目标 `iceberg.lakehouse_iceberg.*`，全程三段名 |
+| 4 | 执行器连续 `OutOfMemoryError`，4 次 `Lost executor ... code 52`，最后 `MetadataFetchFailedException` | 703 个 dt 分区 vs 默认 200 个 shuffle 分区，**AQE 又把小分区合并** → 少数 task 各持有几百个分区写入器。数据才 2 万行，**与数据量无关** | 分区表 INSERT 加 `DISTRIBUTE BY` + `shuffle.partitions=1000` + 关 AQE 合并；一个 task ≈ 一个分区 |
+| 5 | 批处理结束后实时链路一直起不来，健康检查**怎么等都不通过** | jobmanager 先起、taskmanager 后起（差 5 分钟），`flink-jobs` 在资源就绪前提交了 SQL，部分作业直接 FAILED —— 而 **FAILED 的作业不会自动重试**。它不是"慢"，是"死" | `restore_realtime()` 增加自愈：等到一半还不好就"取消 + 重新提交"（每次恢复最多一次） |
+
+### 8.3 一个诊断方法上的教训
+
+排"进程是不是还活着"时我用了 `pgrep -c batch-mode`，得到 0，于是判断"迁移进程死了"，
+还据此怀疑过 OOM、怀疑过 ssh 超时把进程带走 —— **两次结论都是错的**。
+
+`pgrep -c <pattern>` 默认匹配的是**进程名**，而 `bash scripts/batch-mode.sh` 的进程名是 `bash`。
+必须写 `pgrep -af <pattern>`（`-f` 才匹配完整命令行）。
+
+真相是：作业一直在跑，只是 `[verify]` 阶段的 checker **最后才统一输出**，
+中间十几分钟没有任何日志。**"没有输出"被当成了"已经死掉"**。
+
+> 同一类错误的第三次出现：Sprint 4 是"命令返回成功 ≠ 目标状态正确"，
+> 这次是"命令返回 0 条 ≠ 进程不存在"。**任何观测手段都要先确认它在测什么。**
+
+### 8.4 与任务书的偏差记录
+
+1. **Iceberg 版本 1.11.0 → 1.10.2**：1.11.0 的 class 文件是 major 61（Java 17），
+   而 Spark 镜像是 Java 11（只认到 55），实测报 `UnsupportedClassVersionError`。
+2. **catalog 名 `lakehouse_iceberg` → `iceberg`**：见 8.2 第 1 条。
+3. **DDL 不落盘 `sql/iceberg/`，改为从源表 schema 推导**：手写 DDL 会与源表定义分叉，
+   而分叉只有迁移后才发现；schema 推导保证"两边定义同源"，且 CREATE TABLE 语句会打印出来可逐条核对，
+   Iceberg 表的权威定义在 Metastore 里，`SHOW CREATE TABLE` 随时可取。
+
+---
+
+## 9. 变更记录
 
 | 日期 | 版本 | 变更 |
 | --- | --- | --- |
 | 2026-09-27 | V1.0 | 建立 Sprint 5 任务书：Iceberg 1.11.0 + HiveCatalog + 四层迁移 + 流量域分层与对账；含版本查证结果、待实测项与 6 条风险 |
+| 2026-09-27 | V1.1 | 补第 8 节实施记录：阶段 4 迁移完成（60/60、18 张表行数与金额一致）；记录五个缺陷与一处诊断误判；Iceberg 定版 1.10.2、catalog 改名 `iceberg`、DDL 改为 schema 推导 |

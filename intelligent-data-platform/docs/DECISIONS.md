@@ -137,6 +137,36 @@
 
 **原文**「Python | 3.13 | 数据生成器 / 数据服务」是错的：宿主机实测 **3.12.3**，`3.13` 只属于 data-generator 容器。已拆成两行并说明为什么要拆。
 
+### ✅ D13. Iceberg 的 catalog 命名 `iceberg`，库名保持 `lakehouse_iceberg`
+
+**理由**：实测 `CREATE DATABASE IF NOT EXISTS lakehouse_iceberg` 报
+`Cannot create namespace with invalid name:`（冒号后为空）。根因是**库名与已注册 catalog 同名**——
+Spark 解析一段名时会先把它当目录名，解析出"目录 + 空命名空间"。
+**库名与 catalog 同名时，"建库"这句话没有唯一含义。**
+HiveCatalog 的命名空间就是 Hive 库名，库名没有错、不用改，改 catalog 名即可。
+
+**顺带确立的硬约束**：Iceberg 表的引用一律写**三段名**（`iceberg.lakehouse_iceberg.表`）。
+因为 Spark 的**两段名 = (命名空间, 表) 且永远属于当前目录**，
+不会因为名字看起来像就跳到 Iceberg 目录 —— 只写两段名会静默落到别处，而行数核对读的也是同一个错地方。
+
+### ✅ D14. `spark-defaults.conf` 必须挂载进 `spark-submit`，不能只靠镜像里的 COPY
+
+**理由**：Dockerfile 是构建期 `COPY conf/spark-defaults.conf`，而 spark-submit 是
+`docker compose run` 的临时容器，只挂了 `jobs`/`sql`。结果是**改了 conf 等于没改，且没有任何提示**
+（D13 的改名就是这样"看起来没生效"了一轮）。挂载后 conf 与 jobs/sql 一样"改完即生效"。
+
+### ✅ D15. 分区表迁移用 DISTRIBUTE BY + 抬高 shuffle 分区数 + 关 AQE 合并
+
+**不采用**"把执行器内存调大"。理由：OOM 的根因是**一个 task 同时持有的分区写入器个数**
+（703 个 dt 分区 vs 默认 200 个 shuffle 分区，AQE 又把小分区合并回去），
+数据量只有 2 万行 —— 这是结构问题，调大内存只是掩盖症状，分区数一涨还会复发。
+
+### ✅ D16. `restore_realtime()` 增加自愈：等到一半还不好就"取消 + 重新提交"
+
+**理由**：实测批处理结束后实时链路**怎么等都不通过** —— jobmanager 先起、taskmanager 后起（差 5 分钟），
+`flink-jobs` 在资源就绪前提交 SQL，部分作业直接 FAILED，而 **FAILED 的作业不会自动重试**。
+它不是"慢"，是"死"，与 D10 的"还在恢复"症状完全一样，只能主动做一次才能区分。
+
 ---
 
 ## 三、已知限制（建议写进论文，不要隐瞒）

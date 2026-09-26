@@ -594,7 +594,7 @@ docker compose exec doris-be mysql -h 172.28.0.10 -P 9030 -uroot -e "SHOW BACKEN
 | **3** | **ODS / DWD / DWS / ADS（离线分层 + 批流交叉对账）** | ✅ **已完成并验收通过**（11458 个分钟窗口零差异，见 SPRINT_3.md） |
 | **7** | **LLM + Tool Calling（数据问答 Agent）** | ✅ **已完成并验收通过**（验收 49/49，见 SPRINT_7.md） |
 | **4** | **Airflow 调度 + 流量域归档** | ✅ **已完成并验收通过**（验收 40/0/0，见 15.8 与 SPRINT_4.md） |
-| 5 | Iceberg Lakehouse | 未开始 |
+| 5 | Iceberg Lakehouse | 🔄 **进行中**：阶段 4 完成（18 张表迁到 `iceberg.lakehouse_iceberg`，校验 60/60，行数与金额逐表一致）；流量域分层与对账待做 |
 | 8 | LangGraph Data Agent | 未开始 |
 | 9 | RAG + Metadata | 未开始 |
 | 10 | MCP | 未开始 |
@@ -840,7 +840,7 @@ bash scripts/verify-sprint-2.sh`（详见
 
 ### 15.9 边界要求
 
-> **Sprint 0 / 1 / 2 / 3 / 4 / 6 / 7 已稳定，下一层是 Sprint 5（Iceberg）。**
+> **Sprint 0 / 1 / 2 / 3 / 4 / 6 / 7 已稳定；Sprint 5 进行中（阶段 4 已完成，见 15.10）。**
 > 禁止提前实现 Sprint 8 及以后的内容（LangGraph / RAG / MCP / 监控）。
 > 指标口径以 [`sql/metadata/metrics.md`](sql/metadata/metrics.md) 为唯一权威，
 > 实时链路、离线链路与 Agent 都必须引用该口径，不得自建第二份定义。
@@ -852,3 +852,34 @@ bash scripts/verify-sprint-2.sh`（详见
 > Iceberg 会改变湖仓的存储与表管理方式，先按 Parquet 分层再迁表等于做两遍，
 > 因此并入 Sprint 5 一起做（记于 `docs/DECISIONS.md`）。
 > 在此之前，Agent 若被问到流量域的去重类指标，仍应如实说明其口径范围。
+
+### 15.10 Sprint 5 阶段 4 结果（Parquet → Iceberg）+ Iceberg 硬规范
+
+```text
+✅ bash scripts/batch-mode.sh --stage iceberg-migrate    [check] 60/60 通过
+✅ 18 张表迁到 iceberg.lakehouse_iceberg（Iceberg v2，HiveCatalog，snappy parquet）
+   行数与 Parquet 侧**逐表一致**，含金额 SUM 核对；
+   每张表建完取 DESCRIBE EXTENDED 的 Provider == iceberg
+✅ 实时链路：错峰批处理完成后 health-check 11/11 [OK]
+```
+
+**硬规范（Sprint 5 起）**：
+
+> 1. **Iceberg 表一律写三段名**：`iceberg.lakehouse_iceberg.表名`。
+>    Spark 的**两段名 = (命名空间, 表)，永远属于当前目录**，不会因为名字看起来像
+>    就跳到 Iceberg 目录 —— 只写两段名会静默落到别处，而行数核对读的也是同一个错地方。
+> 2. **catalog 名不得与任何库名同名**（当前 catalog `iceberg`、库 `lakehouse_iceberg`）。
+>    同名时 `CREATE DATABASE` 会解析出"目录 + 空命名空间"，报
+>    `Cannot create namespace with invalid name:`（冒号后为空）。
+> 3. **改 `spark-defaults.conf` 后必须确认它真的进了运行环境**：该文件是 Dockerfile
+>    **构建期 COPY** 进镜像的，只有挂载（已在 compose 中挂给 spark-submit）才能
+>    "改完即生效"；不挂载就只能重建镜像，否则改动静默无效。
+> 4. **分区表写入必须控制"一个 task 同时打开的分区写入器个数"**：
+>    `INSERT` 加 `DISTRIBUTE BY 分区列` + `spark.sql.shuffle.partitions` 高于分区数
+>    + 关掉 AQE 合并。否则少数 task 会各持有几百个写入器，
+>    执行器堆 OOM（与数据量无关），表现为 `Lost executor ... code 52`。
+> 5. **`restore_realtime()` 会自愈**：健康检查等到一半还不好就"取消 + 重新提交"。
+>    FAILED 的 Flink 作业不会自动重试 —— 延迟与失败症状相同，必须主动区分。
+> 6. **判断进程是否存活必须用 `pgrep -af`**（`-f` 才匹配完整命令行）。
+>    `pgrep -c batch-mode` 匹配的是**进程名**，而脚本的进程名是 `bash` ——
+>    它会稳定地返回 0，把人引向"进程已死"的错误结论。
