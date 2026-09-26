@@ -6,8 +6,10 @@
 # 用法：
 #   bash scripts/health-check.sh
 #
-# 检查项（依据 docs/sprint/SPRINT_0.md 第 15 节）：
-#   MySQL / Kafka / MinIO / Doris FE / Doris BE
+# 检查项：
+#   Sprint 0：MySQL / Kafka / MinIO / Doris FE / Doris BE
+#   Sprint 1：Flink 集群 / Flink SQL Gateway / 实时 Topic /
+#             Doris 数仓表 / Routine Load 实时导入作业
 #
 # 输出：
 #   [OK] MySQL
@@ -21,6 +23,12 @@
 #   检查在**容器内部**执行，因此不依赖宿主机是否安装了 mysql /
 #   kafka 客户端；同时也不依赖宿主端口映射是否可用。
 #   所有容器间通信均使用服务名，禁止 localhost。
+#
+#   Sprint 1 的组件在只部署 Sprint 0 的环境里并不存在。
+#   为满足「服务未启动时必须优雅跳过而不是误报失败」，
+#   脚本先探测 flink-jobmanager 容器：
+#     - 未运行 -> 实时链路检查全部记为 [SKIP]，不计入失败；
+#     - 运行中 -> 正常检查，任一项不通过即 exit 1。
 # ============================================================
 
 # shellcheck source=lib/common.sh
@@ -34,6 +42,7 @@ declare -a RESULT_STATES=()
 declare -a RESULT_DETAILS=()
 
 FAILED=0
+SKIPPED=0
 
 record() {
     local name="$1"
@@ -52,6 +61,18 @@ record() {
         if [ -n "${detail}" ]; then
             printf '       %s\n' "${detail}"
         fi
+    fi
+}
+
+# 跳过：服务本 Sprint 未部署，不算失败也不掩盖问题（显式打印 [SKIP]）
+record_skip() {
+    local name="$1"
+    local reason="$2"
+
+    SKIPPED=$(( SKIPPED + 1 ))
+    printf '%b\n' "${C_YELLOW}[SKIP]${C_RESET} ${name}"
+    if [ -n "${reason}" ]; then
+        printf '       %s\n' "${reason}"
     fi
 }
 
@@ -215,6 +236,276 @@ check_doris_be() {
     fi
 }
 
+# ============================================================
+# Sprint 1：实时数仓（Kafka → Flink → Doris）
+# ============================================================
+
+# 实时链路涉及的 8 个下游 Topic（DWD 4 + DWS 1 + ADS 3）
+REALTIME_TOPICS="dwd_trade_order_detail dwd_trade_payment_detail \
+dwd_trade_refund_detail dwd_traffic_behavior_detail \
+dws_traffic_overview_1m \
+ads_realtime_trade_1m ads_realtime_traffic_1m ads_realtime_category_1m"
+
+# 实时链路涉及的 8 张 Doris 表（与 Topic 同名）
+REALTIME_TABLES="${REALTIME_TOPICS}"
+
+# 8 个 Routine Load 作业名（rl_<表名>）
+REALTIME_ROUTINE_LOADS="rl_dwd_trade_order_detail rl_dwd_trade_payment_detail \
+rl_dwd_trade_refund_detail rl_dwd_traffic_behavior_detail \
+rl_dws_traffic_overview_1m \
+rl_ads_realtime_trade_1m rl_ads_realtime_traffic_1m rl_ads_realtime_category_1m"
+
+# 期望同时在运行的 Flink 作业数：
+#   4 个 DWD 清洗作业 + 4 个指标窗口作业（见 infrastructure/flink/sql/04、05）
+FLINK_EXPECTED_JOBS=8
+
+# 期望同时在运行的 8 个 sink 作业（Flink 作业名 = insert-into_<catalog>.<db>.<表>）
+FLINK_EXPECTED_SINKS="sink_dwd_trade_order_detail sink_dwd_trade_payment_detail \
+sink_dwd_trade_refund_detail sink_dwd_traffic_behavior_detail \
+sink_dws_traffic_overview_1m sink_ads_realtime_trade_1m \
+sink_ads_realtime_traffic_1m sink_ads_realtime_category_1m"
+
+is_realtime_deployed() {
+    container_running flink-jobmanager
+}
+
+# ------------------------------------------------------------
+# Flink 集群：JobManager REST /overview
+# ------------------------------------------------------------
+check_flink_cluster() {
+    if ! container_running flink-jobmanager; then
+        record "Flink 集群" 0 "容器 flink-jobmanager 未运行"
+        return
+    fi
+
+    local body
+    body="$(docker exec flink-jobmanager curl -fsS --max-time 8 \
+        http://localhost:8081/overview 2>/dev/null || true)"
+
+    if [ -z "${body}" ]; then
+        record "Flink 集群" 0 "JobManager REST(8081) /overview 无响应"
+        return
+    fi
+
+    local slots running failed
+    slots="$(printf '%s' "${body}"   | grep -o '"slots-total":[0-9]*'    | grep -o '[0-9]*$' || true)"
+    running="$(printf '%s' "${body}" | grep -o '"jobs-running":[0-9]*'   | grep -o '[0-9]*$' || true)"
+    failed="$(printf '%s' "${body}"  | grep -o '"jobs-failed":[0-9]*'    | grep -o '[0-9]*$' || true)"
+    slots="${slots:-0}"; running="${running:-0}"; failed="${failed:-0}"
+
+    if [ "${slots}" -lt 1 ]; then
+        record "Flink 集群" 0 "TaskManager 未注册（slots-total=0）"
+        return
+    fi
+
+    if [ "${running}" -lt "${FLINK_EXPECTED_JOBS}" ]; then
+        record "Flink 集群" 0 \
+            "slots=${slots}，但仅 ${running}/${FLINK_EXPECTED_JOBS} 个作业在运行（见 docker logs flink-jobs）"
+        return
+    fi
+
+    # 历史失败作业（开发期反复提交会留下记录）不影响当前健康状态，
+    # 但必须如实展示，避免"看起来一切正常"。
+    record "Flink 集群" 1 "slots=${slots}，${running} 个作业运行中（历史失败 ${failed} 个）"
+}
+
+# ------------------------------------------------------------
+# Flink 作业唯一性：8 个 sink 作业各恰好一个处于 RUNNING
+#
+# 为什么必须单独检查（实测踩坑）：
+#   SQL Gateway 是 session 模式 —— 重启 flink-jobs 容器**不会**取消旧作业，
+#   旧 session 仍存活并占用 slot。结果是：
+#     1) 新作业拿不到资源而失败（NoResourceAvailableException）；
+#     2) 旧作业带着旧窗口状态重算同一批事件，指标翻倍
+#        （实测 PV 合计 39987，而事件总数只有 20000）。
+#   只数 jobs-running 无法发现（1 新 + 1 旧 与 2 个正常作业计数相同）。
+# ------------------------------------------------------------
+check_flink_jobs_unique() {
+    if ! container_running flink-jobmanager; then
+        record "Flink 作业唯一性" 0 "容器 flink-jobmanager 未运行"
+        return
+    fi
+
+    local raw running
+    raw="$(docker exec flink-jobmanager curl -fsS --max-time 10 \
+        http://localhost:8081/jobs/overview 2>/dev/null || true)"
+
+    if [ -z "${raw}" ]; then
+        record "Flink 作业唯一性" 0 "JobManager REST /jobs/overview 无响应"
+        return
+    fi
+
+    running="$(printf '%s' "${raw}" \
+        | sed 's/},{/}\n{/g' \
+        | awk '
+            {
+                state = ""; name = ""
+                if (match($0, /"state":"[A-Z_]*"/)) {
+                    state = substr($0, RSTART + 9, RLENGTH - 10)
+                }
+                if (match($0, /"name":"[^"]*"/)) {
+                    name = substr($0, RSTART + 8, RLENGTH - 9)
+                }
+                if (state == "RUNNING" && name != "") print name
+            }')"
+
+    local sink cnt missing_names="" dup_names="" total=0
+    for sink in ${FLINK_EXPECTED_SINKS}; do
+        cnt="$(printf '%s\n' "${running}" | grep -c -- "${sink}" || true)"
+        cnt="${cnt:-0}"
+        total=$(( total + cnt ))
+        if [ "${cnt}" -eq 0 ]; then
+            missing_names="${missing_names} ${sink}"
+        elif [ "${cnt}" -gt 1 ]; then
+            dup_names="${dup_names} ${sink}×${cnt}"
+        fi
+    done
+
+    if [ -n "${missing_names}" ]; then
+        record "Flink 作业唯一性" 0 "缺少运行中的作业:${missing_names}"
+        return
+    fi
+    if [ -n "${dup_names}" ]; then
+        record "Flink 作业唯一性" 0 \
+            "存在重复作业（旧 session 遗留）:${dup_names} —— 执行 bash scripts/cancel-flink-jobs.sh 后重试"
+        return
+    fi
+
+    record "Flink 作业唯一性" 1 "8 个 sink 作业各 1 个实例（共 ${total} 个）"
+}
+
+# ------------------------------------------------------------
+# Flink SQL Gateway：/v1/info
+# ------------------------------------------------------------
+check_flink_gateway() {
+    if ! container_running flink-sql-gateway; then
+        record "Flink SQL Gateway" 0 "容器 flink-sql-gateway 未运行"
+        return
+    fi
+
+    local body
+    body="$(docker exec flink-jobmanager curl -fsS --max-time 8 \
+        http://flink-sql-gateway:8083/v1/info 2>/dev/null || true)"
+
+    if printf '%s' "${body}" | grep -q '"productName"'; then
+        record "Flink SQL Gateway" 1 "REST(8083) 已就绪"
+    else
+        record "Flink SQL Gateway" 0 "REST(8083) /v1/info 无响应"
+    fi
+}
+
+# ------------------------------------------------------------
+# 实时 Topic：8 个下游 Topic 必须存在
+# ------------------------------------------------------------
+check_realtime_topics() {
+    if ! container_running kafka; then
+        record "Kafka 实时 Topic" 0 "容器 kafka 未运行"
+        return
+    fi
+
+    local topics missing=0
+    topics="$(docker exec kafka /opt/kafka/bin/kafka-topics.sh \
+        --bootstrap-server kafka:9092 --list 2>/dev/null || true)"
+
+    for t in ${REALTIME_TOPICS}; do
+        if ! printf '%s\n' "${topics}" | grep -qx "${t}"; then
+            missing=$(( missing + 1 ))
+        fi
+    done
+
+    if [ "${missing}" -eq 0 ]; then
+        record "Kafka 实时 Topic" 1 "8 个实时 Topic 均已创建"
+    else
+        record "Kafka 实时 Topic" 0 "缺少 ${missing} 个实时 Topic（见 kafka-init 容器日志）"
+    fi
+}
+
+# ------------------------------------------------------------
+# Doris 数仓表：8 张 DWD/DWS/ADS 表必须存在
+# ------------------------------------------------------------
+check_doris_realtime_tables() {
+    local out missing=0
+    out="$(docker exec doris-be mysql \
+        -h "${DORIS_FE_IP}" -P 9030 -uroot --connect-timeout=5 -N -B \
+        -e "SELECT table_name FROM information_schema.tables WHERE table_schema='ecommerce';" \
+        2>/dev/null || true)"
+
+    if [ -z "${out}" ]; then
+        record "Doris 实时表" 0 "无法查询 information_schema（FE 未就绪？）"
+        return
+    fi
+
+    for t in ${REALTIME_TABLES}; do
+        if ! printf '%s\n' "${out}" | grep -qx "${t}"; then
+            missing=$(( missing + 1 ))
+        fi
+    done
+
+    if [ "${missing}" -eq 0 ]; then
+        record "Doris 实时表" 1 "8 张 DWD/DWS/ADS 表均已创建"
+    else
+        record "Doris 实时表" 0 "缺少 ${missing} 张表（检查 sql/doris/10~12 是否执行）"
+    fi
+}
+
+# ------------------------------------------------------------
+# Routine Load：8 个实时导入作业必须存在且处于 RUNNING
+#
+# 为什么这是最关键的一项：
+#   Topic 里有数据 ≠ Doris 里有数据。Routine Load 一旦 PAUSED，
+#   链路就是"看起来在跑、实际断流"，必须显式检查。
+# ------------------------------------------------------------
+check_routine_load() {
+    # 注意：**不能加 -N**！-N 会去掉 "Name:" / "State:" 这些字段标签，
+    # 下面的解析就全部失效（实测：作业明明 RUNNING 却被判为"缺少 8 个"）。
+    # 这里与 verify-sprint-1.sh 的 doris_show 保持一致，只用 -B 抑制表格边框。
+    local out
+    out="$(docker exec doris-be mysql \
+        -h "${DORIS_FE_IP}" -P 9030 -uroot --connect-timeout=5 -B \
+        -e "USE ecommerce; SHOW ROUTINE LOAD\G" 2>/dev/null || true)"
+
+    if [ -z "${out}" ]; then
+        record "Doris Routine Load" 0 "无法执行 SHOW ROUTINE LOAD（BE 未注册或 FE 不可用？）"
+        return
+    fi
+
+    local expected=0 exist=0 running=0 name
+    local missing_names="" paused_names=""
+
+    for name in ${REALTIME_ROUTINE_LOADS}; do
+        expected=$(( expected + 1 ))
+        if printf '%s\n' "${out}" | grep -qE "^[[:space:]]*Name: ${name}[[:space:]]*$"; then
+            exist=$(( exist + 1 ))
+            # 取该作业块内的 State 行
+            if printf '%s\n' "${out}" \
+                | awk -v n="${name}" '
+                    $1 == "Name:" { cur = $2; next }
+                    $1 == "State:" && cur == n { print $2; exit }' \
+                | grep -qx "RUNNING"; then
+                running=$(( running + 1 ))
+            else
+                paused_names="${paused_names} ${name}"
+            fi
+        else
+            missing_names="${missing_names} ${name}"
+        fi
+    done
+
+    if [ "${exist}" -lt "${expected}" ]; then
+        record "Doris Routine Load" 0 \
+            "缺少 $(( expected - exist )) 个作业:${missing_names}"
+        return
+    fi
+
+    if [ "${running}" -lt "${expected}" ]; then
+        record "Doris Routine Load" 0 \
+            "${running}/${expected} 个作业 RUNNING，异常作业:${paused_names}（用 SHOW ROUTINE LOAD 查看 ReasonOfStateChanged）"
+        return
+    fi
+
+    record "Doris Routine Load" 1 "${running}/${expected} 个作业 RUNNING"
+}
+
 # ------------------------------------------------------------
 # 主流程
 # ------------------------------------------------------------
@@ -241,6 +532,22 @@ main() {
     check_doris_fe
     check_doris_be
 
+    # ---- Sprint 1：实时数仓链路 ----
+    if is_realtime_deployed; then
+        printf '\n'
+        printf '%b\n' "${C_BOLD} Sprint 1 — 实时数仓链路${C_RESET}"
+        check_flink_cluster
+        check_flink_jobs_unique
+        check_flink_gateway
+        check_realtime_topics
+        check_doris_realtime_tables
+        check_routine_load
+    else
+        printf '\n'
+        record_skip "Sprint 1 实时链路（Flink / 实时 Topic / Routine Load）" \
+            "容器 flink-jobmanager 未运行 —— 当前环境只部署了 Sprint 0"
+    fi
+
     printf '\n'
     printf '%b\n' "${C_BOLD}=====================================${C_RESET}"
 
@@ -248,6 +555,10 @@ main() {
         printf '%b\n' "${C_GREEN}${C_BOLD} All services are healthy${C_RESET}"
         printf '%b\n' "${C_BOLD}=====================================${C_RESET}"
         printf '\n'
+        if [ "${SKIPPED}" -gt 0 ]; then
+            printf '注意：有 %s 组检查被跳过（对应 Sprint 未部署）\n' "${SKIPPED}"
+            printf '\n'
+        fi
         return 0
     fi
 
@@ -261,6 +572,10 @@ main() {
     printf '  docker compose logs doris-be        查看 Doris BE 日志\n'
     printf '  docker compose logs kafka-init      查看 Topic 初始化结果\n'
     printf '  docker compose logs minio-init      查看 Bucket 初始化结果\n'
+    printf '  docker compose logs flink-jobmanager 查看 Flink 集群日志\n'
+    printf '  docker logs flink-jobs              查看 Flink SQL 提交结果\n'
+    printf '  docker exec doris-be mysql -h %s -P 9030 -uroot \\\n' "${DORIS_FE_IP}"
+    printf '      -e "USE ecommerce; SHOW ROUTINE LOAD\\G"   查看实时导入作业\n'
     printf '\n'
     return 1
 }

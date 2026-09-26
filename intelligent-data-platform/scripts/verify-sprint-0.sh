@@ -55,24 +55,21 @@ step_record() {
 # 否则回退到 python3 / python。
 # ------------------------------------------------------------
 resolve_python() {
-    local venv_py="${REPO_ROOT}/data-generator/.venv/Scripts/python.exe"
-    if [ -x "${venv_py}" ]; then
-        printf '%s' "${venv_py}"
-        return 0
-    fi
-    venv_py="${REPO_ROOT}/data-generator/.venv/bin/python"
-    if [ -x "${venv_py}" ]; then
-        printf '%s' "${venv_py}"
-        return 0
-    fi
-    if command -v python3 >/dev/null 2>&1; then
-        printf 'python3'
-        return 0
-    fi
-    if command -v python >/dev/null 2>&1; then
-        printf 'python'
-        return 0
-    fi
+    # 依次尝试：仓库根 .venv（服务器上由部署脚本创建）→ data-generator/.venv
+    # → 系统 python3 / python。两个位置都要覆盖 Windows(Scripts) 与 Linux(bin)。
+    local candidate
+    for candidate in \
+        "${REPO_ROOT}/.venv/bin/python" \
+        "${REPO_ROOT}/.venv/Scripts/python.exe" \
+        "${REPO_ROOT}/data-generator/.venv/bin/python" \
+        "${REPO_ROOT}/data-generator/.venv/Scripts/python.exe"; do
+        if [ -x "${candidate}" ]; then
+            printf '%s' "${candidate}"
+            return 0
+        fi
+    done
+    command -v python3 >/dev/null 2>&1 && { printf 'python3'; return 0; }
+    command -v python >/dev/null 2>&1 && { printf 'python'; return 0; }
     printf ''
 }
 
