@@ -73,6 +73,7 @@
 | systemd | 系统自带 | 守护 `data-platform-api` / `data-platform-agent`（Sprint 6/7 引入） |
 | Python（宿主机） | `3.12.3` | 数据服务 / Agent / 调度（宿主 venv `.venv`、`.venv-agent`、`.venv-airflow`） |
 | Python（容器） | `3.13.14` | 仅 data-generator 容器（`python:3.13.14-slim-bookworm`） |
+| Apache Airflow | `3.3.2` | 离线流水线调度（Sprint 4 引入；元数据库用 MySQL，独立 venv） |
 | pytest | 9.x | 测试 |
 
 > ⚠️ **Python 版本有两条线，不要合并成一句**（Sprint 4 修正）：
@@ -90,7 +91,7 @@
 
 ### 2.2 后续 Sprint 引入
 
-Airflow（S4）、Iceberg（S5）、
+Iceberg（S5）、
 LangGraph（S8）、RAG（S9）、MCP（S10）、Prometheus + Grafana（S11）。
 
 > Sprint 6（数据后台 + 前后端）已按项目负责人要求**前移**到 Sprint 2~5 之前，
@@ -125,6 +126,7 @@ Kubernetes / Nacos / RabbitMQ / MongoDB ...
 | `services/agent/` | 数据问答 Agent（FastAPI + LLM，Sprint 7） | **不允许持有数据库凭据**；只能经 HTTP 调 `services/api` |
 | `services/web/` | 数据看板前端（Vue + ECharts，无构建步骤，Sprint 6） | 不引用外部 CDN；`vendor/` 不入 Git |
 | `deploy/` | 宿主机部署配置（Nginx / systemd，Sprint 6） | 只放配置模板，不在服务器上直接改 |
+| `airflow/dags/` | Airflow DAG（Sprint 4） | 只放 DAG 代码；`airflow/` 下的日志/口令/配置属机器状态，已在 `.gitignore` |
 | `tests/` | 单元测试与冒烟测试 | 冒烟测试必须真实执行 |
 | `volumes/` | 本地绑定挂载占位 | 内容不入 Git |
 
@@ -498,15 +500,36 @@ bash scripts/verify-sprint-6.sh      # 服务层验收（7 步：状态/路径/�
 systemctl status data-platform-api   # 数据服务状态
 journalctl -u data-platform-api -n 100 --no-pager   # 数据服务日志
 nginx -t && systemctl reload nginx   # 站点配置校验与重载
-curl -sk https://127.0.0.1/data/api/health           # 接口健康检查（自签证书需 -k）
+curl -s http://127.0.0.1/data/api/health             # 接口健康检查（当前为明文）
 
-# ---------- 站点证书（HTTPS 入口） ----------
-# 为什么必须 HTTPS：明文 HTTP 在公网链路上会被中间设备改写，
-# 约 40% 的请求变成"无 Server 头、空响应体"的 502（那不是 nginx 发的）。
-sudo SERVER_IP=<服务器IP> bash scripts/setup-tls.sh  # 生成自签证书（幂等）
-openssl x509 -noout -dates -ext subjectAltName -in /etc/ssl/data-platform/server.crt
-# !! http2 的写法随 nginx 版本变化 !!：本项目钉 1.24.0，必须写
-#    `listen 443 ssl http2;`；`http2 on;` 是 1.25.1+ 的语法，会让 nginx -t 直接失败。
+# ---------- 站点协议（当前：明文 HTTP，未启用 TLS）----------
+# 实测结论：关掉客户端 VPN 代理后明文 HTTP 30/30 正常，
+# 当初那个空 502 的改写在 VPN 出口路径上，不在这条 IP 直连路径上。
+# 所以当前走明文；**演示时不要挂 VPN / 代理**。
+grep -E '^SITE_SCHEME=' .env                 # 当前值 http
+# 启用 TLS 时（等注册域名并备案之后）：
+#   sudo SERVER_IP=<服务器IP> bash scripts/setup-tls.sh   # 生成证书（幂等）
+#   把 443 的 server 块加回 deploy/nginx/data-platform.conf（见 commit 347dfdd）
+#   并把 .env 的 SITE_SCHEME 改为 https
+# !! 重新启用时注意 http2 的写法随 nginx 版本变化 !!：本项目钉 1.24.0，
+#    必须写 `listen 443 ssl http2;`；`http2 on;` 是 1.25.1+ 的语法，会让 nginx -t 直接失败。
+
+# ---------- Airflow 调度（Sprint 4） ----------
+bash scripts/install-airflow.sh       # 装 Airflow 3.3.2（独立 venv + apt 编译依赖）
+bash scripts/setup-airflow-db.sh      # 供给 MySQL 元数据库（库 airflow + 专用账号）
+bash scripts/deploy-airflow.sh        # 生成配置 → 迁移 → 装 systemd → 启动 → 自检
+systemctl status data-platform-airflow-scheduler    # 调度器状态
+journalctl -u data-platform-airflow-scheduler -n 100 --no-pager
+# !! 人工敲 airflow 命令一律用包装脚本，不要用裸 airflow !!
+#    裸命令不会加载 airflow.env，会静默落到 sqlite 并报
+#    "Database migration required"（极具误导性）。
+bash scripts/airflow.sh dags list
+bash scripts/airflow.sh tasks list offline_lakehouse_pipeline
+bash scripts/airflow.sh dags trigger offline_lakehouse_pipeline   # 手动跑一次
+bash scripts/airflow.sh dags list-runs -d offline_lakehouse_pipeline
+bash scripts/airflow.sh dags list-import-errors
+# 登录口令（明文 JSON，0600；仅 root 可读）：
+#   cat /opt/data-platform/airflow/simple_auth_passwords.json
 
 # ---------- 数据问答 Agent（Sprint 7：LLM + Tool Calling） ----------
 bash scripts/deploy-agent.sh          # 部署（幂等；会一并重启数据服务）
@@ -617,7 +640,8 @@ docker compose exec doris-be mysql -h 172.28.0.10 -P 9030 -uroot -e "SHOW BACKEN
 
 ```text
 ✅ bash scripts/verify-sprint-6.sh   7/7 PASS
-✅ 访问地址                          https://36.151.150.140/data/   ← 见 15.7（HTTPS）
+✅ 访问地址                          http://36.151.150.140/data/   ← 协议见 15.7
+✅ 调度 UI                           http://36.151.150.140/airflow/（Sprint 4）
 ✅ 接口文档                          https://36.151.150.140/data/api/docs
 ✅ 只读账号                          agent_ro（写操作被 Doris 拒绝：Access denied CREATE）
 ✅ 指标对账                          API GMV == MySQL GMV（51,890,375.77，精确到分）
@@ -705,7 +729,7 @@ bash scripts/verify-sprint-2.sh`（详见
 （详见 [`docs/sprint/SPRINT_7.md`](docs/sprint/SPRINT_7.md)，
 含 7 条踩坑记录；配置操作见 [`services/agent/README.md`](services/agent/README.md)）。
 
-### 15.7 服务层入口改为 HTTPS（公网偶发 502 的根治）
+### 15.7 公网偶发 502 的排查结论（HTTPS 曾用于规避，当前停用）
 
 **现象**：客户端经公网访问 `http://<ip>/data/*`，约 15~40% 的请求返回 **502**。
 
@@ -718,37 +742,50 @@ bash scripts/verify-sprint-2.sh`（详见
 2. TCP 80 十次连接全部成功（84 ms） → 不是安全组/防火墙丢包
 3. 服务端本机 curl 十次全部 200；nginx 访问日志与 error 日志里没有任何 502
 4. 内核 ListenOverflows = 0 → 不是 accept 队列溢出
-结论：请求在**到达服务器之前**就被中间设备改写了（明文 HTTP 可被改写，
-      而这类设备通常不碰加密流量）
+结论：请求在**到达服务器之前**就被中间设备改写了（明文 HTTP 可被改写）
+
+★ 5. **补做的定位**：关掉客户端 VPN 代理后重新测，
+     明文 HTTP **30/30 全部正常**。
+     → 改写的中间设备在 **VPN 的出口路径上**，不在这条 IP 直连路径上。
 ```
 
-**处置**：站点在 80 之外监听 443，配置自签证书（按 IP 访问，
-受信任的 CA 不为裸 IP 签发证书）。
+> **方法比结论更值得记**：一个响应头的有无，把嫌疑从"我们的服务"
+> 直接缩小到"链路中间"。而最后那条"换个路径再测一次"，
+> 把一个"必须上 TLS"的结论修正成了"当前网络下明文即可"。
+> **结论要跟着证据走，不要跟着上一次的结论走。**
+
+**处置经过**：
 
 ```text
-✅ 公网实测                  https://36.151.150.140/data/ 等 8 个路径 × 8 次
-                            = **64/64 全部 200**（改动前约 40% 为 502）
-✅ HTTP 行为                 http://<ip>/data/ → 302 跳转到 HTTPS（10/10）
-✅ 回归                      verify-sprint-6.sh 7/7 PASS；verify-sprint-7.sh 49/49 通过
-✅ 真实浏览器                HTTPS 下看板与问答页均完整渲染，图表与取数正常
-✅ 端到端 Agent              公网 HTTPS 提问 6.8s 返回，附带 tables /
-                            executed_sql / steps
+第一步（当时）  站点加 443 + 自签证书，80 只留探针并 302 跳转
+                公网实测 64/64 全部 200 → 现象确实消失
+第二步（其后）  项目负责人决定**暂不使用 TLS**：
+                按 IP 访问只能自签，浏览器每个会话都要点一次
+                "继续前往"，演示观感不好；
+                等注册域名 + 申请证书 + 完成备案后再启用。
+                实测（上表第 5 条）支持这个决定。
+当前状态        单一 HTTP 站点（:80），全部业务直接提供，
+                不再监听 443；443 配置与 setup-tls.sh 保留在仓库，
+                需要时按 commit 347dfdd 恢复。
 ```
 
-**硬规范（Sprint 7 起）**：
+**硬规范**：
 
-> 1. **对外入口一律 HTTPS**。80 端口只保留 `/data/healthz` 探针，其余 302 跳转。
->    证书由 `scripts/setup-tls.sh` 生成（幂等，复用未过期证书）。
-> 2. **验收脚本不得硬编码协议**。用 `lib/common.sh` 的 `site_base()` /
->    `site_scheme()` / `curl_site()` 探测：有证书走 HTTPS，无证书回落 HTTP。
->    理由：证书属于**机器状态**而非仓库内容，硬编码 https 会让未生成证书的
->    机器上"环境缺失"被误报成"功能缺陷"。
-> 3. **`http2` 的写法随 nginx 版本变化**。本项目钉 `1.24.0`，必须写
->    `listen 443 ssl http2;`；`http2 on;` 是 nginx **1.25.1+** 的语法，
->    在 1.24.0 上会让 `nginx -t` 报 "unknown directive" 而站点起不来。
-> 4. **改 Nginx 配置必须可回滚**。`deploy-web.sh` 会先备份站点文件，
+> 1. **协议由配置决定，不由证书探测决定**。`lib/common.sh` 的
+>    `site_scheme()` 读 `.env` 的 `SITE_SCHEME`（当前 `http`）。
+>    理由：**配置表达意图，证书只是产物** —— 机器上有证书，
+>    不等于"现在想用 https"。启用 TLS 时改这一处即可。
+> 2. **验收脚本不得硬编码协议**。一律用 `site_base()` / `site_scheme()` /
+>    `curl_site()`。硬编码协议会让"环境差异"被误报成"功能缺陷"。
+> 3. **改 Nginx 配置必须可回滚**。`deploy-web.sh` 会先备份站点文件，
 >    `nginx -t` 失败时自动还原 —— 否则机器会停在"文件是坏的、
 >    进程还在跑旧的"这种最尴尬的状态，下一次 nginx 重启就直接起不来。
+> 4. **若日后重新启用 TLS，注意 `http2` 的写法随 nginx 版本变化**：
+>    本项目钉 `1.24.0`，必须写 `listen 443 ssl http2;`；
+>    `http2 on;` 是 nginx **1.25.1+** 的语法，在 1.24.0 上会让
+>    `nginx -t` 报 "unknown directive" 而站点起不来。
+> 5. **明文形态下有一个前提**：演示时**不要挂 VPN / 代理**，
+>    否则那个偶发 502 可能回来。此时要么关代理，要么临时启用 TLS。
 
 ### 15.8 边界要求
 

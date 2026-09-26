@@ -12,28 +12,33 @@
 > 核心原则：**先工程，再智能。**
 > 数据可靠 → 数据准确 → 数据可查询 → 数据可治理 → Agent 使用数据。
 
-> 🖥 **在线数据大屏**：<https://36.151.150.140/data/>
-> 数据问答 Agent：<https://36.151.150.140/data/#/ask>
-> 接口文档：<https://36.151.150.140/data/api/docs> ｜
-> Agent 文档：<https://36.151.150.140/data/agent/docs>
+> 🖥 **在线数据大屏**：<http://36.151.150.140/data/>
+> 数据问答 Agent：<http://36.151.150.140/data/#/ask>
+> 接口文档：<http://36.151.150.140/data/api/docs> ｜
+> Agent 文档：<http://36.151.150.140/data/agent/docs>
+> 调度（Airflow）：<http://36.151.150.140/airflow/>
 >
-> ⚠️ **首次访问会提示"证书不受信任"，这是预期的**：站点按 IP 访问，
-> 而受信任的 CA 不为裸 IP 签发证书，因此用的是**自签证书**。
-> 在浏览器里点「高级」→「继续前往 36.151.150.140（不安全）」即可，之后不再提示。
-> **为什么必须用 HTTPS**：明文 HTTP 在本项目的公网链路上会被中间设备改写，
-> 约 40% 的请求返回一个**没有 `Server` 响应头、响应体为空**的 502
-> （nginx 自己发的 502 必带 `Server: nginx/1.24.0` 与 HTML 错误页，所以那不是我们的服务发的）。
-> 加密后该现象消失：实测公网 HTTPS **64/64 全部 200**。
-> 详见 [`docs/sprint/SPRINT_6.md`](docs/sprint/SPRINT_6.md) 第 7 节。
->
-> 架构：`浏览器 → Nginx(:443, TLS) → /data/ 静态看板 + /data/api/ 只读数据服务 + /data/agent/ 问答 Agent → Doris`
-> （`:80` 仅保留健康探针 `/data/healthz`，其余一律 302 跳转到 HTTPS）
+> 架构：`浏览器 → Nginx(:80) → /data/ 静态看板 + /data/api/ 只读数据服务 + /data/agent/ 问答 Agent + /airflow/ 调度 UI → Doris`
 > 数据服务使用**专用只读账号**（`agent_ro`）+ SQL 安全守卫（仅 SELECT、强制 LIMIT），
 > 指标与 MySQL 事实源精确对账（GMV 51,890,375.77 元，精确到分）。
 > 看板含**实时链路**与**离线链路**两套视角，并展示两者的逐窗口对账结论
 > （11458 个分钟窗口，不一致 0）。
 > **Agent 进程里没有数据库凭据** —— 它只能经只读数据服务取数，
 > 回答附"用了哪些表 + 实际执行的 SQL"，可逐条核对。
+>
+> ⚠️ **当前形态是明文 HTTP，没有启用 TLS**（有意为之，不是漏配）。
+> 站点按 IP 访问，受信任的 CA 不为裸 IP 签发证书，只能自签 ——
+> 而自签证书会让浏览器每个会话都弹一次"继续前往"，演示观感不好。
+> 因此决定后续注册域名 + 申请证书 + 完成备案之后再启用。
+>
+> 这个决定有实测依据：Sprint 7 期间曾出现约 40% 的请求返回**空 502**
+> （该 502 无 `Server` 响应头，而 nginx 自己发的 502 必带
+> `Server: nginx/1.24.0` 与 HTML 错误页，所以不是我们的服务发的）。
+> 定位到中间设备改写明文响应后一度启用过 HTTPS 规避。
+> 但后续实测发现：**关掉客户端 VPN 代理之后，明文 HTTP 30/30 全部正常** ——
+> 改写发生在 VPN 的出口路径上，不在这条 IP 直连路径上。
+> 所以当前走明文是安全的，**前提是演示时不要挂 VPN / 代理**。
+> 完整排查过程见 [`docs/sprint/SPRINT_6.md`](docs/sprint/SPRINT_6.md) 第 8 节。
 
 > ✅ **Sprint 0 / 1 / 2 / 3 / 6 / 7 验收结果**（腾讯云 36.151.150.140 / Ubuntu 24.04.2 LTS）
 >
@@ -843,8 +848,8 @@ Sprint 1  ✅ Kafka → Flink → Doris 实时数仓
              8 个 Flink 作业 + 8 个 Routine Load，指标与 MySQL 精确对账
    ↓
 Sprint 6  ✅ 数据后台 + 前后端（**顺序前移**，先让数据可访问）
-             Nginx + FastAPI 只读 API + Vue 看板，访问 https://<ip>/data/
-             站点启用 TLS（自签证书），80 仅保留健康探针并跳转 HTTPS
+             Nginx + FastAPI 只读 API + Vue 看板，访问 http://<ip>/data/
+             （期间曾启用自签 TLS 规避公网偶发 502，后按实测停用，见 SPRINT_6.md 第 8.6 节）
    ↓
 Sprint 2  ✅ 离线链路：Spark + Hive + 湖仓存储（MinIO/S3A，HDFS 因内存不足暂缓）
              MySQL → Parquet(S3A) → Hive 外部表 ods_*，逐表与 MySQL 精确对账
@@ -858,7 +863,10 @@ Sprint 7  ✅ LLM + Tool Calling：**数据问答 Agent**
              Agent 进程无数据库凭据；回答附"用了哪些表 + 实际执行的 SQL"可核对
              验收 49/49；实测三问（日 GMV / 支付成功率与退款率 / 数据准不准）全部正确
    ↓
-Sprint 4     Airflow 调度
+Sprint 4  🔄 Airflow 调度（进行中）
+             宿主机 + systemd 三单元（apiserver/scheduler/dagprocessor）
+             元数据库用 MySQL（不引入 PostgreSQL）；UI 在 /airflow/
+             DAG：暂停实时链路 → 逐层批处理 → 对账 → 装载 → 恢复（all_done）
    ↓
 Sprint 5     Iceberg Lakehouse
    ↓
