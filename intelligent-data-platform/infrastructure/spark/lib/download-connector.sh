@@ -45,6 +45,11 @@ KAFKA_CLIENTS_VERSION="3.4.1"
 # commons-pool2：kafka-clients 的传递依赖
 COMMONS_POOL2_VERSION="2.12.0"
 
+# Iceberg：走 Maven Central 的正式发布版（Sprint 5）
+#   为什么是 1.11.0：Maven Central 上 iceberg-spark-runtime-3.5_2.12
+#   的最新发布版（2026-05-15）。查证方式与时间为项目记录在案。
+ICEBERG_VERSION="1.11.0"
+
 LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 MAVEN_BASE="https://repo1.maven.org/maven2"
 
@@ -86,6 +91,13 @@ main() {
     log "▶ Kafka 客户端与依赖"
     download "org/apache/kafka" "kafka-clients" "${KAFKA_CLIENTS_VERSION}" || failed=1
     download "org/apache/commons" "commons-pool2" "${COMMONS_POOL2_VERSION}" || failed=1
+
+    log ""
+    log "▶ Iceberg 表格式（Sprint 5）"
+    log "  构件名里的 3.5 是 **Spark 次版本**、2.12 是 Scala 版本，"
+    log "  两者都必须与运行的 Spark 一致，否则会出现"
+    log "  NoSuchMethodError 这类运行期才暴露的错误。"
+    download "org/apache/iceberg" "iceberg-spark-runtime-3.5_2.12" "${ICEBERG_VERSION}" || failed=1
 
     log ""
     if [ "${failed}" -ne 0 ]; then
