@@ -18,9 +18,9 @@ from __future__ import annotations
 
 import random
 from collections.abc import Iterator
-from datetime import timedelta
+from datetime import datetime, timedelta
 
-from .common import EventIdGenerator, get_logger, to_iso
+from .common import EventIdGenerator, get_logger, now_cn, to_sql_datetime
 from .config import GenerateConfig
 from .dataset import Dataset, Order, Payment, Product, Refund, User
 
@@ -76,24 +76,38 @@ class Event:
 # ============================================================
 # 订单 / 支付 / 退款事件
 # ============================================================
-def order_events(orders: list[Order]) -> Iterator[Event]:
-    """订单事件：每个订单一条 ORDER_CREATED。分区键 = order_id。"""
+def order_events(
+    orders: list[Order],
+    products: list[Product] | None = None,
+) -> Iterator[Event]:
+    """订单事件：每个订单一条 ORDER_CREATED。分区键 = order_id。
+
+    冗余维度字段（category_name / brand）：
+        事件里带上商品类目与品牌，是数仓的常规做法 ——
+        下游 Flink 无需再连维表即可出「类目维度」指标，
+        避免为 join 引入额外的 connector 与维表状态。
+        这不会破坏一致性：值直接取自同一批 product 主数据，
+        并且也会写入 DWD 表，便于离线侧核对。
+    """
+    product_by_id = {p.product_id: p for p in (products or [])}
     id_gen = EventIdGenerator(prefix=1)
     for order in orders:
-        yield Event(
-            topic=TOPIC_ORDER,
-            key=str(order.order_id),
-            value={
-                "event_id": id_gen.next(),
-                "event_type": EVENT_ORDER_CREATED,
-                "order_id": order.order_id,
-                "user_id": order.user_id,
-                "product_id": order.product_id,
-                "quantity": order.quantity,
-                "amount": float(order.amount),
-                "event_time": to_iso(order.create_time),
-            },
-        )
+        product = product_by_id.get(order.product_id)
+        value = {
+            "event_id": id_gen.next(),
+            "event_type": EVENT_ORDER_CREATED,
+            "order_id": order.order_id,
+            "user_id": order.user_id,
+            "product_id": order.product_id,
+            "quantity": order.quantity,
+            "amount": float(order.amount),
+            "event_time": to_sql_datetime(order.create_time),
+        }
+        # 仅在有维表时附加，保持向后兼容（缺省不产生这些字段）
+        if product is not None:
+            value["category_name"] = product.category_name
+            value["brand"] = product.brand
+        yield Event(topic=TOPIC_ORDER, key=str(order.order_id), value=value)
 
 
 def payment_events(payments: list[Payment]) -> Iterator[Event]:
@@ -116,7 +130,7 @@ def payment_events(payments: list[Payment]) -> Iterator[Event]:
                 "user_id": payment.user_id,
                 "amount": float(payment.amount),
                 "payment_method": payment.payment_method,
-                "event_time": to_iso(payment.payment_time),
+                "event_time": to_sql_datetime(payment.payment_time),
             },
         )
 
@@ -135,7 +149,7 @@ def refund_events(refunds: list[Refund]) -> Iterator[Event]:
                 "order_id": refund.order_id,
                 "user_id": refund.user_id,
                 "refund_amount": float(refund.refund_amount),
-                "event_time": to_iso(refund.refund_time),
+                "event_time": to_sql_datetime(refund.refund_time),
             },
         )
 
@@ -209,6 +223,21 @@ def allocate_funnel_counts(
     return counts
 
 
+def _random_behavior_time(rng: random.Random, user: User) -> datetime:
+    """在 [用户注册时间, 当前时间] 区间内随机取一个行为时间。
+
+    必须夹取上界：否则「注册时间 + 最多 730 天」可能落到未来，
+    导致 Flink 事件时间水位线无法推进、窗口不关闭。
+    """
+    now = now_cn()
+    start = user.register_time
+    if start >= now:
+        # 注册时间异常（不应发生），退化为当前时间
+        return now
+    span = int((now - start).total_seconds())
+    return (start + timedelta(seconds=rng.randint(1, max(span, 1)))).replace(microsecond=0)
+
+
 def behavior_events(
     rng: random.Random,
     cfg: GenerateConfig,
@@ -230,6 +259,7 @@ def behavior_events(
 
     purchased_pairs = sorted({(o.user_id, o.product_id) for o in dataset.orders})
     users_by_id = {u.user_id: u for u in dataset.users}
+    products_by_id = {p.product_id: p for p in dataset.products}
 
     id_gen = EventIdGenerator(prefix=4)
     for event_type in BEHAVIOR_FUNNEL_ORDER:
@@ -242,23 +272,37 @@ def behavior_events(
                 product = rng.choice(dataset.products)
                 user_id, product_id = user.user_id, product.product_id
 
+            behavior_value = {
+                "event_id": id_gen.next(),
+                "event_type": event_type,
+                "user_id": user_id,
+                "product_id": product_id,
+                "device": rng.choices(
+                    BEHAVIOR_DEVICES, weights=BEHAVIOR_DEVICE_WEIGHTS, k=1
+                )[0],
+                "province": user.province,
+                # 行为时间：必须落在 [注册时间, 当前时间] 区间内
+                #
+                # !! 实测教训 !!
+                #   早期实现直接写 register_time + randint(1, 730天)，
+                #   由于注册时间本身可以是 730 天前，两者相加会**落到未来**
+                #   （实测出现 2027-08-24 这类未来时间）。
+                #   后果：Flink 以事件时间做滚动窗口，
+                #   水位线永远追不上未来事件，窗口迟迟不关闭，
+                #   下游 ADS 指标无输出。
+                #   因此这里显式夹取到「当前时间」上限 ——
+                #   与 orders 的 create_time 处理方式保持一致。
+                "event_time": to_sql_datetime(_random_behavior_time(rng, user)),
+            }
+            # 冗余商品类目，便于下游按类目出流量指标（无需连维表）
+            product = products_by_id.get(product_id)
+            if product is not None:
+                behavior_value["category_name"] = product.category_name
+
             yield Event(
                 topic=TOPIC_BEHAVIOR,
                 key=str(user_id),
-                value={
-                    "event_id": id_gen.next(),
-                    "event_type": event_type,
-                    "user_id": user_id,
-                    "product_id": product_id,
-                    "device": rng.choices(
-                        BEHAVIOR_DEVICES, weights=BEHAVIOR_DEVICE_WEIGHTS, k=1
-                    )[0],
-                    "province": user.province,
-                    # 行为时间晚于用户注册时间
-                    "event_time": to_iso(
-                        user.register_time + timedelta(seconds=rng.randint(1, 730 * 24 * 3600))
-                    ),
-                },
+                value=behavior_value,
             )
 
 
@@ -284,7 +328,7 @@ def build_events(
     selected = set(topics) if topics else set(ALL_TOPICS)
 
     if TOPIC_ORDER in selected:
-        yield from order_events(dataset.orders)
+        yield from order_events(dataset.orders, dataset.products)
     if TOPIC_PAYMENT in selected:
         yield from payment_events(dataset.payments)
     if TOPIC_REFUND in selected:

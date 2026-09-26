@@ -6,11 +6,18 @@
 # 由 docker-compose.yml 中的 kafka-init 一次性容器执行。
 # 该容器使用 Apache Kafka 官方镜像，因此可直接调用 kafka-topics.sh。
 #
-# 创建的 Topic（依据 docs/sprint/SPRINT_0.md 第 8 节）：
+# 创建的 Topic
+#
+# Sprint 0 业务事件（依据 docs/sprint/SPRINT_0.md 第 8 节）：
 #   order_event     订单创建/状态变化
 #   payment_event   支付成功/失败
 #   refund_event    退款事件
 #   behavior_event  浏览/点击/搜索/加购/收藏/购买行为
+#
+# Sprint 1 指标 Topic（依据 docs/sprint/SPRINT_1.md 第 2.1 节）：
+#   Flink 聚合结果写回 Kafka，再由 Doris Routine Load 导入 Doris。
+#   这样可避免依赖 doris-flink-connector（Doris/Flink/connector 三方版本绑定），
+#   改用 Doris 内置的 Routine Load：零额外依赖、自带断点续传。
 #
 # 要求：partition = 3, replication factor = 1（单机开发环境不追求高可用）
 # ============================================================
@@ -24,10 +31,21 @@ REPLICATION_FACTOR="${KAFKA_TOPIC_REPLICATION_FACTOR:-1}"
 KAFKA_TOPICS_BIN="/opt/kafka/bin/kafka-topics.sh"
 
 TOPICS=(
+  # --- Sprint 0：业务事件 ---
   "order_event"
   "payment_event"
   "refund_event"
   "behavior_event"
+  # --- Sprint 1：DWD 明细（Flink 清洗补维后） ---
+  "dwd_trade_order_detail"
+  "dwd_trade_payment_detail"
+  "dwd_trade_refund_detail"
+  "dwd_traffic_behavior_detail"
+  # --- Sprint 1：DWS / ADS 指标（Flink 1 分钟窗口聚合） ---
+  "dws_traffic_overview_1m"
+  "ads_realtime_trade_1m"
+  "ads_realtime_traffic_1m"
+  "ads_realtime_category_1m"
 )
 
 log()  { printf '[kafka-init] %s\n' "$*"; }

@@ -1,0 +1,62 @@
+-- ============================================================
+-- Flink 集群配置（conf/config.yaml）
+-- ============================================================
+#
+# 由 docker-compose.yml 挂载到 /opt/flink/conf/config.yaml
+#
+# 内存说明（服务器 16 GB，需与 Doris/Kafka/MySQL/MinIO 共存）：
+#   JobManager  1 GB 进程内存
+#   TaskManager 3 GB 进程内存 × 2 slots
+#   合计约 4 GB，留足够余量给其他组件。
+
+jobmanager:
+  rpc:
+    address: flink-jobmanager
+    port: 6123
+  memory:
+    process:
+      size: 1024m
+  bind-host: 0.0.0.0
+
+taskmanager:
+  memory:
+    process:
+      size: 3072m
+  numberOfTaskSlots: 2
+  bind-host: 0.0.0.0
+
+# 并行度：与 Kafka 分区数（3）匹配
+parallelism:
+  default: 3
+
+# 状态后端：默认使用 JobManager 内存 + TaskManager 内存
+# （Sprint 1 的窗口状态很小，暂不引入外部状态后端；
+#   如后续需要大状态与容错，再启用 filesystem 状态后端到 MinIO）
+execution:
+  checkpointing:
+    interval: 60000
+    mode: EXACTLY_ONCE
+    timeout: 300000
+    min-pause: 30000
+
+rest:
+  address: 0.0.0.0
+  port: 8081
+
+# SQL Gateway 的 REST 端点
+sql-gateway:
+  endpoint:
+    rest:
+      address: 0.0.0.0
+      port: 8083
+  session:
+    idle-timeout: 1h
+  worker:
+    thread-num: 4
+
+# 时区：与项目统一时区一致
+env:
+  java:
+    opts:
+      all: >-
+        -Duser.timezone=Asia/Shanghai
