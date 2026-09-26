@@ -83,6 +83,14 @@ DEFAULT_ARGS = {
     "retry_delay": timedelta(minutes=3),
     "depends_on_past": False,
     "email_on_failure": False,
+    # !! 每个任务都必须有执行超时（实测发现的设计缺口）!!
+    #   最初没设超时。后果不是"任务慢"，而是：
+    #   **一个挂死的 stage 会永久占着位置，而 restore_realtime 依赖它，
+    #   于是实时链路一直停在暂停状态，且没有任何机制把它救回来。**
+    #   "任务永久挂住"比"任务失败"严重得多 —— 失败至少会触发 all_done 恢复。
+    #   实测基线：dwd 3.4 分钟 / dws 5.7 分钟 / ads 约 6 分钟。
+    #   给 45 分钟：足够容纳数据量增长，又能在真挂死时及时止损。
+    "execution_timeout": timedelta(minutes=45),
 }
 
 
@@ -176,6 +184,9 @@ def offline_lakehouse_pipeline() -> None:
         # 恢复比批处理本身更「不能失败」，所以多给两次重试
         retries=2,
         retry_delay=timedelta(minutes=2),
+        # 恢复自身的超时单独给：它包含 Flink 集群起来 + 作业续跑 +
+        # 最多 180 秒的健康检查重试；15 分钟足够，且不与 stage 的 45 分钟混同。
+        execution_timeout=timedelta(minutes=15),
         doc_md=(
             "恢复 Flink 集群并跑 health-check 自检（退出码即任务结果）。\n\n"
             "`trigger_rule=all_done`：**任一上游失败也必须执行**。"
