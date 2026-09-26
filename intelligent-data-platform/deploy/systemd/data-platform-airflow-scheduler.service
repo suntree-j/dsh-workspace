@@ -1,0 +1,63 @@
+# ============================================================
+# systemd 单元：Airflow Scheduler（解析 DAG 并调度任务）
+# ============================================================
+#
+# 安装位置： /etc/systemd/system/data-platform-airflow-scheduler.service
+# 由 scripts/deploy-airflow.sh 拷贝并 enable。
+#
+# 这是三个单元里**权限最大的一个**：LocalExecutor 模式下，
+# DAG 任务由它 fork 出来执行，因此它（及其子进程）：
+#   - 需要 docker 组权限（跑批要先暂停 Flink 栈，见 batch-mode.sh）
+#   - 需要读 /opt/data-platform/.env（组 dpapi）——
+#     DAG 调用的 scripts/*.sh 会 source lib/common.sh 并 load_env
+#
+# !! 为什么这里**不用** PrivateTmp !!
+#   api-server 用了，但 scheduler 刻意不用。因为 LocalExecutor 的任务
+#   是 scheduler 的子进程，会继承它的 /tmp。一旦开了 PrivateTmp，
+#   任务写进 /tmp 的日志与中间文件在宿主机上就看不到了 ——
+#   排查"任务为什么失败"时会直接卡住（"日志说写到 /tmp/x.log，
+#   但 /tmp 里没有这个文件"）。
+#   拿一点隔离性换取可排查性，在这个场景是划算的。
+# ============================================================
+
+[Unit]
+Description=Data Platform Airflow Scheduler (LocalExecutor)
+Documentation=file:/opt/data-platform/docs/sprint/SPRINT_4.md
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dpaiflow
+Group=dpapi
+EnvironmentFile=/opt/data-platform/airflow/airflow.env
+
+ExecStart=/opt/data-platform/.venv-airflow/bin/airflow scheduler
+
+Restart=always
+RestartSec=10
+# 调度器要等在跑的任务收尾，给它比 api-server 更长的停止时间
+TimeoutStopSec=60
+KillMode=mixed
+
+# 基础加固（注意：这里刻意不加 PrivateTmp，理由见文件头）
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+# 实测空载 RSS = 175 MB。给 640M：比 api-server 宽，
+# 因为 LocalExecutor 模式下 DAG 任务由它 fork（子进程同属一个 cgroup）。
+# 注意 Spark 是跑在**容器**里的（docker compose run），
+# 那部分内存记在容器的 cgroup 上，不会算进这里 ——
+# 所以这个上限针对的只是 bash + docker CLI 这类薄子进程。
+MemoryMax=640M
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=data-platform-airflow-scheduler
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,70 @@
+# ============================================================
+# systemd 单元：Airflow API server（Web UI + REST API）
+# ============================================================
+#
+# 安装位置： /etc/systemd/system/data-platform-airflow-apiserver.service
+# 由 scripts/deploy-airflow.sh 拷贝并 enable。
+#
+# 运维命令：
+#   systemctl status data-platform-airflow-apiserver
+#   journalctl -u data-platform-airflow-apiserver -n 100 --no-pager
+#
+# !! 为什么这个单元**用** EnvironmentFile，而 data-platform-api 不用 !!
+#   data-platform-api 刻意不用，理由写在它自己的单元里：
+#   .env 里有带空格的值，交给 systemd 解析容易出错。
+#   但 Airflow 不一样：**AIRFLOW__SECTION__KEY 环境变量就是它的配置机制**，
+#   而且 airflow.env 是 scripts/deploy-airflow.sh 自己生成的
+#   （值里不含空格）。所以这里用 EnvironmentFile 是恰当的做法，
+#   不是不一致。
+#
+# !! 为什么凭据在 airflow.env 而不是本文件 !!
+#   单元文件要进 Git（deploy/systemd/*.service），而
+#   SQLALCHEMY_CONN 里含口令。所以这里只引用路径，
+#   真正的凭据落在 0640 dpaiflow:dpapi 的 airflow.env 里（不进 Git）。
+#
+# !! 为什么只监听 127.0.0.1 !!
+#   与 Sprint 6/7 的服务层一致：对外一律经 Nginx（TLS 终止在 Nginx）。
+#   而且这个 UI 能触发 DAG，而 DAG 任务能控制容器 ——
+#   把这种能力的入口直接暴露到公网是不可接受的。
+# ============================================================
+
+[Unit]
+Description=Data Platform Airflow API server (Web UI + REST API)
+Documentation=file:/opt/data-platform/docs/sprint/SPRINT_4.md
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dpaiflow
+Group=dpapi
+EnvironmentFile=/opt/data-platform/airflow/airflow.env
+
+ExecStart=/opt/data-platform/.venv-airflow/bin/airflow api-server --host 127.0.0.1 --port 8085 --workers 1
+
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+KillMode=mixed
+
+# 基础加固（与 data-platform-api.service 同一套做法）
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+# 内存上限：本机可用内存仅约 3 GB（实时链路常驻约 12 GB），
+# 宁可让单个组件被 OOM 掉并自动重启，也不要它拖垮整机。
+# 实测空载 RSS = 186 MB，这里给约 3 倍余量作为**爆炸半径上限**
+# （MemoryMax 不是预留，不用就不会占）。
+MemoryMax=512M
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=data-platform-airflow-apiserver
+
+[Install]
+WantedBy=multi-user.target

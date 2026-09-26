@@ -1,0 +1,55 @@
+# ============================================================
+# systemd 单元：Airflow DAG processor（独立解析 DAG 文件）
+# ============================================================
+#
+# 安装位置： /etc/systemd/system/data-platform-airflow-dagprocessor.service
+# 由 scripts/deploy-airflow.sh 拷贝并 enable。
+#
+# !! 为什么 Airflow 3 需要这个独立进程（2.x 没有）!!
+#   2.x 里解析 DAG 是 scheduler 的活；3.x 把它拆成独立进程，
+#   好处是"用户 DAG 代码写崩"不会拖垮调度循环。
+#   代价是多一个常驻进程 —— 在本机可用内存只有约 3 GB 的前提下，
+#   这是必须正视的成本（见 SPRINT_4.md 的内存预算一节）。
+#
+# !! 为什么 triggerer **不**部署 !!
+#   triggerer 只为 deferrable operator（可延迟算子）服务，
+#   而本项目的任务全是短时的 shell / Spark 任务，用不到它。
+#   少一个常驻进程在 3 GB 可用内存的机器上是实打实的收益。
+#   这是**有意的取舍**，不是漏装。
+# ============================================================
+
+[Unit]
+Description=Data Platform Airflow DAG processor
+Documentation=file:/opt/data-platform/docs/sprint/SPRINT_4.md
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dpaiflow
+Group=dpapi
+EnvironmentFile=/opt/data-platform/airflow/airflow.env
+
+ExecStart=/opt/data-platform/.venv-airflow/bin/airflow dag-processor
+
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+KillMode=mixed
+
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+# 实测空载 RSS = 125 MB。这是三个进程里最小的一个。
+MemoryMax=384M
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=data-platform-airflow-dagprocessor
+
+[Install]
+WantedBy=multi-user.target
