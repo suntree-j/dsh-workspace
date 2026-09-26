@@ -81,7 +81,7 @@ Dockerfile COPY 进 `/opt/spark/jars/`。
 
 | 待测点 | 实测结果 | 结论 |
 | --- | --- | --- |
-| Spark 镜像的 JDK | **Temurin OpenJDK 11.0.27**（`JAVA_HOME=/opt/java/openjdk`） | ✅ 在 Iceberg 1.11 支持的 8/11/17/21 之内 |
+| Spark 镜像的 JDK | **Temurin OpenJDK 11.0.27**（`JAVA_HOME=/opt/java/openjdk`） | ⚠️ **见下方 2.3.1：与 Iceberg 1.11 的字节码版本冲突** |
 | Hive Metastore | 容器 `running (healthy)`，9083 端口在监听；经 `scripts/spark-sql.sh` 执行 `SHOW DATABASES` 返回 `default` / `lakehouse` | ✅ HiveCatalog 的连通前提成立（**真正的建表仍待阶段 3 验证**） |
 | Maven Central | `iceberg-spark-runtime-3.5_2.12-1.11.0.jar` HEAD 返回 **HTTP 206**、1.09s | ✅ 可下载 |
 | 磁盘 | 根分区余 **55 GB**（42% 已用） | ✅ 足够 Iceberg 元数据与快照 |
@@ -110,6 +110,38 @@ ADS   ads_batch_trade_1m 11459   ads_batch_trade_1d 626   ads_batch_category_1d 
 
 两者的时间范围**几乎完全重合** —— 意味着流量域可以**全窗口对账**，
 不需要像原计划那样打折覆盖区间。这是个好消息，但要在阶段 6 用数字证明。
+
+### 2.3.1 ⚠️ 阶段 3 实测暴露的版本冲突（Iceberg 1.11 需要 Java 17）
+
+**这是一个必须先解决的问题，不能绕过。**
+
+```text
+现象（实测报错原文）：
+  java.lang.UnsupportedClassVersionError:
+    org/apache/iceberg/spark/ExtendedParser has been compiled by a more recent
+    version of the Java Runtime (class file version 61.0),
+    this version of the Java Runtime only recognizes class file versions up to 55.0
+
+解读：
+  class file 61.0 = Java 17       ← Iceberg 1.11.0 的字节码目标
+  class file 55.0 = Java 11       ← apache/spark:3.5.7 镜像里的 JRE
+
+!! 我在 2.3 节最初写"JDK 11 在 Iceberg 1.11 支持的 8/11/17/21 之内"是**错的** !!
+   "官方支持在 Java 11 上运行" 与 "其发布的字节码要求 Java 17"
+   是两件不同的事。前者是兼容性声明，后者是构建目标。
+   我拿前者当了后者用 —— 这正是"不猜版本"要防的那类错误，
+   只不过这次猜的是"支持范围"而不是版本号。
+```
+
+**两条可选修复路径**（阶段 3 续做时二选一并实测）：
+
+| 方案 | 做法 | 优点 | 代价 |
+| --- | --- | --- | --- |
+| **A. 降 Iceberg 版本** | 换到字节码目标 ≤ Java 11 的版本（需逐个查证，1.9.x 之前可能仍是 Java 8 目标） | 不动 Spark 镜像，改动最小 | 拿不到 1.11 的新特性；仍需查证哪个版本可用 |
+| **B. 换 Java 17 的 Spark 镜像** | 用 Apache 官方发布的 Java 17 变体；若无则自行在 Dockerfile 里装 JDK 17 并设 `JAVA_HOME` | 可用最新 Iceberg | 要重建镜像并回归 Spark 3.5.7 上的全部既有作业（Sprint 2/3/4 的抽取/分层/对账/归档都要重跑一遍） |
+
+**倾向**：先试 A（改动小、回归面窄）；A 不可行再上 B。
+**无论选哪条，都必须用真实报错消失来证明，而不是"看起来应该行"。**
 
 ### 2.4 阶段 1 顺带发现的一条通则
 
