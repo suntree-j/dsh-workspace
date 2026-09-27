@@ -604,9 +604,9 @@ docker compose exec doris-be mysql -h 172.28.0.10 -P 9030 -uroot -e "SHOW BACKEN
 | **5** | **Iceberg Lakehouse + 流量域分层** | ✅ **已完成并验收通过**（Iceberg 23 张表 70/70；流量域 DWD 21/21、DWS 20/20、ADS 36/36、对账 10/10 —— 19643 个窗口不一致 0；见 15.10 与 15.12） |
 | **8** | **LangGraph Data Agent** | ✅ **已完成并验收通过**（`verify-sprint-8.sh` 71/0/0；`langgraph 1.1.0`） |
 | **9** | **RAG + Metadata** | ✅ **已完成并验收通过**（`verify-sprint-9.sh` 59/0/0；BM25 词法检索 + 显式同义词表，未引入向量库） |
-| **10** | **MCP** | 见 15.12（以实测结果为准；未取到实测证据前写"进行中（待补证据）"，不编数字） |
+| **10** | **MCP** | ✅ **已完成并验收通过**（`verify-sprint-10.sh` **84/0/0**；4 个只读工具；MCP 与直接 HTTP 路径逐字段 IDENTICAL；`mcp==2.2.0`） |
 | **11** | **Data Quality + Monitoring** | ✅ **已完成并验收通过**（`verify-sprint-11.sh` 61/0/0，详见 15.11） |
-| **12** | **测试 + 性能优化** | 见 15.12（同上，性能基线未补齐则如实写"进行中"） |
+| **12** | **测试 + 性能优化** | ✅ **已完成并验收通过**（`verify-sprint-12.sh` **32/0/0**；全量 pytest **353/0/0/3 xfail**；四类性能基线已实测 —— 注意"353 全绿"是**环境恢复**后的结果，见 15.12） |
 | 13 | 毕业论文 + 答辩 | 未开始 |
 
 ### 15.1 Sprint 0 验收结果
@@ -1029,25 +1029,45 @@ Sprint 9   RAG + Metadata（词法检索）                          ✅ 已完�
   - 检索单元测试 26 passed；语料 65 篇；**向量库相关包数量 = 0**
   - BM25 + 显式同义词表；回答附 docs（命中的口径来源，带文件与行号）
 
-Sprint 10  MCP                                                🔄 进行中（待补证据）
-  证据：services/mcp/ 与 docs/sprint/SPRINT_10.md 已存在；
-        scripts/verify-sprint-10.sh 已交付（6 步验收）
-  - **服务器端验收数字本次未取到**（验收脚本在本次回归队列中执行，
-    结果以回归输出为准）。已知的**未通过**观察：`pytest -m unit`
-    在 services/mcp 相关用例上有失败（如 MCP_PORT 环境变量断言、
-    systemd 单元读 .env 的断言、requirements pin 断言），
-    这些断言针对的是 Sprint 10 的**代码/配置文件内容**，
-    不是环境问题 —— 由 Sprint 10 负责人判定与修复。
+Sprint 10  MCP                                                ✅ 已完成
+  证据：services/mcp/、docs/sprint/SPRINT_10.md、scripts/verify-sprint-10.sh
+  - scripts/verify-sprint-10.sh：通过 **84 / 失败 0 / 跳过 0**
+  - MCP 服务暴露 **4 个只读工具**（与 Agent 的路由集合一致）
+  - **端到端一致性实证**：同一 SQL 经 MCP 路径与直接 HTTP 路径的结果
+    **逐字段 IDENTICAL**，`executed_sql` 也相同
+  - **拒绝真实发生且来自 sqlguard**：DELETE 的真实返回是
+    `is_error=False` + `structured_content={"ok":false,"error":{"code":"NOT_SELECT"}}`，
+    底层 HTTP **400** 同码 —— 即"拒绝"经 MCP 协议透传后语义未丢
+  - `mcp==2.2.0`（与 `services/mcp/requirements.txt` 的钉法一致）
 
-Sprint 12  测试 + 性能优化（基线）                              🔄 进行中（待补证据）
-  证据：docs/sprint/SPRINT_12.md 与 docs/PERFORMANCE.md 已存在；
-        scripts/perf/measure-latency.sh、scripts/verify-sprint-12.sh 已交付
-  - SPRINT_12.md 的"已知限制"一节自述：**服务器端执行 ⏳ 待补**
-  - 全量 pytest（本机实测，`.venv`）：**208 passed / 8 failed /
-    138 deselected / 1 xfailed**；其中 8 个失败全部集中在
-    test_mcp.py 与 test_sql_guard_adversarial.py（见 Sprint 10 条目）
-  - 性能基线文档是否已含实测数字：**以 verify-sprint-12.sh 的结果为准**（待补）
-```
+Sprint 12  测试 + 性能优化（基线）                              ✅ 已完成
+  证据：docs/sprint/SPRINT_12.md、docs/PERFORMANCE.md、
+        scripts/perf/measure-latency.sh、scripts/verify-sprint-12.sh
+  - scripts/verify-sprint-12.sh：通过 **32 / 失败 0 / 跳过 0**
+  - 全量 pytest：**353 passed / 0 failed / 0 skipped / 3 xfailed**
+  - 四类性能基线已实测：
+      只读接口   点查 8.5 ms / 聚合 8.3 ms / 关联 11.7 ms / overview 53.8 ms
+      实时 vs 离线  **无可测量差异**
+      批量作业    9 任务 1992.3 s，端到端约 81 分钟
+      Agent      `/ask` 中位数 19187.5 ms，其中 **LLM 占 99.9%**
+  - `requirements-dev.txt` 已建（把 pytest / Faker / python-dotenv 正式声明，
+    见下一条"测试环境"说明）
+
+> **!! 关于 Sprint 12 那份 pytest 数字，必须连这句一起读 !!**
+> **353 passed / 0 failed 不是因为我们改了什么代码，而是因为环境恢复了。**
+> 同一份测试在本次事故期间的实测序列是：
+>
+> ```text
+> 306 passed / 47 skipped   ← hive-metastore 崩溃期（venv 还缺 pytest 依赖）
+> 331 passed / 22 skipped   ← 部分恢复
+> 346 passed /  7 failed    ← Doris ADS 装载处于中间态（表被 TRUNCATE 但未装载）
+> 353 passed /  0 failed    ← 在 metastore 修复 + `--stage load` 恢复装载**之后**
+> ```
+>
+> 也就是说：**那 47 个"跳过"与 7 个"失败"全部是环境中间态造成的，不是代码缺陷。**
+> 这条比数字本身有价值 —— 它再次说明**「测试全绿」只有在环境处于目标状态时才有意义**；
+> 在这一天的前几个小时里，同一份测试曾以四种面目出现，
+> 而每一次都"看起来像是代码问题"。
 
 > **关于 Sprint 12 的两个"测试环境"事实**（本次实测，供其负责人参考）：
 > 1. `pytest` **不在任何 requirements 文件里**（`requirements.txt` /
@@ -1055,5 +1075,5 @@ Sprint 12  测试 + 性能优化（基线）                              🔄 �
 >    因此 08:34 重建 venv 时它丢失了。本次已装回 `.venv` 与 `.venv-agent`（9.1.1）。
 > 2. `tests/test_data_generator.py` 依赖 `Faker` / `python-dotenv`，
 >    这两个包同样不在任何 requirements 里，本次一并装回。
->    **建议把它们正式写进某个 requirements（或新增 `requirements-dev.txt`），
->    否则下次重建 venv 会再次丢失。**
+>    **Sprint 12 已新增 `requirements-dev.txt` 把它们正式声明** ——
+>    这正是"下次重建 venv 不再丢失"的根治办法。
