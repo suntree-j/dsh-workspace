@@ -21,7 +21,7 @@ import logging
 import re
 import sys
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterator, Sequence
 
@@ -238,6 +238,9 @@ class Block:
     header: list[str] | None = None
     rows: list[list[str]] = field(default_factory=list)
     ncols: int = 0
+    # 是否在该标题前强制分页。H1 默认为 True（每章另起一页）；
+    # 正文第一个一级标题会被置为 False，避免与目录节的分节符叠加出空白页。
+    page_break: bool = True
 
 
 _DELIM_CELL_RE = re.compile(r"^:?-{2,}:?$")
@@ -277,6 +280,35 @@ def split_table_row(line: str) -> list[str]:
         i += 1
     cells.append("".join(buf).strip())
     return cells
+
+
+def strip_html_comments(md: str) -> tuple[str, int]:
+    """删除 Markdown 里的 HTML 注释块，返回（清理后的文本, 删掉的块数）。
+
+    !! 为什么必须有这一步（实测踩到两次）!!
+      原实现完全不处理 `<!-- -->`：注释内容会被当成普通段落原样排进正文。
+      第一次是"作者说明"写成 `>` 引用块 —— 它被当作前置说明排到了
+      **摘要页之前**；改成 `<!-- -->` 之后**照样漏**，因为解析器根本不认注释。
+      两次都出现在正文 docx 里（用 Word 读回页码时才发现：
+      第 3 页出现「毕业设计报告正文草稿（REPORT_DRAFT）」与写作纪律条文）。
+
+      处置放在解析入口而不是逐行判断：注释可以跨多行，
+      在字符串层面先整块摘掉，后续所有逐行规则（标题/列表/引用/表格）都不用再关心它。
+      未闭合的注释按"注释到文件末尾"处理 —— 宁可少排内容，也不要把
+      一段注解排进成稿。
+    """
+    count = 0
+    while True:
+        start = md.find("<!--")
+        if start < 0:
+            break
+        end = md.find("-->", start + 4)
+        if end < 0:
+            md = md[:start]          # 未闭合：截断到文件末尾
+        else:
+            md = md[:start] + md[end + 3:]
+        count += 1
+    return md, count
 
 
 def parse_blocks(md: str) -> list[Block]:
@@ -811,7 +843,9 @@ def _heading_paragraph(doc, block: Block) -> Paragraph:
     _set_indent(paragraph, left_cm=0.0, right_cm=0.0, first_line_pt=0.0, first_line_chars=0)
     if level == 1:
         paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        pf.page_break_before = True
+        # 每章另起一页；但正文第一章要跳过 —— 它前面已经有目录节的分节符，
+        # 再叠一次分页会多出一张空白页。由 block.page_break 决定。
+        pf.page_break_before = bool(getattr(block, "page_break", True))
     _add_inline_runs(paragraph, block.text, size=(H1_PT, H2_PT, H3_PT)[level - 1],
                      cn=FONT_HEADING, en=FONT_HEADING, bold=True,
                      color=RGBColor(0, 0, 0))
@@ -1101,7 +1135,14 @@ def build_document(blocks: list[Block], title: str) -> "Document":
     doc.add_section(WD_SECTION.NEW_PAGE)
 
     # ---- ② 诚信声明（规范要求：页脚不标页码）----
+    #   !! 必须给它自己一个分节 !!
+    #     封面表（7 行）+ 4 组空段之后，诚信声明如果仍留在**同一个节**里，
+    #     就会紧接在封面表格下方开始排版 —— 封面内容一多就与声明同页，
+    #     而规范要求声明单独成页且不标页码。
+    #     分节（NEW_PAGE）比"再塞几个空段落"可靠：空段落数量随封面高度变化，
+    #     换台机器/换个 Word 版本就可能挤到同一页。
     _integrity_page(doc)
+    doc.add_section(WD_SECTION.NEW_PAGE)
 
     # ---- 定位正文章节：首个 "N. " 形式的一级标题（工科编号）----
     #   兼容两种写法：新的 "1. 绪论" 与旧的 "第 1 章 绪论"，
@@ -1150,7 +1191,19 @@ def build_document(blocks: list[Block], title: str) -> "Document":
     _toc_page(doc, notes)
 
     # ---- ⑥~⑨ 正文（含参考文献/附录/致谢，它们本身是正文的一级标题）----
+    #   !! 正文第一章会多出一张空白页的坑 !!
+    #      H1 在 `_heading_paragraph` 里默认带 `page_break_before=True`
+    #      （目的是让**每一章**另起一页）。但正文第一章紧跟在目录节的
+    #      分节符之后，而那个分节符本身已经换页了 —— 再叠一次分页
+    #      就会先跳出一张空白页。
+    #      处置：把分节符的"分页"责任交给第一节标题，**只抑制正文第一个
+    #      一级标题**的 page_break_before；后续各章的换页行为保持不变。
     doc.add_section(WD_SECTION.NEW_PAGE)
+    body = list(body)
+    first_h1 = next((i for i, b in enumerate(body)
+                     if b.kind == "heading" and b.level == 1), -1)
+    if first_h1 >= 0:
+        body[first_h1] = replace(body[first_h1], page_break=False)
     _body(doc, body)
 
     _setup_sections(doc)
@@ -1430,6 +1483,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     md = args.input.read_text(encoding="utf-8")
+    # HTML 注释块在解析前整块摘掉（作者说明 / 待办注解不应进入成稿）
+    md, comment_blocks = strip_html_comments(md)
     blocks = parse_blocks(md)
 
     title = ""
@@ -1440,6 +1495,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     LOG.info("输入            : %s", args.input)
     LOG.info("文档标题        : %s", title)
+    LOG.info("剔除 HTML 注释  : %d 块（作者说明不进入成稿）", comment_blocks)
     LOG.info("解析块数量      : %d（标题 %d / 段落 %d / 列表 %d / 引用 %d / 代码 %d / 表格 %d）",
              len(blocks),
              sum(1 for b in blocks if b.kind == "heading"),
