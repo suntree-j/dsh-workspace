@@ -98,8 +98,8 @@ TABLES=(
     #   维表在 `ecommerce`（实时库，供 Flink lookup join 与只读服务查），
     #   而离线结果在 `lakehouse_ads`。规格串写成 `<库>.<表>` 以支持两者并存；
     #   不写库名的条目仍默认落到 ${DORIS_DB}（lakehouse_ads）。
-    "ecommerce.dim_product|warehouse/ods/product/|truncate|product_id, product_name, category_id, category_name, brand, price, cost, status|ods_product"
-    "ecommerce.dim_user|warehouse/ods/user/|truncate|user_id, username, gender, age, province, city, user_level|ods_user"
+    "ecommerce.dim_product|warehouse/ods/product/*.parquet|truncate|product_id, product_name, category_id, category_name, brand, price, cost, status|ods_product"
+    "ecommerce.dim_user|warehouse/ods/user/*.parquet|truncate|user_id, username, gender, age, province, city, user_level|ods_user"
 )
 
 log_stage() { printf '\n%b\n' "${C_BOLD}$*${C_RESET}"; }
@@ -199,6 +199,16 @@ load_tables() {
         [ -n "${lake_table}" ] || lake_table="${table#*.}"
         uri="s3://lakehouse/${uri}"
 
+        # 通配模式：**分区表与非分区表的目录层级不同**，不能一刀切。
+        #   离线 ADS 表按 dt 分区写出 → 文件在子目录里：<表>/dt=…/part-*.parquet
+        #     → 必须用 `**/*.parquet`（`*.parquet` 在 Doris S3() TVF 里**不递归**）
+        #   ODS 是非分区表 → 文件直接在目录下：<表>/part-*.parquet
+        #     → 用 `*.parquet`（实测：对非分区目录用 `**/*.parquet` 会匹配到 0 个文件）
+        #   所以规格串的第 2 段**允许自带通配**；没写通配的才补默认值。
+        #   实测踩坑（本次）：给 ODS 维表照抄了 `**/*.parquet`，
+        #   结果源端探测为空 —— 所幸**清空前守卫**拦住了，没有清掉任何数据。
+        [[ "${uri}" == *"*"* ]] || uri="${uri}**/*.parquet"
+
         # 规格串允许写成 `<库>.<表>`：维表在 ecommerce，离线结果在 lakehouse_ads
         db="${DORIS_DB}"
         if [[ "${table}" == *.* ]]; then
@@ -227,7 +237,7 @@ load_tables() {
             if ! probe="$(doris_q -N <<SQL
 SELECT COUNT(1) FROM (
   SELECT 1 FROM S3(
-    "uri" = "${uri}**/*.parquet",
+    "uri" = "${uri}",
     "format" = "parquet",
     "provider" = "S3",
     "s3.endpoint" = "${endpoint}",
@@ -268,7 +278,7 @@ SQL
         if ! doris_q <<SQL
 INSERT INTO ${target} (${select_list})
 SELECT ${select_list} FROM S3(
-    "uri" = "${uri}**/*.parquet",
+    "uri" = "${uri}",
     "format" = "parquet",
     "provider" = "S3",
     "s3.endpoint" = "${endpoint}",
