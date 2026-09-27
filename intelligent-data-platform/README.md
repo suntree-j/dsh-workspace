@@ -1076,4 +1076,5 @@ docker stats --no-stream prometheus grafana    # 实测内存占用（预算 512
 | [`services/web/README.md`](services/web/README.md) | 前端看板说明（无构建步骤、部署、空值约定） |
 | [`sql/metadata/metrics.md`](sql/metadata/metrics.md) | **指标口径字典（唯一权威）** |
 | [`sql/metadata/kafka_topics.md`](sql/metadata/kafka_topics.md) | Topic 与事件格式定义 |
+| [`docs/thesis/`](docs/thesis/) | **毕业设计报告与答辩材料**（大纲、正文草稿、PPT 逐页大纲、讲稿、问答准备、数据来源与已知限制） |
 | [`data-generator/README.md`](data-generator/README.md) | 数据生成器使用说明 |
