@@ -16,7 +16,7 @@
 --       实测 category_name 在生产表里为空（跨源 join 的固有代价）；
 --     离线侧有 dwd_product_detail 维表可用，能真正补全 category_name。
 --   因此 category_name **不参与对账**（对账在 ADS 层只比
---   uv / pv / 6 个行为计数 / 3 个比率 —— 这些都不依赖它）。
+--   uv / pv / 5 个行为计数 / 3 个比率 —— 这些都不依赖它）。
 --   把这一点写在这里，是为了避免后来者看到"两边某一列不一样"就误以为数据错了。
 --
 -- 幂等：按 dt 动态分区覆盖（spark.sql.sources.partitionOverwriteMode=dynamic

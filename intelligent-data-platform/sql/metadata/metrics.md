@@ -76,8 +76,19 @@ window_start = 11:32:00   gmv = 23616.00   order_cnt = 1   payment_cnt = ?
 
 | 类别 | 字段 | 无事件时 |
 | --- | --- | --- |
-| 可加指标 | `gmv` / `order_cnt` / `order_user_cnt` / `payment_cnt` / `payment_amount` / `payment_fail_cnt` / `refund_cnt` / `refund_amount` | `0` |
+| 可加指标（7 个） | `gmv` / `order_cnt` / `payment_cnt` / `payment_amount` / `payment_fail_cnt` / `refund_cnt` / `refund_amount` | `0` |
+| 去重指标（1 个） | `order_user_cnt`（`COUNT(DISTINCT user_id)`） | `0`（**但是去重口径，跨窗口不可加** —— 见下方注） |
 | 比率指标 | `avg_order_amount` / `payment_success_rate` / `refund_rate` / `click_rate` / `cart_rate` / `buy_rate` | `NULL`（分母为 0） |
+
+> ⚠️ **`order_user_cnt` 不是可加指标（本表早期版本把它并列进"可加指标"，是错的）。**
+> 它的实现是 `COUNT(DISTINCT user_id)`（本文件第 2 节），属**去重指标**：
+> 逐窗口可比，但**跨窗口 `SUM(order_user_cnt)` 会把同一用户重复计数**
+> （同一坑在 `infrastructure/spark/sql/03_ads_metrics.sql` 有专门注释）。
+> 因此交易域参与对账的 8 个判据列的准确说法是
+> **「7 个可加指标 + 1 个去重指标」**，不是"8 个可加指标"。
+> 这不影响对账结论：对账只做**逐窗口比对**、不做上卷，
+> 且两侧对 `order_user_cnt` 使用同一近似去重语义（第 3.4 节），
+> 属"同等近似对同等近似"。
 
 **离线链路（Sprint 3 起）必须遵循同一约定**，否则实时与离线无法对账。
 
@@ -183,9 +194,27 @@ window_start = 2026-03-21 19:23:00
 即目前数据里只有一个分数样本，而它就是错的
 （分子为 0 或分子等于分母的窗口无法暴露截断）。
 
-**影响范围**：7 个对账判据列（`uv` / `pv` / 6 个行为计数）在全部
+**影响范围**：7 个对账判据列（`uv` / `pv` / 5 个行为计数 `view_cnt`/`click_cnt`/`cart_cnt`/`favorite_cnt`/`buy_cnt`）在全部
 19643 个窗口**逐窗口一致**，因此该缺陷**不影响任何已发布的指标口径**，
 只影响实时侧 `click_rate` 这一个派生列的一行。
+
+**判据定性（与代码一致，答辩时按此口径回答）**：
+
+```text
+可加 / 去重计数类指标（uv / pv / 5 个行为计数）  → **硬一致性判据**，进 is_match，进 is_pass
+比率列（click_rate / cart_rate / buy_rate）      → **派生指标**，只作诊断性异常登记
+                                                  （diagnostic anomaly），不参与 is_pass
+```
+
+实时侧的 `realtime_rate_anomaly` 因此**不阻断对账作业的退出码**：
+作业只对**离线侧**的 `batch_rate_anomaly` 做硬断言
+（`infrastructure/spark/jobs/reconcile_traffic_batch_realtime.py`
+的"离线侧比率与自身计数一致（不一致窗口数）== 0"），
+实时侧只登记、只打印、只落表。
+理由见 `infrastructure/spark/sql/08_traffic_reconcile.sql` 文件头第 2 条：
+实时侧的矛盾是**实时链路自己的缺陷**，不该让离线作业替它"背锅"而失败。
+**这不等于掩盖**：窗口数已落进 `ads_reconcile_traffic_summary.realtime_rate_anomaly_windows`
+（实测 1）与逐窗口列 `ads_reconcile_traffic_1m.realtime_rate_anomaly`，可随时复核。
 
 **处置**：对账作业把它作为**一等结论**落盘
 （`ads_reconcile_traffic_summary.realtime_rate_anomaly_windows` 与

@@ -7,7 +7,8 @@
     1. 从 Doris 通过 JDBC 读实时链路产出的 ecommerce.ads_realtime_trade_1m；
     2. 从湖仓读离线链路产出的 lakehouse.ads_batch_trade_1m；
     3. 计算「两侧都已封闭」的对账区间（尾部留安全边界）；
-    4. 逐窗口比对 8 个可加指标 + 窗口覆盖情况，把差异全部落盘到
+    4. 逐窗口比对 8 个判据列（**7 个可加指标 + 1 个去重指标**
+       `order_user_cnt`，后者两侧同为近似去重）+ 窗口覆盖情况，把差异全部落盘到
        lakehouse.ads_reconcile_trade_1m / ads_reconcile_summary；
     5. **差异不为 0 就以非 0 退出**。
 
