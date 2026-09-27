@@ -204,7 +204,7 @@ MySQL 里真实存在的记录
 | 生成器是"业务系统替身" | 没有真实电商后台，生成器同时扮演业务写入方与埋点方 | 如实披露 |
 | 无 CDC | MySQL → Kafka 靠生成器双写，未用 Flink CDC / Canal | 未做 |
 | 单机单副本 | Kafka 副本 1、Doris 单 BE，无高可用 | 明确为开发环境 |
-| 行为事件不落 MySQL | 仅存在于 Kafka，由 Spark 归档到湖仓 | 已由 Sprint 4 归档（20000 行、零丢失） |
+| 行为事件不落 MySQL | 仅存在于 Kafka，由 Spark 归档到湖仓 | 已由 Sprint 4 归档（20000 行；**本次验收窗口内未观察到丢失** —— 判据是归档作业内自检"归档行数 == Kafka 消息数"，单次窗口内的等式、不覆盖之后的增量事件，且 Kafka 副本数为 1）。另注意：**表内行数 = distinct `event_id` 基数 ≠ 链路处理量**（该 topic latest 合计 580000 = 29 × 20000，Doris 侧 UNIQUE KEY upsert 去重后才是 20000） |
 | **重复生产事件会让窗口指标累加** | Flink source 用 `earliest-offset` 可重放历史；若把同一批事件重复写进源 topic，窗口聚合会把它们累加（实测 PV 翻倍） | 验收用 `--replay` 构造"恰好一代事件"；根治方案是按 `event_id` 去重，未实施 |
 | 无数据血缘 | 表级血缘尚未采集（RAG 层提供了表结构与口径的检索，但不是列级血缘） | 部分覆盖 |
 
@@ -292,7 +292,7 @@ MySQL 里真实存在的记录
 | # | 同名数字 | 两处取值与范围 | 本文的处理 | 来源 |
 | --- | --- | --- | --- | --- |
 | E1 | **Iceberg 迁移校验计数** | **60/60**（范围 **18 张表**，阶段 4 首次成功迁移）/ **70/70**（范围 **23 张表**，流量域建成后复跑） | **两个都保留**，在正文 5.4.1 用一张范围对照表 + 一句判据构成说明写清楚；`70/70` 无逐项细目，只作口径解释不作实测细目 | `docs/sprint/SPRINT_5.md` §8.1（60/60）；`AGENTS.md` §15 Sprint 5 行（70/70） |
-| E2 | **`dwd_traffic_behavior_detail` 行数** | **20000**（`SPRINT_1_VERIFICATION_STATUS.md` §2，与该 topic 20000 条事件、Routine Load `loadedRows=20000`、`errorRows=0` 三方自洽）/ **40000**（`SPRINT_3.md` §2 事实核查表，注明"与 MySQL 1:1"） | **两个都列出、不采信任一为"当前值"、不作解释性推断**（仓库未记录两次观测之间发生了什么）。**关键：不影响对账结论**——流量域对账判据是分钟窗口的 `uv`/`pv`/6 个行为计数，不是该 DWD 的行数 | `docs/sprint/SPRINT_1_VERIFICATION_STATUS.md` §2；`docs/sprint/SPRINT_3.md` §2 |
+| E2 | **`dwd_traffic_behavior_detail` 行数** | **已定性：当前值 = 20000**（两条独立只读观测：① Kafka 源 topic `behavior_event` latest 合计 = 6506+6592+6902 = **20000**，earliest 全 0、未被 retention 清理；② Doris `COUNT(*)` = 20000 且 `COUNT(DISTINCT event_id)` = 20000，两次观测一致）。**40000** 的唯一出处是 `SPRINT_3.md:52`（§2 事实核查表，注明"与 MySQL 1:1"），**无观测时间**，且流量域在 MySQL **没有源表**（这正是 Sprint 3 自述、Sprint 4 才归档补齐的缺口）→ 判为**当时的观测误差**，该行已改写并加审计注 | **历史侧状态保留为 UNRESOLVED**：2026-09-26 13:18 topic 重建**之前**的真实状态已不可考（需 Kafka topic 重建历史或 Doris 审计日志，当前不可得）—— 这是"来源不可考"，**不是"两种口径都对"**。**关键：不影响对账结论** —— 流量域对账判据是分钟窗口的 `uv`/`pv`/5 个行为计数，不是该 DWD 的行数。**行数口径**：表内行数 = distinct `event_id` 基数 ≠ 链路处理量（topic latest 合计 580000 = 29 × 20000） | `.tmp/audit-traffic-20000-40000.md`；`docs/sprint/SPRINT_1_VERIFICATION_STATUS.md` §2；`docs/sprint/SPRINT_3.md` §2（含审计注） |
 | E3 | **`dws_trade_user_1d` 行数** | **5851**（`SPRINT_3.md` §7.1 验收结果）/ **5883**（`SPRINT_5.md` §2.3 迁移基线 **与** §8.1 迁移后逐表行数——较晚且两处一致） | 5.2 节行数表按原文保留 5851 并标注差异；5.4 节引用 Iceberg 迁移结果时采用 **5883**。**两者都不参与任何对账判据** | `docs/sprint/SPRINT_3.md` §7.1；`docs/sprint/SPRINT_5.md` §2.3、§8.1 |
 | E4 | **实时链路常驻内存** | **13.7 GB**（容量规划与闸门设计依据的常驻口径，反复出现于 `SPRINT_3/9/11/12` 与 `DECISIONS` D11）/ **约 12 GB**（`PERFORMANCE.md` §0.1 采集现场的单次快照） | 引用时**必须带口径**：说 13.7 GB 时注明是常驻口径，说 12 GB 时注明是 2026-09-27 采集现场快照 | `AGENTS.md` §15.5；`docs/PERFORMANCE.md` §0.1 |
 | E5 | **质量校验清单条数** | **25**（`checks.conf` 的 `[check.*]` 段**实数 25**，已逐段点算确认；`AGENTS.md`、`SPRINT_11.md` §4.1、`PROJECT_DESIGN_V1` 相关表述一致）/ 文字"**21**"（`SPRINT_11.md` §7.11 记录"正则收窄后为 21"） | **本文采用 25**（以 `checks.conf` 实际段数为准）。`21` 是 Sprint 11 自身的一处口径注记（该节讲的是"正则太宽会数出多余的校验项"），**属仓库内部注记不一致，不影响交付物**；建议由数据质量负责人复核 §7.11 的这处表述 | `infrastructure/quality/checks.conf`（实数 25）；`docs/sprint/SPRINT_11.md` §7.11 |
