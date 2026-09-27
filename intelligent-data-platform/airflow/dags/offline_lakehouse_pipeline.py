@@ -13,7 +13,13 @@
 本 DAG 的做法
 -------------
 
-    pause_realtime ── ods_extract ── dwd ── dws ── ads ── reconcile ── load ── restore_realtime
+    pause_realtime ── ods_extract ── archive_behavior ── dwd_layers ── dws_layers ── ads_layers
+      ── traffic_dwd_layers ── traffic_dws_layers ── traffic_ads_layers
+      ── reconcile ── traffic_reconcile ── load_to_doris ── restore_realtime
+
+**Sprint 5 新增了流量域的四段**（traffic_dwd / traffic_dws / traffic_ads /
+traffic_reconcile）。它们接在 ``archive_behavior`` 之后 —— 归档是流量域的唯一源。
+交易域与流量域的事实表不同，两边的分层互不依赖，串行只为省内存。
 
 三个关键设计点
 --------------
@@ -184,12 +190,38 @@ def offline_lakehouse_pipeline() -> None:
         "枚举合法、`user_id` 均存在于 `ods_user`。",
     )
 
-    # ---- 4~6. 分层建模 ----
-    dwd = _stage("dwd_layers", "dwd", "ODS → DWD：去重 / 清洗 / 维度补全。")
-    dws = _stage("dws_layers", "dws", "DWD → DWS：按天轻度聚合，只出可加指标。")
-    ads = _stage("ads_layers", "ads", "DWD → ADS：指标口径（1 分钟 + 1 天）。")
+    # ---- 4~6. 分层建模（交易域）----
+    dwd = _stage("dwd_layers", "dwd", "ODS → DWD：去重 / 清洗 / 维度补全（交易域）。")
+    dws = _stage("dws_layers", "dws", "DWD → DWS：按天轻度聚合，只出可加指标（交易域）。")
+    ads = _stage("ads_layers", "ads", "DWD → ADS：指标口径（1 分钟 + 1 天，交易域）。")
 
-    # ---- 7. 批流交叉对账 ----
+    # ---- 7~9. 分层建模（流量域，Sprint 5 新增）----
+    #
+    # 为什么与交易域三段**串行**而不是并行：
+    #   同样受内存约束（本机可用内存只够一次一个 Spark 作业）。
+    #   DAG 里没有并行，是**有意的** —— 与 ods / archive 的关系同理。
+    #
+    # 依赖：archive（Kafka 行为事件 → ODS）→ traffic_dwd → traffic_dws → traffic_ads。
+    # 与交易域三段互不依赖（事实表不同），排序只为了让同一域的三层挨在一起。
+    traffic_dwd = _stage(
+        "traffic_dwd_layers",
+        "traffic-dwd",
+        "流量域 ODS → DWD：行为事件明细（去重 / 清洗 / 维度补全）。\n\n"
+        "作业内自检：行数 == ODS、`event_id` 唯一、枚举白名单、漏斗逐级收窄。",
+    )
+    traffic_dws = _stage(
+        "traffic_dws_layers",
+        "traffic-dws",
+        "流量域 DWD → DWS：按天总览 + 行为漏斗。\n\n"
+        "`uv` 是去重指标，**必须回到明细精确去重**，不能对窗口 uv 求和。",
+    )
+    traffic_ads = _stage(
+        "traffic_ads_layers",
+        "traffic-ads",
+        "流量域 DWD → ADS：1 分钟 + 1 天，与实时侧 `ads_realtime_traffic_1m` 同口径。",
+    )
+
+    # ---- 10. 批流交叉对账（交易域）----
     reconcile = _stage(
         "reconcile",
         "reconcile",
@@ -198,8 +230,18 @@ def offline_lakehouse_pipeline() -> None:
         "而是「算出同一个数，并且有证据」。",
     )
 
-    # ---- 8. 装载进服务库 ----
-    # 必须排在 reconcile 之后：要装载的表里包含对账结果表。
+    # ---- 11. 批流交叉对账（流量域，Sprint 5 新增）----
+    #
+    # 与交易域对账的实质差别：判据里含**去重指标** uv。
+    # uv 逐窗口可比，但窗口之间不可加；作业全程只做逐窗口比对。
+    traffic_reconcile = _stage(
+        "traffic_reconcile",
+        "traffic-reconcile",
+        "实时 ↔ 离线流量指标逐窗口比对（含去重指标 uv），差异不为 0 即失败。",
+    )
+
+    # ---- 12. 装载进服务库 ----
+    # 必须排在两个 reconcile 之后：要装载的表里包含对账结果表。
     # 顺序错了会表现为「前几张表成功、对账表报装载失败」
     # （S3() TVF 匹配不到文件时静默返回空）。
     load = _stage(
@@ -232,7 +274,9 @@ def offline_lakehouse_pipeline() -> None:
         ),
     )
 
-    pause >> ods >> archive >> dwd >> dws >> ads >> reconcile >> load >> restore
+    pause >> ods >> archive >> dwd >> dws >> ads \
+          >> traffic_dwd >> traffic_dws >> traffic_ads \
+          >> reconcile >> traffic_reconcile >> load >> restore
 
 
 offline_lakehouse_pipeline()

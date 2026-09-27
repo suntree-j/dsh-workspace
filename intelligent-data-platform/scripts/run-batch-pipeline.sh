@@ -12,24 +12,40 @@
 # 阶段依赖：
 #   ods   MySQL  → ODS（Sprint 2 的抽取作业）
 #   archive       Kafka → ODS（Sprint 4 新增：行为事件归档，补齐流量域离线源）
-#   dwd   ODS    → DWD   去重 / 清洗 / 维度补全
-#   dws   DWD    → DWS   按天轻度聚合
-#   ads   DWD    → ADS   指标口径（含 1 分钟粒度）
-#   reconcile    实时 ADS ↔ 离线 ADS 逐窗口比对，产出对账结果表
-#   load  ADS/对账结果 → Doris 只读服务用的表（S3() TVF 直读，无需额外 loader）
+#   dwd   ODS    → DWD   去重 / 清洗 / 维度补全（交易域）
+#   dws   DWD    → DWS   按天轻度聚合（交易域）
+#   ads   DWD    → ADS   指标口径（含 1 分钟粒度，交易域）
+#   traffic-dwd   ODS → DWD（流量域：行为事件明细）
+#   traffic-dws   DWD → DWS（流量域：按天总览 + 行为漏斗）
+#   traffic-ads   DWD → ADS（流量域：1 分钟 + 1 天，与实时侧同口径）
+#   reconcile          实时 ADS ↔ 离线 ADS 逐窗口比对（交易域），产出对账结果表
+#   traffic-reconcile  实时 ADS ↔ 离线 ADS 逐窗口比对（流量域），同上
+#   load          ADS/对账结果 → Doris 只读服务用的表（S3() TVF 直读，无需额外 loader）
 #
 # !! 为什么 reconcile 必须排在 load 前面（实测踩坑）!!
-#   load 要装载的 6 张表里包含 ads_reconcile_trade_1m / ads_reconcile_summary，
+#   load 要装载的表里包含 ads_reconcile_trade_1m / ads_reconcile_summary，
 #   这两张是**对账阶段的产物**。曾经把 load 放在 reconcile 之前，
 #   结果前 4 张表装载成功、第 5 张报"装载失败"——
 #   因为它的 Parquet 目录此时还不存在（S3() TVF 匹配不到文件，静默返回空）。
 #   顺序即依赖：先算出来，再搬进服务库。
+#   流量域同理：traffic-reconcile 必须排在 load 之前。
 #
 # !! 为什么 archive 排在 ods 之后、dwd 之前 !!
 #   ods 与 archive 是**两个互不依赖的取数源**（MySQL 业务库 / Kafka 事件流），
 #   理论上可并行；这里串行是为了内存 —— 本机可用内存只够一次一个 Spark 作业。
 #   两者都必须在 dwd 之前：dwd 要同时读交易域与流量域的 ODS。
-STAGES=(ods archive dwd dws ads reconcile load iceberg-migrate)
+#
+# !! 为什么 traffic-* 必须排在 iceberg-migrate 之前 !!
+#   iceberg-migrate 迁移的是"这一轮已经建完整"的整库湖仓。
+#   流量域的表若在它之后才建，Iceberg 库里就会缺这三张表
+#   —— 而迁移作业的核对是"逐表行数一致"，缺表只会报"找不到表"，
+#   不会报"湖仓少了一层"。放在前面才能被同一轮迁移覆盖。
+#
+# !! 为什么 traffic-dwd 排在 dws/ads 之后而不是紧跟 dwd !!
+#   两者互不依赖（交易域与流量域的事实表不同），排序只是为了可读性：
+#   交易域三段连在一起、流量域三段连在一起。
+#   真正有依赖的是：archive → traffic-dwd → traffic-dws → traffic-ads。
+STAGES=(ods archive dwd dws ads traffic-dwd traffic-dws traffic-ads reconcile traffic-reconcile load iceberg-migrate)
 
 # shellcheck source=lib/common.sh
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
@@ -38,7 +54,7 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/spark-job.sh"
 # shellcheck source=lib/memory-guard.sh
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/memory-guard.sh"
 
-STAGES=(ods archive dwd dws ads reconcile load iceberg-migrate)
+STAGES=(ods archive dwd dws ads traffic-dwd traffic-dws traffic-ads reconcile traffic-reconcile load iceberg-migrate)
 SELECTED=()
 SKIP_RECONCILE=0
 
@@ -47,7 +63,9 @@ usage() {
 用法： bash scripts/run-batch-pipeline.sh [选项]
 
 选项：
-  --stage <name>      只跑指定阶段（可重复）；name ∈ ods|archive|dwd|dws|ads|load|reconcile
+  --stage <name>      只跑指定阶段（可重复）；
+                      name ∈ ods|archive|dwd|dws|ads|traffic-dwd|traffic-dws|traffic-ads|
+                             reconcile|traffic-reconcile|load|iceberg-migrate
   --skip-reconcile    全链路模式下跳过对账阶段（离线链路自身仍会自检）
   --list              打印阶段与依赖，然后退出
   -h, --help          显示本帮助
@@ -76,17 +94,23 @@ parse_args() {
                 ;;
             --list)
                 printf '阶段顺序与依赖：\n'
-                printf '  %-15s %s\n' ods "MySQL → ODS（Spark JDBC 抽取，作业内逐表对账）"
-                printf '  %-15s %s\n' archive "Kafka 行为事件 → ODS（Sprint 4：补齐流量域离线源）"
-                printf '  %-15s %s\n' dwd "ODS → DWD（去重 / 清洗 / 维度补全）"
-                printf '  %-15s %s\n' dws "DWD → DWS（按天轻度聚合，只出可加指标）"
-                printf '  %-15s %s\n' ads "DWD → ADS（指标口径，1 分钟 + 1 天）"
-                printf '  %-15s %s\n' reconcile "实时 ADS ↔ 离线 ADS 逐窗口对账（差异不为 0 即失败）"
-                printf '  %-15s %s\n' load "ADS + 对账结果 → Doris（S3() TVF 直读 Parquet，供只读服务查询）"
-                printf '  %-15s %s\n' iceberg-migrate "Parquet → Iceberg 表格式迁移（Sprint 5，最后执行）"
-                printf '\n注意：reconcile 必须在 load 之前 —— load 要装载的表里包含对账结果表。\n'
+                printf '  %-18s %s\n' ods "MySQL → ODS（Spark JDBC 抽取，作业内逐表对账）"
+                printf '  %-18s %s\n' archive "Kafka 行为事件 → ODS（Sprint 4：补齐流量域离线源）"
+                printf '  %-18s %s\n' dwd "ODS → DWD（交易域：去重 / 清洗 / 维度补全）"
+                printf '  %-18s %s\n' dws "DWD → DWS（交易域：按天轻度聚合，只出可加指标）"
+                printf '  %-18s %s\n' ads "DWD → ADS（交易域：指标口径，1 分钟 + 1 天）"
+                printf '  %-18s %s\n' traffic-dwd "ODS → DWD（流量域：行为事件明细，Sprint 5 新增）"
+                printf '  %-18s %s\n' traffic-dws "DWD → DWS（流量域：按天总览 + 行为漏斗，Sprint 5 新增）"
+                printf '  %-18s %s\n' traffic-ads "DWD → ADS（流量域：1 分钟 + 1 天，Sprint 5 新增）"
+                printf '  %-18s %s\n' reconcile "实时 ADS ↔ 离线 ADS 逐窗口对账（交易域；差异不为 0 即失败）"
+                printf '  %-18s %s\n' traffic-reconcile "实时 ADS ↔ 离线 ADS 逐窗口对账（流量域；同上）"
+                printf '  %-18s %s\n' load "ADS + 对账结果 → Doris（S3() TVF 直读 Parquet，供只读服务查询）"
+                printf '  %-18s %s\n' iceberg-migrate "Parquet → Iceberg 表格式迁移（Sprint 5，最后执行）"
+                printf '\n注意：reconcile / traffic-reconcile 必须在 load 之前 —— load 要装载的表里包含对账结果表。\n'
                 printf '注意：iceberg-migrate 必须在最后 —— 它迁移的是"这一轮已经建完整"的湖仓，\n'
                 printf '      提前跑会把上一轮的 DWD/DWS/ADS 快照迁过去，得到一个半新半旧的 Iceberg 库。\n'
+                printf '注意：流量域三段（traffic-dwd/-dws/-ads）与对账都必须在 iceberg-migrate **之前**，\n'
+                printf '      否则 Iceberg 库里会缺这几张表。\n'
                 exit 0
                 ;;
             -h|--help)
@@ -141,6 +165,27 @@ run_stage() {
             submit_spark_job "sprint3-build-ads" "infrastructure/spark/jobs/build_ads.py"
             rc=$?
             ;;
+        traffic-dwd)
+            # 流量域 DWD（Sprint 5）：行为事件明细
+            #
+            # 依赖 archive 阶段产出的 lakehouse.ods_behavior_event。
+            # 作业内自检：行数 == ODS、event_id 唯一、枚举白名单、漏斗逐级收窄。
+            submit_spark_job "sprint5-build-traffic-dwd" \
+                "infrastructure/spark/jobs/build_traffic_dwd.py"
+            rc=$?
+            ;;
+        traffic-dws)
+            # 流量域 DWS（Sprint 5）：按天总览 + 行为漏斗
+            submit_spark_job "sprint5-build-traffic-dws" \
+                "infrastructure/spark/jobs/build_traffic_dws.py"
+            rc=$?
+            ;;
+        traffic-ads)
+            # 流量域 ADS（Sprint 5）：1 分钟 + 1 天，与实时侧同口径
+            submit_spark_job "sprint5-build-traffic-ads" \
+                "infrastructure/spark/jobs/build_traffic_ads.py"
+            rc=$?
+            ;;
         load)
             bash "${REPO_ROOT}/scripts/load-batch-to-doris.sh"
             rc=$?
@@ -148,6 +193,22 @@ run_stage() {
         reconcile)
             submit_spark_job "sprint3-reconcile-batch-realtime" \
                 "infrastructure/spark/jobs/reconcile_batch_realtime.py" \
+                --conf "spark.doris.host=${DORIS_FE_HOST:-doris-fe}" \
+                --conf "spark.doris.queryPort=${DORIS_FE_QUERY_PORT:-9030}" \
+                --conf "spark.doris.database=${DORIS_DATABASE:-ecommerce}" \
+                --conf "spark.doris.user=${DORIS_READONLY_USER:-agent_ro}" \
+                --conf "spark.doris.password=$(_spark_job_env_value API_DORIS_PASSWORD)"
+            rc=$?
+            ;;
+        traffic-reconcile)
+            # 流量域批流对账（Sprint 5 阶段 6）
+            #
+            # 与交易域对账的实质差别：判据里含**去重指标** uv。
+            # uv 逐窗口可比，但窗口之间不可加 —— 作业全程只做逐窗口比对。
+            # 比率列只留证不参与判据，但作业会单独统计"比率也不一致的窗口数"。
+            # 详见 infrastructure/spark/jobs/reconcile_traffic_batch_realtime.py
+            submit_spark_job "sprint5-reconcile-traffic-batch-realtime" \
+                "infrastructure/spark/jobs/reconcile_traffic_batch_realtime.py" \
                 --conf "spark.doris.host=${DORIS_FE_HOST:-doris-fe}" \
                 --conf "spark.doris.queryPort=${DORIS_FE_QUERY_PORT:-9030}" \
                 --conf "spark.doris.database=${DORIS_DATABASE:-ecommerce}" \
@@ -186,7 +247,7 @@ run_stage() {
             log_error "阶段 ${stage} 没有对应的执行分支（run_stage 的 case 缺项）"
             log_error "  这是一个脚本缺陷，不是运行环境问题："
             log_error "  它在 STAGES 数组里，却没有在这里实现，于是会静默地什么都不做。"
-            printf '  已实现的阶段： ods archive dwd dws ads reconcile load iceberg-migrate\n'
+            printf '  已实现的阶段： %s\n' "${STAGES[*]}"
             rc=1
             ;;
     esac
@@ -207,7 +268,12 @@ main() {
         plan=("${SELECTED[@]}")
     else
         for stage in "${STAGES[@]}"; do
-            if [ "${stage}" = "reconcile" ] && [ "${SKIP_RECONCILE}" -eq 1 ]; then
+            # --skip-reconcile 跳过**两个域**的对账阶段（交易域与流量域）。
+            #   为什么两个一起跳：这个开关的用途是"只想快速重建离线表、
+            #   不比对实时链路"（例如实时链路本身正在重建）。
+            #   只跳一个域会让结果半对账半不对账，比全跳更难解释。
+            if [ "${SKIP_RECONCILE}" -eq 1 ] &&
+               { [ "${stage}" = "reconcile" ] || [ "${stage}" = "traffic-reconcile" ]; }; then
                 continue
             fi
             plan+=("${stage}")

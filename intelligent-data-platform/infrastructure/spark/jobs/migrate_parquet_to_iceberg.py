@@ -13,10 +13,10 @@
     3. 把数据搬过去（INSERT OVERWRITE，动态分区 = 幂等）；
     4. **逐表核对**行数与金额合计。
 
-为什么从 schema 推导，而不是手写 16 张表的 DDL
+为什么从 schema 推导，而不是手写 23 张表的 DDL
 ----------------------------------------------
     手写 DDL 有两个必然会出的问题：
-      ① 列类型抄错 / 抄漏 —— 16 张表、几十个列，靠人眼对不现实；
+      ① 列类型抄错 / 抄漏 —— 23 张表、几十个列，靠人眼对不现实；
       ② 源表将来加字段，DDL 不会跟着变，两边悄悄分叉。
     从 `spark.table(src).schema` 推导则保证**两边定义同源**，
     迁移后类型不一致这一类问题从根上不会出现。
@@ -74,9 +74,16 @@ WAREHOUSE = "s3a://lakehouse/warehouse"
 #: 参与迁移的表。
 #:
 #: !! 为什么显式列出而不是 `SHOW TABLES` 全扫 !!
-#:   对账结果表（ads_reconcile_*）是 Sprint 3 的产物，属于"证据"而非"数据"；
+#:   对账结果表（ads_reconcile_*）是 Sprint 3/5 的产物，属于"证据"而非"数据"；
 #:   把它们一起迁走会让下一步的对照关系变复杂。本次只迁四层主表。
-#:   （对账表留在 Parquet 侧，Sprint 5 的对账仍读它们。）
+#:   （对账表留在 Parquet 侧，Sprint 3/5 的对账仍读它们。）
+#:
+#: !! 流量域三张主表（Sprint 5 新增）必须在这里 !!
+#:   它们由 traffic-dwd / traffic-dws / traffic-ads 阶段产出到 Parquet 侧，
+#:   与交易域一样需要迁到 Iceberg。漏掉它们的表现是：
+#:   迁移作业本身**完全成功**（它只核对自己清单里的表），
+#:   而 Iceberg 库里就是少三张表 —— 一个"检查不出错"的错误。
+#:   最终的防线是核对"Iceberg 库表数 == 迁移清单表数"（见 main 末尾）。
 MIGRATE_TABLES: tuple[str, ...] = (
     # ODS
     "ods_user",
@@ -91,15 +98,20 @@ MIGRATE_TABLES: tuple[str, ...] = (
     "dwd_trade_order_detail",
     "dwd_trade_payment_detail",
     "dwd_trade_refund_detail",
+    "dwd_traffic_behavior_detail",
     # DWS
     "dws_trade_overview_1d",
     "dws_trade_category_1d",
     "dws_trade_user_1d",
+    "dws_traffic_overview_1d",
+    "dws_traffic_funnel_1d",
     # ADS
     "ads_batch_trade_1m",
     "ads_batch_trade_1d",
     "ads_batch_category_1m",
     "ads_batch_category_1d",
+    "ads_traffic_1m",
+    "ads_traffic_1d",
 )
 
 #: 金额列（用于"内容没坏"的核对）。存在则比对，不存在则跳过。

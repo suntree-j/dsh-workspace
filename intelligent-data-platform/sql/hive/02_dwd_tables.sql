@@ -138,3 +138,35 @@ COMMENT 'DWD-退款明细（退款笔数 / 金额 / 退款率的事实来源）'
 PARTITIONED BY (dt STRING COMMENT '分区日期（由 event_time 派生）')
 STORED AS PARQUET
 LOCATION 's3a://lakehouse/warehouse/dwd/trade_refund_detail';
+
+-- ------------------------------------------------------------
+-- DWD：行为事件明细（流量域，源：ods_behavior_event）—— Sprint 5 新增
+--
+-- !! 为什么字段与实时表 ecommerce.dwd_traffic_behavior_detail 逐列对齐 !!
+--   实时侧的表定义见 sql/doris/10_dwd_tables.sql，字段名 / 语义必须一致，
+--   否则"批流一体"只能停在口号上：同一份行为事件，两套字段名，
+--   下游（DWS/ADS）一改名就没法对照，而对账能成立的前提正是**同名同义**。
+--
+-- 事件时间：直接用 ODS 里的 event_time（Kafka 归档时已落盘事件时间）。
+--   这一点是流量域能对账的根本：Flink 的 TUMBLE 窗口键是事件时间，
+--   离线若改用处理时间/入库时间，"同一分钟"就对不上，对账必然全红。
+--
+-- 分区：dt 由 event_time 派生（与 Parquet 版 ODS 一致，
+--   也与实时 DWD 的 dt 列语义一致 —— 那边是 DATE，这边按本项目一贯做法用 STRING）。
+--
+-- 幂等：EXTERNAL TABLE + INSERT OVERWRITE 动态分区，可重复执行。
+-- ------------------------------------------------------------
+CREATE EXTERNAL TABLE IF NOT EXISTS lakehouse.dwd_traffic_behavior_detail (
+    event_id      STRING    COMMENT '事件ID（幂等键，DWD 层按此去重）',
+    event_type    STRING    COMMENT '行为类型 VIEW/CLICK/CART/FAVORITE/BUY',
+    user_id       BIGINT    COMMENT '用户ID',
+    product_id    BIGINT    COMMENT '商品ID',
+    category_name STRING    COMMENT '商品类目（维表补全，对齐实时 DWD 的同名列）',
+    device        STRING    COMMENT '设备：PC/APP/H5/MINI_PROGRAM',
+    province      STRING    COMMENT '省份',
+    event_time    TIMESTAMP COMMENT '事件时间（窗口计算基准，Asia/Shanghai）'
+)
+COMMENT 'DWD-行为事件明细（流量域；去重 + 清洗 + 维度补全）'
+PARTITIONED BY (dt STRING COMMENT '分区日期（由 event_time 派生）')
+STORED AS PARQUET
+LOCATION 's3a://lakehouse/warehouse/dwd/traffic_behavior_detail';

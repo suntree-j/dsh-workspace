@@ -110,3 +110,79 @@ COMMENT 'ADS-离线类目销售（按天）'
 PARTITIONED BY (part_dt STRING COMMENT '分区日期（= dt）')
 STORED AS PARQUET
 LOCATION 's3a://lakehouse/warehouse/ads/batch_category_1d';
+
+-- ============================================================
+-- Sprint 5 — 流量域 ADS（新增）
+-- ============================================================
+--
+-- !! 本层存在的唯一理由：与实时链路算同一个数，并且有证据 !!
+--   ads_traffic_1m ↔ ecommerce.ads_realtime_traffic_1m
+--   字段名 / 类型 / 顺序逐列一致（见 sql/doris/12_ads_tables.sql），
+--   对账逻辑见 05_reconcile_tables.sql 与 infrastructure/spark/sql/06_traffic_ads.sql。
+--
+-- !! 口径：去重指标 vs 可加指标（metrics.md 第 3 节 / SPRINT_5.md 第 3.5 节）!!
+--   uv                 去重指标 —— 逐窗口可比，**窗口之间不可相加**
+--   pv / view_cnt / click_cnt / cart_cnt / favorite_cnt / buy_cnt
+--                      可加指标 —— 逐窗口可比，且可向上卷
+--   比率（click_rate / cart_rate / buy_rate）是派生量，
+--   必须"先合计分子分母再相除"，不能对逐窗口比率求平均。
+--
+-- 空值约定（与实时 Flink 作业一致）：
+--   可加指标无事件时为 0（本表的窗口都是"有事件的窗口"，天然成立）
+--   比率分母为 0 时为 NULL —— 注意实时侧实测存在 0.0000 的行
+--   （例如"这一分钟只有 CLICK 没有 VIEW"时 click_rate 的分母为 0）。
+--   两边都必须产生相同的 NULL/0 形态，否则对账会出现假差异。
+-- ============================================================
+
+-- ------------------------------------------------------------
+-- ADS：离线流量（1 分钟粒度，与实时表同形）
+-- ------------------------------------------------------------
+CREATE EXTERNAL TABLE IF NOT EXISTS lakehouse.ads_traffic_1m (
+    window_start  TIMESTAMP     COMMENT '窗口开始（事件时间）',
+    window_end    TIMESTAMP     COMMENT '窗口结束（事件时间）',
+    uv            BIGINT        COMMENT '去重用户数（**不可加**）',
+    pv            BIGINT        COMMENT '行为事件总数（可加）',
+    view_cnt      BIGINT        COMMENT 'VIEW 次数（可加）',
+    click_cnt     BIGINT        COMMENT 'CLICK 次数（可加）',
+    cart_cnt      BIGINT        COMMENT 'CART 次数（可加）',
+    favorite_cnt  BIGINT        COMMENT 'FAVORITE 次数（可加）',
+    buy_cnt       BIGINT        COMMENT 'BUY 次数（可加）',
+    click_rate    DECIMAL(10,4) COMMENT '点击率 = click_cnt / view_cnt，分母为 0 时 NULL',
+    cart_rate     DECIMAL(10,4) COMMENT '加购率 = cart_cnt / click_cnt，分母为 0 时 NULL',
+    buy_rate      DECIMAL(10,4) COMMENT '购买转化率 = buy_cnt / cart_cnt，分母为 0 时 NULL'
+)
+COMMENT 'ADS-离线流量（1 分钟，与 ads_realtime_traffic_1m 同形，用于批流对账）'
+PARTITIONED BY (dt STRING COMMENT '分区日期（窗口开始所在日）')
+STORED AS PARQUET
+LOCATION 's3a://lakehouse/warehouse/ads/traffic_1m';
+
+-- ------------------------------------------------------------
+-- ADS：离线流量（1 天，报表 / 看板用）
+--
+-- 上卷规则（**与交易域 1d 表同一条规则**）：
+--   可加量直接从 1m 表 SUM —— 保证「天 = 该天所有分钟之和」恒成立；
+--   uv 回到明细精确去重 —— 去重指标不可加，SUM(uv) 会重复计数。
+--   比率从"上卷后的可加量"重算，而不是对分钟比率求平均。
+--
+-- 为什么 uv 用 TO_DATE(window_start) 分组而不是 TO_DATE(event_time)：
+--   dt 分区列就是 TO_DATE(window_start)，按窗口起点分组才能保证
+--   1d 表按 dt 与 1m 表按 dt 的分组键**完全相同**；
+--   用 event_time 分组在跨日分钟上会与分区归属不一致（虽然本数据集罕见）。
+-- ------------------------------------------------------------
+CREATE EXTERNAL TABLE IF NOT EXISTS lakehouse.ads_traffic_1d (
+    dt            STRING        COMMENT '统计日期',
+    uv            BIGINT        COMMENT '当日去重用户数（**不可加**）',
+    pv            BIGINT        COMMENT '当日行为事件总数（可加）',
+    view_cnt      BIGINT        COMMENT 'VIEW 次数（可加）',
+    click_cnt     BIGINT        COMMENT 'CLICK 次数（可加）',
+    cart_cnt      BIGINT        COMMENT 'CART 次数（可加）',
+    favorite_cnt  BIGINT        COMMENT 'FAVORITE 次数（可加）',
+    buy_cnt       BIGINT        COMMENT 'BUY 次数（可加）',
+    click_rate    DECIMAL(10,4) COMMENT '点击率 = click_cnt / view_cnt，分母为 0 时 NULL',
+    cart_rate     DECIMAL(10,4) COMMENT '加购率 = cart_cnt / click_cnt，分母为 0 时 NULL',
+    buy_rate      DECIMAL(10,4) COMMENT '购买转化率 = buy_cnt / cart_cnt，分母为 0 时 NULL'
+)
+COMMENT 'ADS-离线流量（按天，看板与报表）'
+PARTITIONED BY (part_dt STRING COMMENT '分区日期（= dt）')
+STORED AS PARQUET
+LOCATION 's3a://lakehouse/warehouse/ads/traffic_1d';

@@ -46,8 +46,10 @@ usage() {
 用法： bash scripts/batch-mode.sh [选项] [-- <run-batch-pipeline.sh 的参数>]
 
 选项：
-  --stage <name>     只跑指定阶段（ods|dwd|dws|ads|load|reconcile），可重复
-  --skip-reconcile   透传给 run-batch-pipeline.sh
+  --stage <name>     只跑指定阶段，可重复（合法取值由 run-batch-pipeline.sh 校验）；
+                     常用：ods|archive|dwd|dws|ads|traffic-dwd|traffic-dws|traffic-ads|
+                           reconcile|traffic-reconcile|load|iceberg-migrate
+  --skip-reconcile   透传给 run-batch-pipeline.sh（跳过**两个域**的对账阶段）
   --keep-realtime    不暂停实时链路（仅在内存充裕时使用）
   --no-restore       跑完不自动恢复实时链路
   --pause-only       只暂停实时链路，不跑批（Sprint 4：给 Airflow 用）

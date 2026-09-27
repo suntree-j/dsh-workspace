@@ -146,16 +146,21 @@ step_metadata_db() {
 # 3. DAG 定义
 # ------------------------------------------------------------
 step_dag() {
-    step_start "3/8 DAG 定义（9 任务 / all_done 恢复 / 显式超时 / 并发限制）"
+    step_start "3/8 DAG 定义（13 任务 / all_done 恢复 / 显式超时 / 并发限制）"
 
     local dag_file="${REPO_ROOT}/airflow/dags/offline_lakehouse_pipeline.py"
 
     check_true "DAG 文件存在" "${dag_file}" test -f "${dag_file}"
 
+    # 任务数从 9 变成 13：Sprint 5 往流水线里加了流量域四段
+    # （traffic_dwd / traffic_dws / traffic_ads / traffic_reconcile）。
+    # !! 这个数字是**断言**，不是说明文字 —— 加阶段必须同步改它 !!
+    #    否则本脚本会在"DAG 明明是对的"情况下报失败，
+    #    而失败信息只显示期望/实际两个数字，很难看出是"数字没跟上"。
     local tasks
     tasks="$(bash "${REPO_ROOT}/scripts/airflow.sh" tasks list offline_lakehouse_pipeline 2>/dev/null \
              | grep -vE 'graphviz|pip install|You might|^$' | wc -l | tr -d '[:space:]')"
-    check "DAG 任务数" "9" "${tasks}"
+    check "DAG 任务数" "13" "${tasks}"
 
     check_true "恢复任务用 trigger_rule=all_done（任一上游失败也必须恢复）" "命中 all_done" \
         grep -q 'trigger_rule="all_done"' "${dag_file}"

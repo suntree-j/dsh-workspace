@@ -5,11 +5,21 @@
 #
 # 用法（服务器上，仓库根目录）：
 #   bash scripts/submit-offline-job.sh                 # 等价 --stage ods（Sprint 2 的抽取作业）
-#   bash scripts/submit-offline-job.sh --stage dwd     # 只跑 ODS → DWD
+#   bash scripts/submit-offline-job.sh --stage dwd     # 只跑 ODS → DWD（交易域）
 #   bash scripts/submit-offline-job.sh --stage archive # 只跑 Kafka → ODS（Sprint 4）
-#   bash scripts/submit-offline-job.sh --stage dws     # 只跑 DWD → DWS
-#   bash scripts/submit-offline-job.sh --stage ads     # 只跑 DWD → ADS
+#   bash scripts/submit-offline-job.sh --stage dws     # 只跑 DWD → DWS（交易域）
+#   bash scripts/submit-offline-job.sh --stage ads     # 只跑 DWD → ADS（交易域）
+#   bash scripts/submit-offline-job.sh --stage traffic-dwd        # 流量域 DWD（Sprint 5）
+#   bash scripts/submit-offline-job.sh --stage traffic-dws        # 流量域 DWS（Sprint 5）
+#   bash scripts/submit-offline-job.sh --stage traffic-ads        # 流量域 ADS（Sprint 5）
 #   bash scripts/submit-offline-job.sh --stage reconcile
+#   bash scripts/submit-offline-job.sh --stage traffic-reconcile  # 流量域对账（Sprint 5）
+#
+# !! 白名单与 run-batch-pipeline.sh 的 STAGES 必须保持同步 !!
+#   两边不同步的后果实测过一次（Sprint 4 的 archive）：
+#   阶段能通过参数校验、却没有任何执行分支，于是静默空转并报告成功。
+#   本脚本的白名单少一项只是"跑不了"（会明确报未知阶段），
+#   但**少了 case 分支**才是真正的静默失败源 —— 下面的 case 末尾有兜底。
 #
 # 与 run-batch-pipeline.sh 的关系：
 #   本脚本提交**单个阶段**，适合排查与重跑；
@@ -35,6 +45,12 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/memory-guard.sh"
 
 STAGE="ods"
 
+#: 允许的阶段（与 run-batch-pipeline.sh 的 STAGES 一一对应）。
+#: 用数组而不是在 case 里手写正则：这样"白名单"只有一处，
+#: 且下面的 case 兜底会再核对一次（两道防线，见文件头说明）。
+KNOWN_STAGES=(ods archive dwd dws ads traffic-dwd traffic-dws traffic-ads
+              reconcile traffic-reconcile iceberg-migrate)
+
 parse_args() {
     while [ "$#" -gt 0 ]; do
         case "$1" in
@@ -44,18 +60,16 @@ parse_args() {
                     log_error "--stage 缺少参数"
                     exit 2
                 fi
-                case "${STAGE}" in
-                    ods|archive|iceberg-migrate|dwd|dws|ads|reconcile) ;;
-                    *)
-                        log_error "未知阶段：${STAGE}（可选 ods|archive|iceberg-migrate|dwd|dws|ads|reconcile）"
-                        printf '  提示：需要一次跑完请用 bash scripts/run-batch-pipeline.sh\n'
-                        exit 2
-                        ;;
-                esac
+                if ! printf '%s\n' "${KNOWN_STAGES[@]}" | grep -qx "${STAGE}"; then
+                    log_error "未知阶段：${STAGE}"
+                    log_error "  可选： ${KNOWN_STAGES[*]}"
+                    printf '  提示：需要一次跑完请用 bash scripts/run-batch-pipeline.sh\n'
+                    exit 2
+                fi
                 shift 2
                 ;;
             -h|--help)
-                sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+                sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
                 exit 0
                 ;;
             *)
@@ -69,10 +83,14 @@ parse_args() {
 STAGE_DESC_ods="MySQL → ODS（Spark JDBC 抽取，作业内逐表对账）"
 STAGE_DESC_archive="Kafka 行为事件 → ODS（Sprint 4 新增，补齐流量域离线源）"
 STAGE_DESC_iceberg_migrate="Parquet → Iceberg 迁移（Sprint 5；含逐表行数与金额核对）"
-STAGE_DESC_dwd="ODS → DWD（去重 / 清洗 / 维度补全）"
-STAGE_DESC_dws="DWD → DWS（按天轻度聚合）"
-STAGE_DESC_ads="DWD → ADS（指标口径，1 分钟 + 1 天）"
-STAGE_DESC_reconcile="实时 ADS ↔ 离线 ADS 逐窗口对账"
+STAGE_DESC_dwd="ODS → DWD（交易域：去重 / 清洗 / 维度补全）"
+STAGE_DESC_dws="DWD → DWS（交易域：按天轻度聚合）"
+STAGE_DESC_ads="DWD → ADS（交易域：指标口径，1 分钟 + 1 天）"
+STAGE_DESC_reconcile="实时 ADS ↔ 离线 ADS 逐窗口对账（交易域）"
+STAGE_DESC_traffic_dwd="ODS → DWD（流量域：行为事件明细，Sprint 5）"
+STAGE_DESC_traffic_dws="DWD → DWS（流量域：按天总览 + 行为漏斗，Sprint 5）"
+STAGE_DESC_traffic_ads="DWD → ADS（流量域：1 分钟 + 1 天，与实时侧同口径，Sprint 5）"
+STAGE_DESC_traffic_reconcile="实时 ADS ↔ 离线 ADS 逐窗口对账（流量域，含去重指标 uv，Sprint 5）"
 
 submit_stage() {
     case "${STAGE}" in
@@ -117,6 +135,42 @@ submit_stage() {
                 --conf "spark.doris.database=${DORIS_DATABASE:-ecommerce}" \
                 --conf "spark.doris.user=${DORIS_READONLY_USER:-agent_ro}" \
                 --conf "spark.doris.password=$(_spark_job_env_value API_DORIS_PASSWORD)"
+            ;;
+        traffic-dwd)
+            submit_spark_job "sprint5-build-traffic-dwd" \
+                "infrastructure/spark/jobs/build_traffic_dwd.py"
+            ;;
+        traffic-dws)
+            submit_spark_job "sprint5-build-traffic-dws" \
+                "infrastructure/spark/jobs/build_traffic_dws.py"
+            ;;
+        traffic-ads)
+            submit_spark_job "sprint5-build-traffic-ads" \
+                "infrastructure/spark/jobs/build_traffic_ads.py"
+            ;;
+        traffic-reconcile)
+            # 流量域对账：判据含去重指标 uv（逐窗口可比、窗口间不可加）
+            submit_spark_job "sprint5-reconcile-traffic-batch-realtime" \
+                "infrastructure/spark/jobs/reconcile_traffic_batch_realtime.py" \
+                --conf "spark.doris.host=${DORIS_FE_HOST:-doris-fe}" \
+                --conf "spark.doris.queryPort=${DORIS_FE_QUERY_PORT:-9030}" \
+                --conf "spark.doris.database=${DORIS_DATABASE:-ecommerce}" \
+                --conf "spark.doris.user=${DORIS_READONLY_USER:-agent_ro}" \
+                --conf "spark.doris.password=$(_spark_job_env_value API_DORIS_PASSWORD)"
+            ;;
+        # !! 兜底分支必须存在，而且必须**失败** !!
+        #
+        #   先例（Sprint 4 的 archive）：阶段加进了白名单，却漏加 case 分支。
+        #   结果 case 直接穿透、submit_stage 返回 0，
+        #   脚本打印「阶段 archive 执行成功」—— **一个什么都没做的阶段报告成功了**。
+        #   白名单（KNOWN_STAGES）与 case 是两份清单，它们会不同步；
+        #   兜底分支就是把"不同步"从静默成功变成大声失败的那道防线。
+        *)
+            log_error "阶段 ${STAGE} 没有对应的执行分支（submit_stage 的 case 缺项）"
+            log_error "  这是脚本缺陷，不是运行环境问题："
+            log_error "  它在 KNOWN_STAGES 白名单里，却没有实现，于是会静默地什么都不做。"
+            printf '  已实现的阶段： %s\n' "${KNOWN_STAGES[*]}"
+            return 1
             ;;
     esac
 }

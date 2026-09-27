@@ -79,3 +79,85 @@ COMMENT 'DWS-用户交易（按天 × 用户，只含可加指标）'
 PARTITIONED BY (part_dt STRING COMMENT '分区日期（= dt，离线调度按天覆盖）')
 STORED AS PARQUET
 LOCATION 's3a://lakehouse/warehouse/dws/trade_user_1d';
+
+-- ============================================================
+-- Sprint 5 — 流量域 DWS（新增）
+-- ============================================================
+--
+-- !! 口径以 sql/metadata/metrics.md 第 3 节为唯一权威 !!
+--   uv / pv / view_cnt / click_cnt / cart_cnt / favorite_cnt / buy_cnt
+--   全部沿用那里的定义，本文件不得另立口径。
+--
+-- !! 本层的核心口径约束：uv 是**去重指标**，跨窗口不可加 !!
+--   「天 UV」必须回到明细做 COUNT(DISTINCT user_id)，
+--   绝不能写成 SUM(分钟 uv) —— 同一用户在同一分钟的多个窗口出现时会被重复计数。
+--   实测证据在本项目里是可查的：19644 个分钟窗口的 uv 之和是 19999，
+--   而按天去重的真实用户数远小于这个数。
+--   因此：pv 与各行为计数（可加）可以从分钟表上卷，
+--         uv（去重）必须从 DWD 明细重算。
+--   这与交易域 dws_trade_overview_1d 里 order_user_cnt 的处理是同一条规则。
+-- ============================================================
+
+-- ------------------------------------------------------------
+-- DWS：流量总览 1 天（主题：流量）
+--
+-- 与实时侧 dws_traffic_overview_1m 同口径、同字段名（只差时间粒度）：
+--   实时   window_start 窗口 + pv/uv/各行为计数
+--   离线   dt 天        + pv/uv/各行为计数
+--   字段顺序也保持一致（pv 在 uv 之前），便于逐列对照。
+-- ------------------------------------------------------------
+CREATE EXTERNAL TABLE IF NOT EXISTS lakehouse.dws_traffic_overview_1d (
+    dt            STRING  COMMENT '统计日期',
+    pv            BIGINT  COMMENT '行为事件总数（可加，口径见 metrics.md 第 3 节）',
+    uv            BIGINT  COMMENT '去重用户数（**不可加**：跨窗口/跨天不能相加）',
+    view_cnt      BIGINT  COMMENT 'VIEW 次数（可加）',
+    click_cnt     BIGINT  COMMENT 'CLICK 次数（可加）',
+    cart_cnt      BIGINT  COMMENT 'CART 次数（可加）',
+    favorite_cnt  BIGINT  COMMENT 'FAVORITE 次数（可加）',
+    buy_cnt       BIGINT  COMMENT 'BUY 次数（可加）'
+)
+COMMENT 'DWS-流量总览（按天；与 dws_traffic_overview_1m 同口径）'
+PARTITIONED BY (part_dt STRING COMMENT '分区日期（= dt，离线调度按天覆盖）')
+STORED AS PARQUET
+LOCATION 's3a://lakehouse/warehouse/dws/traffic_overview_1d';
+
+-- ------------------------------------------------------------
+-- DWS：行为漏斗 1 天（主题：流量 × 漏斗）
+--
+-- !! 为什么还要一张漏斗表（SPRINT_5.md 第 3.4 节的设计）!!
+--   「漏斗逐级收窄」是本项目的一条数据正确性断言（AGENTS.md 8.2），
+--   而收窄关系只有在「同一维度上逐级可比」时才能被断言：
+--   总览表把 5 个计数平铺成列，收窄关系要靠人眼比；
+--   漏斗表把 VIEW→CLICK→CART→BUY 排成阶梯，收窄关系是**结构性**的。
+--
+-- !! 去重列与实时侧的差别，必须写明 !!
+--   实时侧 dws_traffic_overview_1m **只有** uv（窗口内去重用户数），
+--   没有"每类行为的去重人数"。因此本表的 *_user_cnt 是**离线新增的下钻维度**，
+--   它**不参与**批流对账（对账只比 ads_traffic_1m 里的 8 个可加量 + uv）。
+--   加它们的理由是它们真正有用（漏斗每步的真实人数），
+--   而不是为了"看起来更完整"。
+--
+--   uv 语义与总览表一致：当天所有行为事件的去重用户数。
+--   尖峰指标（如 click_user_cnt / view_user_cnt）用于判断"次数收窄"是不是
+--   由少数用户重复行为造成的 —— 只看次数会得出误导性结论。
+-- ------------------------------------------------------------
+CREATE EXTERNAL TABLE IF NOT EXISTS lakehouse.dws_traffic_funnel_1d (
+    dt              STRING  COMMENT '统计日期',
+    uv              BIGINT  COMMENT '当日去重用户数（= 总览表 uv，**不可加**）',
+    view_cnt        BIGINT  COMMENT 'VIEW 事件数（可加）',
+    click_cnt       BIGINT  COMMENT 'CLICK 事件数（可加）',
+    cart_cnt        BIGINT  COMMENT 'CART 事件数（可加）',
+    buy_cnt         BIGINT  COMMENT 'BUY 事件数（可加）',
+    favorite_cnt    BIGINT  COMMENT 'FAVORITE 事件数（可加；旁支，不在主漏斗链上）',
+    view_user_cnt   BIGINT  COMMENT '发生 VIEW 的去重用户数（离线新增下钻维度，不参与对账）',
+    click_user_cnt  BIGINT  COMMENT '发生 CLICK 的去重用户数（同上）',
+    cart_user_cnt   BIGINT  COMMENT '发生 CART 的去重用户数（同上）',
+    buy_user_cnt    BIGINT  COMMENT '发生 BUY 的去重用户数（同上）',
+    click_rate      DECIMAL(10,4) COMMENT '点击率 = click_cnt / view_cnt，分母为 0 时 NULL',
+    cart_rate       DECIMAL(10,4) COMMENT '加购率 = cart_cnt / click_cnt，分母为 0 时 NULL',
+    buy_rate        DECIMAL(10,4) COMMENT '购买转化率 = buy_cnt / cart_cnt，分母为 0 时 NULL'
+)
+COMMENT 'DWS-行为漏斗（按天；VIEW→CLICK→CART→BUY 阶梯）'
+PARTITIONED BY (part_dt STRING COMMENT '分区日期（= dt，离线调度按天覆盖）')
+STORED AS PARQUET
+LOCATION 's3a://lakehouse/warehouse/dws/traffic_funnel_1d';

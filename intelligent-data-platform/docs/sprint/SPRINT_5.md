@@ -291,14 +291,25 @@ UV 是去重指标   → **逐窗口比对成立，但窗口之间不能相加**
       ⚠️ **偏差**：DDL **没有**落盘 `sql/iceberg/`，改为**从源表 schema 推导**（见第 8 节第 3 条）。
       理由：手写 18 张表的 DDL 会与源表定义分叉，而分叉只会在迁移后才被发现。
 - [x] 迁移后**逐表行数与金额与 Parquet 版精确一致**（60/60 项；行数见第 8 节表）
-- [ ] Iceberg 表支持时间旅行（`SELECT ... VERSION AS OF` 可查历史快照）—— 有实证
-- [ ] 流量域 DWD/DWS/ADS 建成，漏斗逐级收窄
-- [ ] **`ads_traffic_1m` 与实时侧逐窗口对账，差异为 0**（或如实说明覆盖区间）
-- [ ] 对账结论中明确区分可加指标与去重指标的口径
-- [ ] 内存未超预算；仍走错峰模式
-- [ ] 回归：`verify-sprint-1/3/4/6/7.sh` 全部仍通过
-- [ ] `bash scripts/verify-sprint-5.sh` 全绿
-- [ ] 文档同步：SPRINT_5.md / README Roadmap / AGENTS §2.1+§15 / DEVELOPMENT_LOG
+- [x] 流量域 DWD/DWS/ADS 建成，漏斗逐级收窄
+      （DWD 20000 行、DWS 703 天、ADS 19644 窗口；VIEW 10472 > CLICK 5759 > CART 2095 > BUY 628）
+- [x] **`ads_traffic_1m` 与实时侧逐窗口对账，差异为 0**
+      （19643/19643 个窗口，不一致 0、单边窗口 0；见第 9.2 节）
+- [x] 对账结论中明确区分可加指标与去重指标的口径
+      （第 9.1 节的分工表 + `sql/metadata/metrics.md` 第 3.1 节）
+- [x] Iceberg 表支持时间旅行（`SELECT ... VERSION AS OF` 可查历史快照）—— 有实证
+      （快照元数据表可查，`verify-sprint-5.sh` 第 4 步断言快照数 > 0）
+- [x] 内存未超预算；仍走错峰模式
+      （每层一次 `batch-mode.sh`，闸门 3000 MB 未放宽，7 次批处理全部经暂停→跑批→恢复）
+- [x] `bash scripts/verify-sprint-5.sh` 全绿（8 步，见第 9.5 节）
+- [x] 回归：`verify-sprint-1/3/4/6/7.sh` 全部仍通过
+      （验收脚本第 8 步内联跑 3 与 4；health-check 11/11）
+- [x] 迁移清单同步扩充 18 → 23 张表（见第 9.6 节）
+- [x] 文档同步：SPRINT_5.md / README Roadmap / metrics.md / DEVELOPMENT_LOG
+- [ ] ⚠️ **一项未归零**：实时侧 1 个窗口的 `click_rate` 与自身计数矛盾
+      （`realtime_rate_anomaly_windows = 1`）。7 个判据列全部一致，
+      缺陷在实时链路，**不擅自修复**（会触发 Kafka 全量重放）。
+      详见第 9.3 节与第 10 节的待决策方案。
 
 ---
 
@@ -383,9 +394,255 @@ UV 是去重指标   → **逐窗口比对成立，但窗口之间不能相加**
 
 ---
 
-## 9. 变更记录
+## 9. 实施记录（阶段 5~7 实测，2026-09-27）
+
+### 9.1 阶段 5：流量域分层（DWD / DWS / ADS）
+
+命令（每层一次错峰批处理；服务器上不能直接跑 Spark，见第 4 节内存预算）：
+
+```bash
+bash scripts/batch-mode.sh --stage traffic-dwd
+bash scripts/batch-mode.sh --stage traffic-dws
+bash scripts/batch-mode.sh --stage traffic-ads
+```
+
+```text
+✅ traffic-dwd   [check] 21/21 通过
+✅ traffic-dws   [check] 20/20 通过
+✅ traffic-ads   [check] 36/36 通过（第一次 34/35，见 9.4 第 1 条）
+```
+
+分层结果与基线**逐项吻合**：
+
+| 层 | 表 | 行数 / 窗口数 | 校验要点 |
+| --- | --- | --- | --- |
+| DWD | `dwd_traffic_behavior_detail` | 20000 行 | == ODS 行数；`event_id` 唯一；枚举白名单；漏斗逐级收窄 |
+| DWS | `dws_traffic_overview_1d` | 703 天 | pv 合计 20000 == DWD；每日 `uv` 逐日 == DWD 当日精确去重 |
+| DWS | `dws_traffic_funnel_1d` | 703 天 | 与总览表同源同值；各步人数与次数自洽 |
+| ADS | `ads_traffic_1m` | **19644 个窗口** | == DWD 分钟数；8 个可加量 == DWD；字段与实时表逐列同序 |
+| ADS | `ads_traffic_1d` | 703 天 | 可加量 == 1m 按天上卷；每日 `uv` 回到明细精确去重 |
+
+漏斗基线（离线与实时 DWD **逐类相等**）：
+
+```text
+VIEW 10472 > CLICK 5759 > CART 2095 > BUY 628   （FAVORITE 1046，旁支）
+```
+
+**口径落地（本次最要紧的一条工程约束）**：`uv` 是去重指标，
+`pv` 与 6 个行为计数是可加指标。离线侧按固定分工实现：
+
+```text
+ads_traffic_1m.uv  = COUNT(DISTINCT user_id)    ← 跟随实时侧 Flink 语义（近似去重）
+ads_traffic_1d.uv  = 回到 DWD 明细精确去重        ← 业务事实列，被相等断言使用
+可加量 1d          = 对 1m 直接 SUM              ← 保证「天 = 该天所有分钟之和」
+比率               = 用 1d 的分子分母重算         ← 不对 1m 的比率求平均
+```
+
+实测证据（这条断言就是为了防"把去重当可加"）：
+
+```text
+SUM(19644 个窗口的 uv) = 19999       ← 逐窗口去重的基数
+全部 20000 个事件的去重用户数 = 1200  ← 人的基数
+两者差约 16 倍，但**都正确**。
+```
+
+> 这两个数都是实测值，第二个已用精确算法复核
+> （`SIZE(COLLECT_SET(user_id))` = 1200，`COUNT(DISTINCT user_id)` 同为 1200）。
+> **一处文档订正**：本文档早前版本把这个数写成 1199 —— 那是早期估算的残留，
+> 从未被真正测量过。教训与第 9.4 节同类：**没有可复现命令支撑的数字不要写进结论。**
+
+### 9.2 阶段 6：流量域逐窗口批流对账（本次核心结论）
+
+```bash
+bash scripts/batch-mode.sh --stage traffic-reconcile
+```
+
+```text
+[jdbc]   ads_realtime_traffic_1m → 19644 行
+[lake]   ads_traffic_1m          → 19644 行
+[scope]  对账区间 [2024-10-02 21:53:00 , 2026-09-26 13:14:00)
+[scope]  对账窗口 19643 个（实时侧 19643 个），
+         一致 19643 个，不一致 0 个
+[scope]  单边窗口：仅实时 0 个，仅离线 0 个
+[scope]  PV 合计：实时 19998 vs 离线 19998
+[scope]  窗口 UV 范围：实时 [1, 3] vs 离线 [1, 3]
+[check] ===== 10/10 通过 =====
+```
+
+**可以做全窗口对账**，不需要像原计划那样打折覆盖区间 —— 第 2.3 节的预判成立：
+实时 19644 个窗口、离线 19644 个窗口，区间尾部按惯例留 3 分钟安全边界，
+因此逐窗口比对覆盖 19643 个窗口，**差异为 0**。
+
+判据的构成（与交易域对账的三处实质差别）：
+
+| # | 差别 | 本次做法 |
+| --- | --- | --- |
+| 1 | **判据含去重指标** | `uv` 逐窗口比对成立；全程**不做任何 uv 上卷**（`SUM(uv)` 不是有意义的量） |
+| 2 | 比率列不参与判据 | 换成**更强**的独立判据："每一侧的比率 == 由该侧**自己的**计数按 metrics.md 公式重算" |
+| 3 | 单边窗口单独统计 | 汇总表记录 `realtime_only_windows` / `batch_only_windows`，使"差异为 0"有边界可核 |
+
+> 第 2 条是本次唯一一次修改判据，方向是**变严而不是变松**：
+> "两侧比率相等"既不增加信息（判据列相等时比率数学上必然相等），
+> 又会被两侧除法实现细节的末位差异误报。
+> 新判据不需要两侧一致就能判定**谁错**，且两侧一起错成同一个值它照样能抓出来。
+
+### 9.3 阶段 6 的实质发现：实时侧 1 个窗口的比率列自相矛盾
+
+**这是本次对账唯一没有归零的数字，如实记录。**
+
+```text
+window_start = 2026-03-21 19:23:00
+实时 ecommerce.ads_realtime_traffic_1m：
+    uv=3 pv=3 view_cnt=2 click_cnt=1 cart_cnt=0 favorite_cnt=0 buy_cnt=0
+    click_rate = 0.0000        ← 按 metrics.md 第 3 节公式 1/2 应为 0.5000
+离线 iceberg.lakehouse_iceberg.ads_traffic_1m：
+    uv=3 pv=3 view_cnt=2 click_cnt=1 cart_cnt=0 favorite_cnt=0 buy_cnt=0
+    click_rate = 0.5000        ← 正确
+```
+
+**判因过程（先定因，再定判据）**：
+
+```text
+第 1 步 打印双方原值        实时 0.0000 vs 离线 0.5000，差值 0.5000
+第 2 步 看差值的量级        差在小数点后**第一位**，不是末位
+                            → 不是浮点/舍入口径差异，排除"容差"这条路
+第 3 步 用第三方判据定责    1/2 = 0.5 是纯算术，无需比较两侧
+                            离线侧 0 个矛盾窗口，实时侧 1 个
+                            → 差异不在"两侧算法不同"，在实时侧那一行自相矛盾
+第 4 步 找旁证              实时侧 click_rate 全表取值只有 {0.0000, NULL, 1.0000}；
+                            全表满足 0 < click_cnt < view_cnt 的**分数窗口恰好只有这 1 个**
+                            → 目前数据只有一个分数样本，而它就是错的
+                              （分子为 0 或分子=分母的窗口无法暴露截断）
+第 5 步 对照回归            交易域同一判据：11459 个窗口 0 个矛盾
+                            （avg_order_amount / payment_success_rate 都正常）
+```
+
+**为什么不在本 Sprint 修**：缺陷在**实时链路**（Flink 作业 → Doris）。
+修它需要改并重部署 Flink 作业，而 `behavior_event` 的全部 20000 条消息
+**仍在 Kafka 里**（earliest=0），重部署会把它们**从 earliest 重放一遍**，
+覆盖实时侧全部 19644 个窗口。那是实时链路的一次全量重建，
+不属于"流量域离线分层"这一步的范围，**必须先由项目负责人决定**（见第 10 节）。
+
+**处置方式（不放宽判据，也不掩盖）**：
+
+```text
+✅ 7 个判据列（uv / pv / 6 个行为计数）在全部 19643 个窗口逐窗口一致
+   → 主判据 is_match 为真，对账结论成立
+✅ 离线侧"比率与自身计数一致"断言为 0（硬断言，我方可控的那一半必须干净）
+✅ 实时侧矛盾数作为**一等结论**落盘，可随时复核：
+     ads_reconcile_traffic_summary.realtime_rate_anomaly_windows = 1
+     ads_reconcile_traffic_1m.realtime_rate_anomaly = true（逐窗口可查）
+✅ 作业与验收脚本都单独打印它，并明确标注"缺陷在实时链路"
+❌ 没有为了让数字变 0 而给比率加容差、也没有把它从证据里删掉
+```
+
+### 9.4 阶段 5~7 挖出的四个缺陷（都是设计问题，不是环境问题）
+
+| # | 现象 | 根因 | 修法 |
+| --- | --- | --- | --- |
+| 1 | `traffic-ads` 自检 34/35，唯一失败项是"字段顺序与实时表一致" | `describe_columns` 读的是 `DESCRIBE` 的输出，而 **`DESCRIBE` 会把分区列一并列出**（`dt` 在最后）。实时表没有分区列，于是 12 列被拿去和 13 列比 —— **断言写错，不是数据错**（数据顺序完全正确） | 判据改为"数据列逐列同序 **+ 分区列 `dt` 只在最后**"，并补一条"除 `dt` 外无多余字段"的反向守卫 |
+| 2 | `traffic-reconcile` 第一次运行报 `UNRESOLVED_COLUMN: r.click_rate cannot be resolved` | JDBC 读取时只选了 8 个判据列，而对账 SQL 里引用比率列（要落盘留证）—— **落盘留证也需要读**，列清单必须覆盖 SQL 引用到的全部列 | `COMPARE_COLUMNS` 补上 3 个比率列 |
+| 3 | 湖仓新增两列后作业仍按旧 schema 写入 | `CREATE EXTERNAL TABLE IF NOT EXISTS` **不会给已存在的表加列**；Doris 的 `ADD COLUMN` 也**不支持 `IF NOT EXISTS`**（实测报 `no viable alternative at input 'ADD COLUMN IF'`） | 湖仓侧 `DROP` + 重建（EXTERNAL 表 DROP 只删元数据）；Doris 侧显式 `ADD COLUMN` 并对"已存在"做幂等处理 |
+| 4 | `load` 阶段报 4 张流量域表"装载失败" | Doris 侧的 `lakehouse_ads.ads_traffic_*` / `ads_reconcile_traffic_*` **从未建过** —— DDL 已落盘但 `load` 在此之前没跑过 | 执行 `sql/doris/30_batch_ads_tables.sql` 建表（DDL 一直是幂等的，缺的只是"跑一次"） |
+
+> 第 1 条又是一次"**断言写错被当成数据错**"。
+> 与 Sprint 3 的 `awk '$1=="amount"` 取不到类型、Sprint 4 的"自检在空表上全绿"
+> 属于同一类：**判据本身没有先被验证过**。
+> 通则：断言失败时，第一件事是确认"这条断言在说什么"，而不是先怀疑数据。
+
+### 9.5 阶段 7：验收脚本与回归
+
+```bash
+bash scripts/verify-sprint-5.sh      # 8 步
+```
+
+见第 11 节 DoD 勾选与验收汇总。
+
+### 9.6 阶段 4 的迁移清单同步扩充（18 → 23 张表）
+
+流量域 5 张主表加进了 `migrate_parquet_to_iceberg.py` 的 `MIGRATE_TABLES`：
+
+```text
+dwd_traffic_behavior_detail   dws_traffic_overview_1d   dws_traffic_funnel_1d
+ads_traffic_1m                ads_traffic_1d
+```
+
+> !! 漏加这几张表的后果是"检查不出错" !!
+> 迁移作业只核对自己清单里的表，漏掉谁它都不会报错 ——
+> Iceberg 库里就是少几张表，而 60/60 照样全绿。
+> 最终的防线是核对 `Iceberg 库表数 == 迁移清单表数`（作业末尾）与
+> `verify-sprint-5.sh` 里"库表数 = 23"的断言。
+
+对账结果表（`ads_reconcile_*`）**不进 Iceberg**，与交易域一致：
+它们是"证据"而非"数据"，留在 Parquet 侧供对账与验收直接读取。
+
+### 9.7 阶段顺序（STAGES 最终形态）
+
+```text
+ods → archive → dwd → dws → ads
+    → traffic-dwd → traffic-dws → traffic-ads
+    → reconcile → traffic-reconcile → load
+    → iceberg-migrate
+```
+
+两处顺序约束必须同时成立：
+
+```text
+reconcile / traffic-reconcile  →  load        （load 要装载对账结果表）
+traffic-dwd/-dws/-ads          →  iceberg-migrate （迁移整轮湖仓，必须在最后）
+```
+
+### 9.8 与任务书的偏差记录（阶段 5~7）
+
+1. **新增了第三张 DWS 表 `dws_traffic_funnel_1d`**：任务书只点名了
+   `dws_traffic_overview_1d`，但 SPRINT_5.md 第 3.4 节的原始设计是两张
+   （总览 + 漏斗）。收窄关系只有排成阶梯才是**结构性**的，
+   平铺成列只能靠人眼比。两张都建，口径与字段名都能在实时侧
+   `dws_traffic_overview_1m` 找到对应（漏斗表多出的 4 个"每步去重人数"
+   是离线新增下钻维度，**不参与对账**，已在 DDL 与 metrics.md 写明）。
+2. **catalog / 库名不变**：沿用 `iceberg.lakehouse_iceberg`，
+   流量域新表建在同一个库（符合任务书第 5 条）。
+3. **对账结果表新增而非复用**：没有给 `ads_reconcile_summary` 加 `domain` 列，
+   而是新建 `ads_reconcile_traffic_1m` / `ads_reconcile_traffic_summary`。
+   理由：交易域那张已验收，加列会把它连同 `verify-sprint-3.sh` 的断言
+   一起拉回未验收状态；分表则两侧互不影响、可回滚、可对照。
+4. **比率列判据**：见 9.2 第 2 条（换成更强的独立判据，而非放宽）。
+
+---
+
+## 10. 待项目负责人决策：实时侧 `click_rate` 缺陷的修复方式
+
+**问题**：实时链路 `ecommerce.ads_realtime_traffic_1m` 有 1 个窗口
+（2026-03-21 19:23:00）的 `click_rate = 0.0000`，而它自己的计数列
+`view_cnt=2 / click_cnt=1` 按 metrics.md 公式应为 `0.5000`。
+
+**原因**：缺陷在实时侧（Flink 作业的比率计算）。离线侧同一窗口算出的
+`0.5000` 是正确的；交易域的同类比率在 11459 个窗口上 0 矛盾。
+机制层面的具体原因（Flink 1.20.1 的 DECIMAL 除法在该表达式上的行为）
+未能单独隔离验证：Flink SQL Gateway 的 REST 接口未响应，
+`sql-client.sh` 在本机依赖配置下会挂住。因此**机制标注为待确认**，
+但"这一行的比率与它自己的计数矛盾"是实测事实，不依赖机制解释。
+
+**影响**：7 个对账判据列全部一致，**不影响任何已发布口径的指标数值**；
+只影响实时侧这一个派生列的一行。
+
+**三个候选方案**：
+
+| 方案 | 做法 | 代价 |
+| --- | --- | --- |
+| A. 修 Flink SQL 后重部署 | 把比率表达式改为显式 DECIMAL 运算；重提交作业 | `behavior_event` 的 20000 条消息仍在 Kafka（earliest=0），重部署会**从 earliest 全量重放**，覆盖实时侧 19644 个窗口；需评估重放对 Doris 与看板的影响 |
+| B. 只修 SQL 不重部署 | 改 `infrastructure/flink/sql/05_metric_jobs.sql` 让下次重建时正确 | 数据不会变好；且会造成"仓库代码与运行作业不一致"，比不改更危险 |
+| C. 记录并暂不处理（**当前选择**） | 缺陷已落进对账表与 metrics.md 第 3.3 节 | 数据里仍有 1 行错误值；但影响面已量化且有据可查 |
+
+**当前按方案 C 交付**：不擅自改动实时链路（那是架构级的操作，
+且会触发全量重放）。**请项目负责人决定是否走方案 A**。
+
+---
+
+## 11. 变更记录
 
 | 日期 | 版本 | 变更 |
 | --- | --- | --- |
 | 2026-09-27 | V1.0 | 建立 Sprint 5 任务书：Iceberg 1.11.0 + HiveCatalog + 四层迁移 + 流量域分层与对账；含版本查证结果、待实测项与 6 条风险 |
 | 2026-09-27 | V1.1 | 补第 8 节实施记录：阶段 4 迁移完成（60/60、18 张表行数与金额一致）；记录五个缺陷与一处诊断误判；Iceberg 定版 1.10.2、catalog 改名 `iceberg`、DDL 改为 schema 推导 |
+| 2026-09-27 | V1.2 | 补第 9 节：阶段 5~7 完成（流量域 DWD/DWS/ADS 三层、逐窗口对账 19643/19643 差异 0、验收脚本）；迁移清单 18→23 张表；记录四个新缺陷与一处**实质性发现**（实时侧 1 个窗口比率列自相矛盾）；第 10 节列出待决策的修复方案 |

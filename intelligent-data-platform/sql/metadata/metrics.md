@@ -1,7 +1,7 @@
 # 指标口径字典（Metrics Dictionary）
 
 > 项目：基于 Lakehouse 与 AI Agent 的批流一体智能数据分析平台
-> 版本：V1.1（Sprint 1 + Sprint 6 实现后同步）
+> 版本：V1.2（Sprint 5 流量域分层与批流对账后同步）
 > 状态：**唯一权威口径定义**
 >
 > 规则：**同一指标在全项目只能有一个定义。**
@@ -102,6 +102,96 @@ window_start = 11:32:00   gmv = 23616.00   order_cnt = 1   payment_cnt = ?
 > 这与「仅页面浏览」的狭义 PV 不同，是**有意选择**：
 > 行为埋点本身就是事件流，统一计数更便于与 DWD 对账。
 > 如需狭义 PV，请直接使用 `view_cnt`。
+
+### 3.1 可加 / 去重 / 派生：三类指标的运算规则（Sprint 5 补充）
+
+上表的指标**不是同一类东西**，运算规则完全不同。跨窗口、跨层级汇总时
+必须先看清它属于哪一类 —— 这是流量域最容易出错的地方：
+
+| 类别 | 字段 | 可以做什么 | **不可以**做什么 |
+| --- | --- | --- | --- |
+| **可加** | `pv` / `view_cnt` / `click_cnt` / `cart_cnt` / `favorite_cnt` / `buy_cnt` | 逐窗口比对；跨窗口/跨天直接 `SUM` 上卷 | — |
+| **去重** | `uv` | 逐窗口比对；要天粒度就**回到明细**重新去重 | **跨窗口相加**（`SUM(uv)` 不是任何有意义的量） |
+| **派生** | `click_rate` / `cart_rate` / `buy_rate` | 用「合计后的分子 / 合计后的分母」重算 | 对逐窗口比率求平均（先算比率再平均 = 口径错误） |
+
+**实测证据（本项目真实数据，可复核）**：
+
+```text
+SUM(19644 个窗口的 uv) = 19999        ← 逐窗口去重的基数
+全部 20000 个事件的去重用户数 = 1200   ← 人的基数
+两者相差约 16 倍，但**都正确** —— 它们是两个不同的定义。
+若把「天 UV」写成 SUM(分钟 uv)，会系统性偏大且看起来仍然合理
+（19999 < 20000 的 PV，不会有人怀疑），属于最难发现的口径错误。
+```
+
+> 上面两个数字都是**实测值**，且第二个已用精确算法复核：
+> `SIZE(COLLECT_SET(user_id))` = 1200、`COUNT(DISTINCT user_id)` = 1200
+> （Parquet 侧与 Iceberg 侧一致）。
+> 顺带一条教训：本项目文档里一度把这个数写成 **1199** ——
+> 那是一次早期估算的残留，**从未被真正测量过**，却因为"看起来像个真实数字"
+> 而在多处被引用。写入文档的数字必须能指回一条可复现的命令。
+
+因此离线侧的分工是固定的（见 `infrastructure/spark/sql/07_traffic_ads.sql`）：
+
+```text
+ads_traffic_1m.uv   = COUNT(DISTINCT user_id)      ← 跟随实时侧 Flink 的实现语义
+ads_traffic_1d.uv   = 回到 dwd 明细精确去重         ← 业务事实列，且被相等断言使用
+可加量 1d           = 对 1m 直接 SUM                ← 保证「天 = 该天所有分钟之和」
+比率                = 用 1d 的分子分母重算          ← 不对 1m 的比率求平均
+```
+
+> `ads_traffic_1m.uv` 用**近似**去重（`COUNT(DISTINCT)`）是**刻意的**，不是遗漏：
+> 它是参与批流对账的列，必须与实时侧 Flink 的同类实现保持同一语义，
+> 否则会因「算法不同」而对不上，且失败原因极难定位。
+> 与之相对，**用来做相等断言的去重**（DWS 的 `uv`、作业自检里的天数）
+> 一律用精确实现（`SIZE(COLLECT_SET(x))`）。
+
+### 3.2 流量域离线汇总表（Sprint 5 新增）
+
+| 表 | 粒度 | 说明 |
+| --- | --- | --- |
+| `iceberg.lakehouse_iceberg.dwd_traffic_behavior_detail` | 事件 | 行为事件明细（去重 `event_id` + 清洗 + `category_name` 补全） |
+| `iceberg.lakehouse_iceberg.dws_traffic_overview_1d` | 天 | 与实时侧 `dws_traffic_overview_1m` 同口径同字段名，只差粒度 |
+| `iceberg.lakehouse_iceberg.dws_traffic_funnel_1d` | 天 | 行为漏斗阶梯（VIEW→CLICK→CART→BUY）+ 各步去重人数 |
+| `iceberg.lakehouse_iceberg.ads_traffic_1m` | 分钟 | 与实时 `ecommerce.ads_realtime_traffic_1m` **同形**，用于逐窗口对账 |
+| `iceberg.lakehouse_iceberg.ads_traffic_1d` | 天 | 看板/报表用 |
+
+> `dws_traffic_funnel_1d` 里的 `view_user_cnt` / `click_user_cnt` /
+> `cart_user_cnt` / `buy_user_cnt` 是**离线新增的下钻维度**，
+> 实时侧没有对应列，因此**不参与批流对账**。
+> 加它们的理由是它们真正有用（漏斗每一步的真实人数，能区分
+> 「次数收窄」是人数减少还是少数用户重复行为），不是为了"看起来完整"。
+
+### 3.3 已知实时侧数据缺陷：单窗口 `click_rate`（Sprint 5 对账发现）
+
+Sprint 5 的流量域逐窗口对账发现**实时链路存在 1 个窗口的比率列与它自己的计数列矛盾**：
+
+```text
+window_start = 2026-03-21 19:23:00
+实时 ecommerce.ads_realtime_traffic_1m：
+    view_cnt = 2   click_cnt = 1   click_rate = 0.0000   ← 按本节公式应为 0.5000
+离线 iceberg.lakehouse_iceberg.ads_traffic_1m：
+    view_cnt = 2   click_cnt = 1   click_rate = 0.5000   ← 正确
+```
+
+**判定依据**（不是猜测）：本节的公式就是判据 —— `click_cnt / view_cnt = 1/2 = 0.5`。
+同一个判据在离线侧 0 个窗口不成立、在实时侧 1 个窗口不成立，
+说明差异不在「两侧算法不同」，而在实时侧那一行**自相矛盾**。
+
+**旁证**：实时侧 `click_rate` 的全表取值只有 `{0.0000, NULL, 1.0000}`，
+而全表满足 `0 < click_cnt < view_cnt` 的**分数窗口恰好只有这 1 个** ——
+即目前数据里只有一个分数样本，而它就是错的
+（分子为 0 或分子等于分母的窗口无法暴露截断）。
+
+**影响范围**：7 个对账判据列（`uv` / `pv` / 6 个行为计数）在全部
+19643 个窗口**逐窗口一致**，因此该缺陷**不影响任何已发布的指标口径**，
+只影响实时侧 `click_rate` 这一个派生列的一行。
+
+**处置**：对账作业把它作为**一等结论**落盘
+（`ads_reconcile_traffic_summary.realtime_rate_anomaly_windows` 与
+`ads_reconcile_traffic_1m.realtime_rate_anomaly`），**不阻断离线流水线** ——
+重跑离线一万次也改不了实时写下的那个值。
+修复需要在实时侧 Flink 作业中处理，见 `docs/sprint/SPRINT_5.md` 第 8 节。
 
 ---
 

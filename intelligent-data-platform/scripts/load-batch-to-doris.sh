@@ -73,6 +73,17 @@ TABLES=(
     "ads_batch_category_1d|warehouse/ads/batch_category_1d/|truncate|dt, category_name, order_cnt, order_user_cnt, gmv, total_quantity, avg_order_amount"
     "ads_reconcile_trade_1m|warehouse/ads/reconcile_trade_1m/|truncate|window_start, realtime_gmv, batch_gmv, diff_gmv, realtime_order_cnt, batch_order_cnt, diff_order_cnt, realtime_order_user_cnt, batch_order_user_cnt, diff_order_user_cnt, realtime_payment_cnt, batch_payment_cnt, diff_payment_cnt, realtime_payment_amount, batch_payment_amount, diff_payment_amount, realtime_payment_fail_cnt, batch_payment_fail_cnt, diff_payment_fail_cnt, realtime_refund_cnt, batch_refund_cnt, diff_refund_cnt, realtime_refund_amount, batch_refund_amount, diff_refund_amount, is_match, compared_at"
     "ads_reconcile_summary|warehouse/ads/reconcile_summary/|append|batch_id, compared_at, scope_start, scope_end, realtime_windows, batch_windows, matched_windows, mismatched_windows, first_mismatch_at, realtime_total_gmv, batch_total_gmv, is_pass"
+    # ---- Sprint 5：流量域（3 张结果表 + 1 张对账汇总）----
+    #
+    # !! 为什么流量域只装 ADS 而不装 DWS !!
+    #   装载的目的是"给只读服务/看板/Agent 一个可查的离线结果面"。
+    #   看板要的是分钟曲线与天汇总，都在 ADS；
+    #   DWS 是建模过程的中间产物，留在湖仓里由 Spark SQL 查更合适。
+    #   这与交易域的做法一致（交易域的 3 张 DWS 表也没有进 lakehouse_ads）。
+    "ads_traffic_1m|warehouse/ads/traffic_1m/|truncate|window_start, window_end, uv, pv, view_cnt, click_cnt, cart_cnt, favorite_cnt, buy_cnt, click_rate, cart_rate, buy_rate"
+    "ads_traffic_1d|warehouse/ads/traffic_1d/|truncate|dt, uv, pv, view_cnt, click_cnt, cart_cnt, favorite_cnt, buy_cnt, click_rate, cart_rate, buy_rate"
+    "ads_reconcile_traffic_1m|warehouse/ads/reconcile_traffic_1m/|truncate|window_start, realtime_uv, batch_uv, diff_uv, realtime_pv, batch_pv, diff_pv, realtime_view_cnt, batch_view_cnt, diff_view_cnt, realtime_click_cnt, batch_click_cnt, diff_click_cnt, realtime_cart_cnt, batch_cart_cnt, diff_cart_cnt, realtime_favorite_cnt, batch_favorite_cnt, diff_favorite_cnt, realtime_buy_cnt, batch_buy_cnt, diff_buy_cnt, realtime_click_rate, batch_click_rate, diff_click_rate, realtime_cart_rate, batch_cart_rate, diff_cart_rate, realtime_buy_rate, batch_buy_rate, diff_buy_rate, is_match, realtime_rate_anomaly, batch_rate_anomaly, compared_at"
+    "ads_reconcile_traffic_summary|warehouse/ads/reconcile_traffic_summary/|append|batch_id, compared_at, scope_start, scope_end, realtime_windows, batch_windows, realtime_only_windows, batch_only_windows, matched_windows, mismatched_windows, first_mismatch_at, realtime_min_uv, realtime_max_uv, batch_min_uv, batch_max_uv, realtime_total_pv, batch_total_pv, realtime_rate_anomaly_windows, batch_rate_anomaly_windows, is_pass"
 )
 
 log_stage() { printf '\n%b\n' "${C_BOLD}$*${C_RESET}"; }

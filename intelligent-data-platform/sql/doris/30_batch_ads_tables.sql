@@ -189,3 +189,154 @@ PROPERTIES (
     "replication_num" = "1",
     "enable_unique_key_merge_on_write" = "true"
 );
+
+-- ============================================================
+-- Sprint 5 — 流量域离线指标 + 对账结果在 Doris 侧的落地
+-- ============================================================
+--
+-- 数据来源：湖仓 lakehouse.ads_traffic_1m / ads_traffic_1d /
+--           ads_reconcile_traffic_* 的 Parquet（MinIO）
+--   → Doris S3() TVF 直读装载（见 scripts/load-batch-to-doris.sh）
+--
+-- 字段与实时表的对应关系（对账的前提，二者必须逐字段同形）：
+--   lakehouse_ads.ads_traffic_1m ↔ ecommerce.ads_realtime_traffic_1m
+--   字段名 / 类型 / **顺序**都一致（含 uv/pv 的先后顺序）。
+--
+-- !! 空值约定（与 metrics.md 第 3 节、实时链路一致）!!
+--   可加指标（pv / 各行为计数）无事件时为 0，不是 NULL；
+--   比率指标（click_rate / cart_rate / buy_rate）分母为 0 时为 NULL。
+--   实时表用的是 DATETIME NOT NULL 的 key + 可空的值列，
+--   这里保持一致，否则同一个窗口的 NULL 形态不同会被对账当成差异。
+-- ============================================================
+
+-- ------------------------------------------------------------
+-- 离线流量（1 分钟，与实时表同形）
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS lakehouse_ads.ads_traffic_1m (
+    `window_start`  DATETIME      NOT NULL COMMENT '窗口开始（事件时间）',
+    `window_end`    DATETIME      NOT NULL COMMENT '窗口结束（事件时间）',
+    `uv`            BIGINT                 COMMENT '去重用户数（跨窗口不可加）',
+    `pv`            BIGINT                 COMMENT '行为事件总数（可加）',
+    `view_cnt`      BIGINT                 COMMENT 'VIEW 次数（可加）',
+    `click_cnt`     BIGINT                 COMMENT 'CLICK 次数（可加）',
+    `cart_cnt`      BIGINT                 COMMENT 'CART 次数（可加）',
+    `favorite_cnt`  BIGINT                 COMMENT 'FAVORITE 次数（可加）',
+    `buy_cnt`       BIGINT                 COMMENT 'BUY 次数（可加）',
+    `click_rate`    DECIMAL(10,4)          COMMENT '点击率 = click/view，分母为0时 NULL',
+    `cart_rate`     DECIMAL(10,4)          COMMENT '加购率 = cart/click，分母为0时 NULL',
+    `buy_rate`      DECIMAL(10,4)          COMMENT '购买转化率 = buy/cart，分母为0时 NULL'
+)
+UNIQUE KEY(`window_start`)
+DISTRIBUTED BY HASH(`window_start`) BUCKETS 3
+PROPERTIES (
+    "replication_num" = "1",
+    "enable_unique_key_merge_on_write" = "true"
+);
+
+-- ------------------------------------------------------------
+-- 离线流量（1 天）
+--
+-- !! uv 是去重指标：本表按天去重，**不可**由 ads_traffic_1m 的 uv 相加得到 !!
+--   湖仓侧的 1d 表是从明细精确去重产出的（见 07_traffic_ads.sql）。
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS lakehouse_ads.ads_traffic_1d (
+    `dt`            DATE          NOT NULL COMMENT '统计日期',
+    `uv`            BIGINT                 COMMENT '当日去重用户数（不可加）',
+    `pv`            BIGINT                 COMMENT '当日行为事件总数（可加）',
+    `view_cnt`      BIGINT                 COMMENT 'VIEW 次数（可加）',
+    `click_cnt`     BIGINT                 COMMENT 'CLICK 次数（可加）',
+    `cart_cnt`      BIGINT                 COMMENT 'CART 次数（可加）',
+    `favorite_cnt`  BIGINT                 COMMENT 'FAVORITE 次数（可加）',
+    `buy_cnt`       BIGINT                 COMMENT 'BUY 次数（可加）',
+    `click_rate`    DECIMAL(10,4)          COMMENT '点击率',
+    `cart_rate`     DECIMAL(10,4)          COMMENT '加购率',
+    `buy_rate`      DECIMAL(10,4)          COMMENT '购买转化率'
+)
+UNIQUE KEY(`dt`)
+DISTRIBUTED BY HASH(`dt`) BUCKETS 3
+PROPERTIES (
+    "replication_num" = "1",
+    "enable_unique_key_merge_on_write" = "true"
+);
+
+-- ------------------------------------------------------------
+-- 批流对账结果（流量域，1 分钟，逐窗口差异留痕）
+--
+-- 与交易域对账表分表存放：交易域那张已验收，加一个域列会把它拉回未验收状态。
+-- 见 sql/hive/05_reconcile_tables.sql 的说明。
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS lakehouse_ads.ads_reconcile_traffic_1m (
+    `window_start`           DATETIME      NOT NULL COMMENT '窗口开始（事件时间）',
+    `realtime_uv`            BIGINT                 COMMENT '实时链路 UV',
+    `batch_uv`               BIGINT                 COMMENT '离线链路 UV',
+    `diff_uv`                BIGINT                 COMMENT 'UV 差异（离线 - 实时）',
+    `realtime_pv`            BIGINT                 COMMENT '实时链路 PV',
+    `batch_pv`               BIGINT                 COMMENT '离线链路 PV',
+    `diff_pv`                BIGINT                 COMMENT 'PV 差异',
+    `realtime_view_cnt`      BIGINT                 COMMENT '实时 VIEW 次数',
+    `batch_view_cnt`         BIGINT                 COMMENT '离线 VIEW 次数',
+    `diff_view_cnt`          BIGINT                 COMMENT 'VIEW 差异',
+    `realtime_click_cnt`     BIGINT                 COMMENT '实时 CLICK 次数',
+    `batch_click_cnt`        BIGINT                 COMMENT '离线 CLICK 次数',
+    `diff_click_cnt`         BIGINT                 COMMENT 'CLICK 差异',
+    `realtime_cart_cnt`      BIGINT                 COMMENT '实时 CART 次数',
+    `batch_cart_cnt`         BIGINT                 COMMENT '离线 CART 次数',
+    `diff_cart_cnt`          BIGINT                 COMMENT 'CART 差异',
+    `realtime_favorite_cnt`  BIGINT                 COMMENT '实时 FAVORITE 次数',
+    `batch_favorite_cnt`     BIGINT                 COMMENT '离线 FAVORITE 次数',
+    `diff_favorite_cnt`      BIGINT                 COMMENT 'FAVORITE 差异',
+    `realtime_buy_cnt`       BIGINT                 COMMENT '实时 BUY 次数',
+    `batch_buy_cnt`          BIGINT                 COMMENT '离线 BUY 次数',
+    `diff_buy_cnt`           BIGINT                 COMMENT 'BUY 差异',
+    `realtime_click_rate`    DECIMAL(10,4)          COMMENT '实时点击率（派生量，仅留证）',
+    `batch_click_rate`       DECIMAL(10,4)          COMMENT '离线点击率（派生量，仅留证）',
+    `diff_click_rate`        DECIMAL(10,4)          COMMENT '点击率差异',
+    `realtime_cart_rate`     DECIMAL(10,4)          COMMENT '实时加购率（派生量，仅留证）',
+    `batch_cart_rate`        DECIMAL(10,4)          COMMENT '离线加购率（派生量，仅留证）',
+    `diff_cart_rate`         DECIMAL(10,4)          COMMENT '加购率差异',
+    `realtime_buy_rate`      DECIMAL(10,4)          COMMENT '实时购买转化率（派生量，仅留证）',
+    `batch_buy_rate`         DECIMAL(10,4)          COMMENT '离线购买转化率（派生量，仅留证）',
+    `diff_buy_rate`          DECIMAL(10,4)          COMMENT '购买转化率差异',
+    `is_match`               BOOLEAN                COMMENT '本窗口是否完全一致（判据：uv/pv/6 个行为计数）',
+    `realtime_rate_anomaly`  BOOLEAN                COMMENT '实时侧比率列与自身计数矛盾的标记（数据缺陷，应为 false）',
+    `batch_rate_anomaly`     BOOLEAN                COMMENT '离线侧比率列与自身计数矛盾的标记（应为 false）',
+    `compared_at`            DATETIME               COMMENT '对账执行时间'
+)
+UNIQUE KEY(`window_start`)
+DISTRIBUTED BY HASH(`window_start`) BUCKETS 3
+PROPERTIES (
+    "replication_num" = "1",
+    "enable_unique_key_merge_on_write" = "true"
+);
+
+-- ------------------------------------------------------------
+-- 批流对账汇总（流量域，追加式：保留历史批次，**不 TRUNCATE**）
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS lakehouse_ads.ads_reconcile_traffic_summary (
+    `batch_id`              VARCHAR(64)   NOT NULL COMMENT '对账批次标识',
+    `compared_at`           DATETIME               COMMENT '对账执行时间',
+    `scope_start`           DATETIME               COMMENT '对账区间起点',
+    `scope_end`             DATETIME               COMMENT '对账区间终点',
+    `realtime_windows`      BIGINT                 COMMENT '区间内实时侧窗口数',
+    `batch_windows`         BIGINT                 COMMENT '区间内离线侧窗口数',
+    `realtime_only_windows` BIGINT                 COMMENT '仅实时侧有的窗口数',
+    `batch_only_windows`    BIGINT                 COMMENT '仅离线侧有的窗口数',
+    `matched_windows`       BIGINT                 COMMENT '一致窗口数',
+    `mismatched_windows`    BIGINT                 COMMENT '不一致窗口数',
+    `first_mismatch_at`     DATETIME               COMMENT '首个不一致窗口',
+    `realtime_min_uv`       BIGINT                 COMMENT '实时侧窗口 UV 最小值',
+    `realtime_max_uv`       BIGINT                 COMMENT '实时侧窗口 UV 最大值',
+    `batch_min_uv`          BIGINT                 COMMENT '离线侧窗口 UV 最小值',
+    `batch_max_uv`          BIGINT                 COMMENT '离线侧窗口 UV 最大值',
+    `realtime_total_pv`     BIGINT                 COMMENT '实时侧 PV 合计',
+    `batch_total_pv`        BIGINT                 COMMENT '离线侧 PV 合计',
+    `realtime_rate_anomaly_windows` BIGINT         COMMENT '实时侧"比率与自身计数矛盾"的窗口数（数据缺陷计数）',
+    `batch_rate_anomaly_windows`    BIGINT         COMMENT '离线侧同上的窗口数（应为 0）',
+    `is_pass`               BOOLEAN                COMMENT '总体是否通过'
+)
+UNIQUE KEY(`batch_id`)
+DISTRIBUTED BY HASH(`batch_id`) BUCKETS 3
+PROPERTIES (
+    "replication_num" = "1",
+    "enable_unique_key_merge_on_write" = "true"
+);

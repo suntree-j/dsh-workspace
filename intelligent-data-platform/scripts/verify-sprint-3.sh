@@ -113,21 +113,29 @@ doris_scalar() { doris_q -B -N <<< "$1" | tail -1; }
 step_tables() {
     section "1/8 表清单（湖仓四层 + Doris 离线库）"
 
-    local tables dwd dws ads
+    local tables
     tables="$(sql_text "SHOW TABLES IN lakehouse;")"
 
-    count_in() { printf '%s\n' "${tables}" | grep -cE "^$1" || true; }
-
-    dwd="$(count_in 'dwd_')"
-    dws="$(count_in 'dws_')"
-    ads="$(count_in 'ads_')"
-    local ods
-    ods="$(count_in 'ods_')"
-
-    check "ODS 层表数" "5" "${ods}"
-    check "DWD 层表数" "5" "${dwd}"
-    check "DWS 层表数" "3" "${dws}"
-    check "ADS 层表数（含对账表）" "6" "${ads}"
+    # !! 断言从"层内表数 == N"改为"层内**期望的表逐一点名都在**" !!
+    #
+    #   为什么改（Sprint 5 实测踩到的回归）：
+    #     原断言写的是 ODS 5 / DWD 5 / DWS 3 / ADS 6 —— 那是 Sprint 3 当时的规模。
+    #     Sprint 5 往同一批分层里加了流量域 5 张表后，这里立刻变成
+    #     6 / 6 / 5 / 10 而全部报 FAIL —— 但**交易域的表一张都没少**，
+    #     数据也完全正确。也就是说：报的失败与真正的不变量（"Sprint 3 建的表还在"）
+    #     不是一回事，属于**断言写错**，跟 Sprint 5 那两次"过滤器吃掉真数据"
+    #     是同一类问题的另一个面。
+    #
+    #   而且"Sprint 3 的验收要盯住 Sprint 3 建的东西"才是它的职责：
+    #     后续 Sprint 往同层加表是**正常演进**，不该让这个脚本变红；
+    #     反过来，交易域哪张表真丢了，必须立刻红 —— 逐名核对正好做到这一点。
+    #
+    #   注意：数量仍然打印出来（供人看规模），只是不再当判据。
+    local layer
+    for layer in ods dwd dws ads; do
+        printf '     %s 层表数（参考）： %s\n' "${layer}" \
+            "$(printf '%s\n' "${tables}" | grep -cE "^${layer}_" || true)"
+    done
 
     # 关键表逐一点名（防止"数量对了但缺的是要紧那张"）
     local t missing=0
@@ -139,11 +147,20 @@ step_tables() {
              ads_batch_category_1d ads_reconcile_trade_1m ads_reconcile_summary; do
         printf '%s\n' "${tables}" | grep -qx "${t}" || { missing=$(( missing + 1 )); log_warn "缺少表：lakehouse.${t}"; }
     done
-    check "湖仓关键表齐全" "0" "${missing}"
+    check "湖仓关键表齐全（Sprint 3 建的表一张不少）" "0" "${missing}"
 
+    # Doris 离线库：同样改为逐名核对（原为"表数 == 6"，Sprint 5 加表后即失效）
     local doris_tables
     doris_tables="$(doris_q -B -N -e "SHOW TABLES FROM ${DORIS_DB};" | tr -d '\r')"
-    check "Doris ${DORIS_DB} 表数" "6" "$(printf '%s\n' "${doris_tables}" | grep -c . || true)"
+    local d_missing=0
+    for t in ads_batch_trade_1m ads_batch_trade_1d ads_batch_category_1m \
+             ads_batch_category_1d ads_reconcile_trade_1m ads_reconcile_summary; do
+        printf '%s\n' "${doris_tables}" | grep -qx "${t}" \
+            || { d_missing=$(( d_missing + 1 )); log_warn "Doris 缺少表：${DORIS_DB}.${t}"; }
+    done
+    check "Doris ${DORIS_DB} 关键表齐全" "0" "${d_missing}"
+    printf '     Doris %s 表数（参考）： %s\n' "${DORIS_DB}" \
+        "$(printf '%s\n' "${doris_tables}" | grep -c . || true)"
 }
 
 # ============================================================
