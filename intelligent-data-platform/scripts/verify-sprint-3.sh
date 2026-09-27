@@ -10,8 +10,9 @@
 #   1. 表清单      湖仓四层表齐全（DWD 5 / DWS 3 / ADS 6），Doris 侧离线库表齐全
 #   2. 层间行数    DWD == ODS（逐表）；ADS 分钟表窗口数自洽
 #   3. 类型正确    金额一律 decimal(18,2)，四层不得出现 double/float
-#   4. 幂等        重跑 ADS 层后行数与合计不变
-#   5. 批流对账    ads_reconcile_summary 最近批次 is_pass = true、不一致窗口 = 0
+#   4. 幂等        重跑 ADS 层后行数与合计不变（两侧都必须真的取到值）
+#   5. 批流对账    **本次运行**产生的对账批次 is_pass = true、不一致窗口 = 0
+#                  （按本次运行的起始时刻为下界过滤；历史批次不能冒充本次）
 #   6. 服务装载    Doris lakehouse_ads 行数 == 湖仓，且只读账号可查
 #   7. 回归        实时链路 health-check 通过、数据服务 /health 正常
 #   8. 自动化测试  pytest（单元 + 离线冒烟）
@@ -73,6 +74,30 @@ lake_scalar() {
     local out
     out="$(sql "$1" | grep -E '^[0-9]+(\.[0-9]+)?$' | tail -1 || true)"
     printf '%s' "${out:-0}"
+}
+
+# ------------------------------------------------------------
+# !! 为什么还需要一个 lake_scalar_strict（Sprint 13A 修复 3 的关键）!!
+#
+#   `lake_scalar` 的 `${out:-0}` 让"查询失败"与"结果就是 0"**返回值完全相同**。
+#   于是任何形如
+#       a="$(lake_scalar ...)"; b="$(lake_scalar ...)"; check "..." "$a" "$b"
+#   的断言，在两次查询都失败时都会变成 `0 = 0` → [ OK ]。
+#   这正是本脚本第 4 步（幂等）原来的假通过机制。
+#
+#   ⚠️ 只加"空值守卫"是**修不好的** —— 因为 lake_scalar **永远不会返回空**：
+#      我第一次的改法写的是 `if [ -z "${before_rows}" ]`，以为拦住了，
+#      实测却依然报 OK（见对话记录里的反证实验②）。判据必须落在
+#      "查询到底有没有成功"上，而不是"结果字符串长什么样"。
+#      **一个永远不返回空的函数，用判空是拦不住它的。**
+#
+#   所以这里提供一个**不兜底**的版本：取不到值就返回空串，
+#   让调用方自己决定"空"是失败还是合法值（`COUNT(*)` 的 0 是合法值）。
+#   对照：`verify-sprint-5.sh:126-131` 的 lake_scalar **本来就**不兜底，
+#   所以那边的空值守卫（`:262-265`）是有效的 —— 两个脚本原来的差别就在这里。
+# ------------------------------------------------------------
+lake_scalar_strict() {
+    sql "$1" | grep -E '^[0-9]+(\.[0-9]+)?$' | tail -1 || true
 }
 
 sql_text() {
@@ -264,8 +289,25 @@ step_idempotent() {
     section "4/8 幂等性（重跑 ADS 层，行数与合计不变）"
 
     local before_rows before_gmv after_rows after_gmv
-    before_rows="$(lake_scalar "SELECT COUNT(*) FROM lakehouse.ads_batch_trade_1m;")"
+    # 用 **strict** 版本取值：取不到就是空串，不会被兜底成 0。
+    # 这是本次修复的关键 —— 用 `lake_scalar` 的话，`${out:-0}` 会把
+    # "查询失败"与"结果就是 0"变成同一个返回值，下面的守卫永远不触发。
+    before_rows="$(lake_scalar_strict "SELECT COUNT(*) FROM lakehouse.ads_batch_trade_1m;")"
     before_gmv="$(lake_scalar "SELECT SUM(gmv) FROM lakehouse.ads_batch_trade_1m;")"
+
+    # !! 非空守卫：没有它，下面的 `check` 会在"查询失败"时误报 OK !!
+    #
+    #   机制（Sprint 13A 审计发现、本次实测复现）：
+    #     `lake_scalar` 把查询失败兜底成 `0`，两侧都失败就是 `0 = 0` → [ OK ]。
+    #     也就是"看起来验证了幂等，其实一次查询都没成功"。
+    #   判据用 `-z`（非空）而不是 `-gt 0`：
+    #   空表上的 `COUNT(*) = 0` 是**合法值**，"取不到"与"确实是 0"必须区分开。
+    if [ -z "${before_rows}" ]; then
+        printf '  %b %-46s %s\n' "${C_RED}[FAIL]${C_RESET}" "重跑前窗口数可读（防空值假通过）" "查询失败/取不到值"
+        DETAILS+=("幂等前置检查失败：COUNT(*) FROM lakehouse.ads_batch_trade_1m 取不到值（不是 0，是查询没成功）")
+        FAIL=$(( FAIL + 1 ))
+        return
+    fi
 
     log_info "重跑 ADS 层（build_ads.py）..."
     if ! bash "${REPO_ROOT}/scripts/submit-offline-job.sh" --stage ads > /tmp/verify-s3-idempotent.log 2>&1; then
@@ -275,8 +317,18 @@ step_idempotent() {
         return
     fi
 
-    after_rows="$(lake_scalar "SELECT COUNT(*) FROM lakehouse.ads_batch_trade_1m;")"
+    after_rows="$(lake_scalar_strict "SELECT COUNT(*) FROM lakehouse.ads_batch_trade_1m;")"
     after_gmv="$(lake_scalar "SELECT SUM(gmv) FROM lakehouse.ads_batch_trade_1m;")"
+
+    # 重跑之后同样要守卫：否则"重跑把表跑空了"会被读成 0 而与 before 不等 ——
+    # 这一侧恰好会 FAIL，但报出来的原因是"数字不等"，不是"表空了"。
+    # 排障方向会被带偏，所以显式判一次。
+    if [ -z "${after_rows}" ]; then
+        printf '  %b %-46s %s\n' "${C_RED}[FAIL]${C_RESET}" "重跑后窗口数可读" "查询失败/取不到值"
+        DETAILS+=("幂等后置检查失败：重跑后 COUNT(*) 取不到值，日志见 /tmp/verify-s3-idempotent.log")
+        FAIL=$(( FAIL + 1 ))
+        return
+    fi
 
     check "重跑后窗口数不变" "${before_rows}" "${after_rows}"
     check "重跑后 GMV 不变" "${before_gmv}" "${after_gmv}"
@@ -289,18 +341,59 @@ step_reconcile() {
     section "5/8 批流交叉对账（实时 Flink/Doris vs 离线 Spark/湖仓）"
 
     local row
+    # !! 必须绑定**本次运行**产生的批次，不能取"最新一批" !!
+    #
+    #   旧写法是 `ORDER BY compared_at DESC LIMIT 1` —— 它取的是"表里最新的一行"，
+    #   而**不是"这次验收跑出来的那一行"**。后果很具体：
+    #   当本次对账没有产出任何行时（例如 reconcile 阶段没跑、或它失败后
+    #   汇总表里还留着上次的行），这个查询会**照常返回历史批次**，
+    #   于是 `不一致 0 / is_pass=true` 全部变绿 —— 验收报告上写得漂漂亮亮，
+    #   而本次运行的结论根本不存在。这就是"历史 PASS 冒充本次 PASS"。
+    #
+    #   修法：以"本次运行开始时刻"为**下界**过滤。对账作业写入的
+    #   `compared_at` 是它自己 `datetime.now()` 的取值（见
+    #   `reconcile_batch_realtime.py:119,142`，batch_id 也由它派生），
+    #   因此本次批次必然 >= 本次运行起点；历史批次必然 < 下界。
+    #
+    #   ⚠️ 容差 3 秒：脚本起跑与 Spark 作业取时刻之间可能有亚秒级差值与
+    #   容器/宿主时钟的微小偏移，取 `now - 3s` 比取严格 `now` 稳。
+    #   代价是"3 秒内跑完的一次对账"理论上可能被上一批顶替 ——
+    #   实际不可能（对账作业本身要跑分钟级），这个取舍明确写在这里。
+    #
+    #   可用 `VERIFY_RECONCILE_BATCH_FLOOR` 覆盖下界，**仅用于对照实验**
+    #   （设成未来时刻即可证明：取不到本次批次时这一步会 FAIL，
+    #   而不是悄悄退回历史批次）。
+    local floor
+    if [ -n "${VERIFY_RECONCILE_BATCH_FLOOR:-}" ]; then
+        floor="${VERIFY_RECONCILE_BATCH_FLOOR}"
+        log_warn "使用外部指定的批次下界（对照实验用）：${floor}"
+    else
+        floor="$(date -d '3 seconds ago' '+%Y-%m-%d %H:%M:%S' 2>/dev/null \
+                 || date -v-3S '+%Y-%m-%d %H:%M:%S' 2>/dev/null \
+                 || echo '')"
+    fi
+
+    if [ -z "${floor}" ]; then
+        printf '  %b %-46s %s\n' "${C_RED}[FAIL]${C_RESET}" "批次下界可计算" "date 不支持 -d/-v（无法绑定本次批次）"
+        FAIL=$(( FAIL + 1 ))
+        DETAILS+=("无法计算本次运行的批次下界：本平台需 GNU date（Linux 服务器）")
+        return
+    fi
+
     row="$(sql_text "
         SELECT batch_id, compared_at, scope_start, scope_end,
                realtime_windows, batch_windows, matched_windows, mismatched_windows,
                first_mismatch_at, realtime_total_gmv, batch_total_gmv, is_pass
         FROM lakehouse.ads_reconcile_summary
+        WHERE compared_at >= TIMESTAMP '${floor}'
         ORDER BY compared_at DESC
         LIMIT 1;")"
 
     if [ -z "${row}" ]; then
-        printf '  %b %-46s 未找到对账结果\n' "${C_RED}[FAIL]${C_RESET}" "对账汇总存在"
+        printf '  %b %-46s %s\n' "${C_RED}[FAIL]${C_RESET}" "本次运行产生了对账批次" "无 compared_at >= ${floor} 的行"
         FAIL=$(( FAIL + 1 ))
-        DETAILS+=("对账汇总表为空：请先执行 bash scripts/run-batch-pipeline.sh --stage reconcile")
+        DETAILS+=("未找到本次运行（下界 ${floor}）产生的对账批次：对账可能没跑或失败。\
+这里**不会**退回历史批次 —— 历史 PASS 不能证明本次 PASS")
         return
     fi
 

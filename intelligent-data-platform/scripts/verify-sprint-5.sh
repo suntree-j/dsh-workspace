@@ -63,6 +63,12 @@ STEP_RESULTS=()
 DETAILS=()
 OVERALL=0
 
+# 汇总屏上"流量域对账： N 个窗口，不一致 M 个"的文本。
+# 由 `step_traffic_reconcile` 用**它自己已经断言过**的值填好，`summary()` 只负责打印 ——
+# 汇总屏不得另发一条查询获取"看起来一样"的数字（那既可能解析失败被吞成空串，
+# 也可能取到与本次核过的不是同一批）。看 `step_traffic_reconcile` 里的长注释。
+RECONCILE_SUMMARY_TEXT="<对账步骤未执行>"
+
 step_start() { STEP_NAMES+=("$1"); printf '\n%b\n' "${C_BOLD}$*${C_RESET}"; }
 step_record() {
     STEP_RESULTS+=("$2")
@@ -539,6 +545,28 @@ step_traffic_reconcile() {
     check_true "对账窗口数 > 0（防空区间假通过）" "实际 ${bw:-0} 个" \
         test "${bw:-0}" -gt 0
 
+    # !! 汇总屏上的那一行必须**复用这里已经核过的值**，不能另发一条查询 !!
+    #
+    #   旧写法（summary() 里）是：
+    #     lake_scalar 'SELECT CONCAT(batch_windows, " 个窗口，不一致 ", ...) FROM ...'
+    #   `lake_scalar` 的实参由**单引号**包裹，所以里面的 `"` 不会被 shell 剥掉，
+    #   会原样进入 Spark SQL —— 而 Spark 里 `"..."` 是**标识符定界符**（不是字符串
+    #   字面量），于是这条 CONCAT 解析失败；失败又被 `lake_scalar` 的
+    #   `grep | tail | || true` 吞成空串，最终打印成"流量域对账： "（窗口数没了）。
+    #   这就是典型的"看起来验证了，其实没验证"。
+    #
+    #   ★ 处置判断：这一行**是有效验收条件**（它要把"本次对账了几个窗口、
+    #     几个不一致"写进验收结论），所以**不能删**；正确做法是
+    #     ① 不再内嵌字符串字面量（改用 ASCII 分隔符 CONCAT_WS，同文件 :532 已是正确写法）；
+    #     ② 更根本地，**直接复用上面已经断言过的 bw/mm**，不再重复查一次表 ——
+    #        重复查询还会引入第二个问题：它自己 `ORDER BY compared_at DESC LIMIT 1`
+    #        取的是"表里最新一行"，与本次验收核过的值可能不是同一批。
+    if [ -z "${bw}" ] || [ -z "${mm}" ]; then
+        RECONCILE_SUMMARY_TEXT="<取不到对账汇总：${summary:-空}>"
+    else
+        RECONCILE_SUMMARY_TEXT="${bw} 个窗口，不一致 ${mm} 个"
+    fi
+
     # 全量覆盖：对账窗口数 == 两侧窗口总数（区间尾部留了 3 分钟安全边界，
     # 所以允许离线/实时各自少最后几行，但两侧的总数必须与汇总里的数吻合）
     local offline_total
@@ -600,7 +628,7 @@ step_evidence() {
     # ---- 6.3 比率列：换成"每一侧比率 == 由该侧自身计数按公式重算"的独立判据 ----
     #
     # !! 为什么不是"两侧比率相等" !!
-    #   比率是派生量，判据列（uv/pv/6 个计数）逐窗口相等时它数学上必然相等，
+    #   比率是派生量，判据列（uv/pv/5 个行为计数，共 7 列）逐窗口相等时它数学上必然相等，
     #   拿"两侧比率相等"当判据既不增加信息，又会被两侧除法实现细节的
     #   末位差异误报（假差异）。
     #   真正的判据是"每一侧的比率是否等于由它自己的计数算出的值" ——
@@ -866,8 +894,12 @@ main() {
     if [ "${FAIL}" -eq 0 ]; then
         printf '%b\n' "${C_GREEN}${C_BOLD} Sprint 5 验收通过${C_RESET}"
         printf '\n'
-        printf '  流量域对账： %s\n' \
-            "$(lake_scalar 'SELECT CONCAT(batch_windows, " 个窗口，不一致 ", mismatched_windows, " 个") FROM lakehouse.ads_reconcile_traffic_summary ORDER BY compared_at DESC LIMIT 1;')"
+        # 这一行的值来自 `step_traffic_reconcile` 已经断言过的 bw/mm（见那里的注释）——
+        # 旧写法在这里另发一条内嵌 `"..."` 的 Spark SQL，解析失败后被 `|| true`
+        # 静默吞成空串，最终打印成"流量域对账： "（窗口数消失），属于
+        # "看起来验证了、其实没有"。现在它**不可能**是空串：
+        # 取不到值时会打印明确的占位提示，而不是一个看起来正常的空行。
+        printf '  流量域对账： %s\n' "${RECONCILE_SUMMARY_TEXT}"
         printf '  逐窗口差异： lakehouse.ads_reconcile_traffic_1m\n'
         printf '  服务层可查： lakehouse_ads.ads_traffic_1m / ads_traffic_1d\n'
         printf '  看板：       %s/data/\n' "$(site_base)"
