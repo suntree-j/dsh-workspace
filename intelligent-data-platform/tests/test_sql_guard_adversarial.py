@@ -338,3 +338,158 @@ def test_missing_limit_is_added_for_aggregate_queries() -> None:
         f"SELECT COUNT(*) AS c FROM {GOOD_TABLE}", max_limit=200
     )
     assert result.endswith("LIMIT 200")
+
+
+# ============================================================
+# 7. FROM/JOIN 子句里的**逗号连接**（隐式 CROSS JOIN）—— 本 Sprint 修复的缺口
+# ============================================================
+BAD_TABLE = "ods_orders"
+
+
+def test_comma_joined_table_bypass_was_a_real_gap() -> None:
+    """!! 这条用例的历史必须保留，和 §4 的 reversed UNION 那条同样重要 !!
+
+    缺口（Sprint 13A 审计发现、线上复现）：
+        `_TABLE_RE` 只认 `FROM|JOIN` 关键字，**逗号后面的表永远不会被提取**；
+        而校验与血缘 `extract_tables` 共用该正则 —— 所以"没识别到"同时意味着
+        **没校验**（权限绕过）与**漏报血缘**（审计失真）。
+
+    线上铁证（2026-09-27）：
+        `SELECT id FROM ecommerce.test_connection LIMIT 3`            → REJECT TABLE_NOT_ALLOWED
+        `SELECT b.id FROM ecommerce.dwd_trade_order_detail a,
+                         ecommerce.test_connection b LIMIT 3`         → ALLOW + 返回真实数据，
+                                                                        血缘只报 ['dwd_trade_order_detail']
+
+    修法（`services/api/app/sqlguard.py`）：
+        表名提取改成"扫出 FROM 子句里的**逗号分隔项**"——
+        先按关键字定位 FROM / JOIN，再在该子句内按"表名（可带别名）+ 逗号"的
+        **表清单结构**推进；逗号只在"它前面是一个表项"时才算分隔符。
+        `SELECT a, b FROM t` 里的逗号是**列分隔**（前面不是表项），因此不受影响。
+
+    下面几条参数化用例把该缺口的四种写法固化成**正式断言**。
+    """
+    sql = f"SELECT a.order_id FROM {GOOD_TABLE} a, {BAD_TABLE} b"
+    # ① 血缘必须报出两张表（修复前只报一张）
+    assert extract_tables(sql) == [GOOD_TABLE, BAD_TABLE]
+    # ② 白名单必须拦住（修复前整条放行）
+    assert _rejected(sql).code == "TABLE_NOT_ALLOWED"
+
+
+@pytest.mark.parametrize(
+    ("name", "sql"),
+    [
+        (
+            "两表逗号连接",
+            f"SELECT a.order_id FROM {GOOD_TABLE} a, {BAD_TABLE} b WHERE a.id = b.id",
+        ),
+        (
+            "三表逗号连接（越权表在中间）",
+            f"SELECT 1 FROM {GOOD_TABLE} a, {BAD_TABLE} b, dim_user c",
+        ),
+        (
+            "三表逗号连接（越权表在最后）",
+            f"SELECT 1 FROM {GOOD_TABLE} a, dim_user b, {BAD_TABLE} c",
+        ),
+        (
+            "逗号连接 + 子查询里也有越权表",
+            f"SELECT 1 FROM {GOOD_TABLE} a, (SELECT id FROM {BAD_TABLE}) s",
+        ),
+        (
+            "换行写法的逗号连接",
+            f"SELECT 1\nFROM {GOOD_TABLE} a,\n     {BAD_TABLE} b\nWHERE 1 = 1",
+        ),
+        (
+            "多空格 / 制表符写法的逗号连接",
+            f"SELECT 1 FROM {GOOD_TABLE} a\t,\t\t{BAD_TABLE} b",
+        ),
+        (
+            "库名前缀 + 反引号的逗号连接",
+            f"SELECT 1 FROM `ecommerce`.`{GOOD_TABLE}` a, `ecommerce`.`{BAD_TABLE}` b",
+        ),
+        (
+            "越权表紧跟在 FROM 后的逗号连接",
+            f"SELECT 1 FROM {BAD_TABLE} a, {GOOD_TABLE} b",
+        ),
+    ],
+)
+def test_comma_joined_tables_are_extracted_and_rejected(name: str, sql: str) -> None:
+    """逗号连接的**每一种写法**都必须既报血缘、又拦得住。
+
+    为什么参数化到 8 种写法而不是只留一条：审计已经吃过一次教训 ——
+    `METADATA_PROBE` 的旧判据写成"按顺序匹配"，于是"同一件事换个语序"就绕过去了
+    （见 §4 的历史）。逗号连接同理：换行、制表符、库名前缀、
+    越权表放前面/中间/后面，任何一种没被覆盖，那种写法就是活的绕过口子。
+    """
+    tables = extract_tables(sql)
+    assert BAD_TABLE in tables, f"{name}：血缘漏报了 {BAD_TABLE}，实际 tables={tables}"
+    assert _rejected(sql).code == "TABLE_NOT_ALLOWED", f"{name}：未被白名单拦住"
+
+
+@pytest.mark.parametrize(
+    ("name", "sql"),
+    [
+        # 列分隔的逗号：绝不能当表名（"见逗号就当表"是最容易犯的过度拦截错误）
+        ("SELECT 列清单", f"SELECT order_id, user_id, gmv FROM {GOOD_TABLE}"),
+        ("SELECT 列清单 + 别名", f"SELECT order_id AS oid, gmv AS amount FROM {GOOD_TABLE}"),
+        ("GROUP BY 逗号列表", f"SELECT 1 FROM {GOOD_TABLE} GROUP BY order_id, user_id"),
+        ("ORDER BY 逗号列表", f"SELECT 1 FROM {GOOD_TABLE} ORDER BY order_id, gmv DESC"),
+        ("COUNT(DISTINCT) + 聚合", f"SELECT COUNT(DISTINCT user_id), SUM(gmv) FROM {GOOD_TABLE}"),
+        ("函数参数里的逗号", f"SELECT COALESCE(gmv, 0), IFNULL(user_id, 0) FROM {GOOD_TABLE}"),
+        ("子查询在 FROM 里 + 外层列清单", f"SELECT order_id, gmv FROM (SELECT * FROM {GOOD_TABLE}) t"),
+        ("子查询在 WHERE 里", f"SELECT 1 FROM {GOOD_TABLE} WHERE user_id IN (SELECT id FROM dim_user)"),
+    ],
+)
+def test_commas_outside_the_from_clause_are_not_tables(name: str, sql: str) -> None:
+    """反向用例（防**过度拦截**）：列分隔的逗号不能变成"表"。
+
+    !!! 这条与上面那条同等重要 !!!
+        "见逗号就当表"会把 `SELECT a, b FROM t` 里的 `b` 当成表名，
+        于是**所有**多列查询都变成 `TABLE_NOT_ALLOWED`。
+        这种守卫不会更难绕过，只会更快被人加白名单绕过 —— 最终真的不再拦任何东西。
+        所以：逗号只有在"它前面是一个**表项**"时才是表分隔符。
+    """
+    tables = extract_tables(sql)
+    assert all(t in ("dwd_trade_order_detail", "dim_user") for t in tables), (
+        f"{name}：逗号被误当成表名，tables={tables}"
+    )
+    # 放行必须仍然成立（这些查询全在白名单内）
+    validate_select(f"{sql} LIMIT 10" if "LIMIT" not in sql.upper() else sql, max_limit=10)
+
+
+@pytest.mark.parametrize(
+    ("name", "sql", "expected"),
+    [
+        (
+            "显式 INNER JOIN 两张白名单表",
+            f"SELECT 1 FROM {GOOD_TABLE} a JOIN dim_user b ON a.user_id = b.user_id",
+            [GOOD_TABLE, "dim_user"],
+        ),
+        (
+            "显式逗号连接两张白名单表（修复后必须仍放行）",
+            f"SELECT 1 FROM {GOOD_TABLE} a, dim_user b WHERE a.user_id = b.user_id",
+            [GOOD_TABLE, "dim_user"],
+        ),
+        (
+            "三张白名单表逗号连接",
+            f"SELECT 1 FROM {GOOD_TABLE} a, dim_user b, dim_product c",
+            [GOOD_TABLE, "dim_user", "dim_product"],
+        ),
+        (
+            "逗号连接 + WHERE 里再带一个白名单表",
+            f"SELECT 1 FROM {GOOD_TABLE} a, dim_user b WHERE a.product_id IN (SELECT product_id FROM dim_product)",
+            [GOOD_TABLE, "dim_user", "dim_product"],
+        ),
+    ],
+)
+def test_comma_and_explicit_joins_of_whitelisted_tables_still_pass(
+    name: str, sql: str, expected: list[str]
+) -> None:
+    """**正常查询必须仍放行，且血缘必须完整**（防过度拦截的正面断言）。
+
+    修复一个安全缺口最容易的副作用就是"顺手把合法用法也一起拦掉"。
+    这条用例专门盯住它：显式 JOIN 与逗号连接（表全在白名单内）都必须放行，
+    且 `extract_tables` 必须把**每一张**表都报出来（血缘完整）。
+    """
+    assert extract_tables(sql) == expected, f"{name}：血缘不完整"
+    result = validate_select(sql, max_limit=10)
+    assert result.endswith("LIMIT 10") or "LIMIT 10" in result, f"{name}：未补 LIMIT"

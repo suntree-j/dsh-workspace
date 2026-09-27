@@ -108,11 +108,44 @@ _FORBIDDEN_PATTERNS = (
      "METADATA_PROBE", "不允许通过 UNION 探测元数据"),
 )
 
-# 提取语句中出现的目标表：FROM / JOIN 后面的标识符。
+# 提取语句中出现的目标表：FROM / JOIN 后面的标识符，**以及 FROM 子句内逗号分隔的后续表**。
 # 需要支持 `库`.`表`、库.表、`表`、[表] 等写法 —— 少识别一种写法就等于少一道防线，
 # 因此这里把"标识符"拆成可重复的"点分片段"。
 _IDENT = r"(?:`[^`]+`|\"[^\"]+\"|\[[^\]]+\]|[A-Za-z_][\w$]*)"
-_TABLE_RE = re.compile(rf"\b(?:from|join)\s+({_IDENT}(?:\s*\.\s*{_IDENT})*)", re.I)
+
+# !! 为什么不能只用一条 `\b(?:from|join)\s+(表名)` 正则（Sprint 13A 修的真实缺口）!!
+#
+#   旧实现就是那一条正则。它只认 `FROM` / `JOIN` **关键字**，
+#   于是逗号连接（隐式 CROSS JOIN）里**第二张及以后的表永远不会被提取**：
+#
+#       SELECT b.id FROM ecommerce.dwd_trade_order_detail a,
+#                        ecommerce.test_connection b LIMIT 3
+#       → 旧实现 tables = ['dwd_trade_order_detail']  → 放行，且返回真实数据
+#
+#   而校验（`validate_select` 第 4 步）与血缘（`extract_tables`）**共用这套提取规则**，
+#   所以"没识别到"同时等于**没校验**（权限边界被绕过）与**漏报血缘**（审计失真）。
+#   线上铁证（2026-09-27）：单独查 `ecommerce.test_connection` → REJECT TABLE_NOT_ALLOWED；
+#   与白名单表逗号连接后 → ALLOW 且 row_count=3。对抗用例见
+#   `tests/test_sql_guard_adversarial.py` 第 7 节。
+#
+#   修法：**只在 FROM / JOIN 子句内部**按"表清单"的结构推进 ——
+#   一个表项（表名 + 可选别名）后面跟逗号，逗号后面又是表项，就继续。
+#   ⚠️ 关键是不能"见逗号就当表"：`SELECT a, b FROM t` 里的逗号是**列分隔**，
+#   它前面的 `b` 不是表项（前面没有 FROM/JOIN），因此不会被当成表。
+#   判据是结构位置，不是字符本身 —— 这也是"越权表放在第一个/中间/最后"
+#   三种写法能被同一条规则覆盖的原因。
+_TABLE_RE = re.compile(rf"({_IDENT}(?:\s*\.\s*{_IDENT})*)")
+
+# FROM 子句的结束标志：出现这些关键字说明表清单已经结束，逗号不再可能是表分隔符。
+# 说明：这里**有意只列"能跟在表清单后面"的子句与连接词**，靠"正向识别边界"而不是
+# "排除所有可能"—— 后者永远列不全（本项目在 METADATA_PROBE 上已经吃过一次同样的亏）。
+_CLAUSE_BOUNDARY = frozenset(
+    {
+        "where", "group", "order", "having", "limit", "union", "join", "inner",
+        "left", "right", "full", "outer", "cross", "natural", "straight_join",
+        "on", "using", "offset", "window", "qualify", "into", "for", "lateral",
+    }
+)
 
 # 提取 LIMIT 子句。
 # MySQL/Doris 有三种写法，必须分别处理（语义不同，混淆会把 offset 当 count）：
@@ -130,18 +163,105 @@ def _normalize_table(raw: str) -> str:
     return last.strip().strip("`\"[]")
 
 
+def _paren_depth(sql: str) -> list[int]:
+    """每个字符位置上的**括号嵌套深度**（depth[i] = 第 i 个字符之前的深度）。
+
+    为什么需要它：逗号在 SQL 里至少有三种含义 —— 列分隔、函数参数分隔、表分隔，
+    而"表分隔"只可能出现在**当前这一层**的 FROM 子句里。有了深度表，
+    才能回答"这个逗号与那个 FROM 是不是同一层"（子查询里的 FROM 要单独算）。
+    """
+    depths = [0] * (len(sql) + 1)
+    depth = 0
+    for index, char in enumerate(sql):
+        depths[index] = depth
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth = depth - 1 if depth > 0 else 0
+    depths[len(sql)] = depth
+    return depths
+
+
+def _skip_spaces(sql: str, index: int) -> int:
+    """跳过空白，返回下一个非空白字符的位置。"""
+    while index < len(sql) and sql[index].isspace():
+        index += 1
+    return index
+
+
+def _word_at(sql: str, index: int) -> str:
+    """取 `index` 处（或其后的空白之后）的**单词**（小写）；不是单词则返回空串。
+
+    用途：判断表项后面跟的是 `AS 别名` / 裸别名 / 子句关键字 / 逗号。
+    """
+    index = _skip_spaces(sql, index)
+    match = re.match(r"[A-Za-z_]\w*", sql[index:])
+    return match.group(0).lower() if match is not None else ""
+
+
 def extract_tables(sql: str) -> list[str]:
     """提取语句里引用的表名（去重、保持出现顺序）。
 
     用途：把"这段 SQL 读了哪些表"写进响应的血缘信息与审计日志。
-    与校验用的是同一个正则，保证"校验了什么"和"报告了什么"永远一致 ——
-    如果两者用不同规则，就可能出现"校验放行了 A 表、血缘却报告 B 表"。
+    与校验用的是**同一套提取规则**（`validate_select` 第 4 步直接调它），
+    保证"校验了什么"和"报告了什么"永远一致 —— 如果两者用不同规则，
+    就可能出现"校验放行了 A 表、血缘却报告 B 表"。
+
+    提取范围（两类，缺一不可）：
+        1. `FROM <表>` / `JOIN <表>` 后面紧跟的表名；
+        2. **同一个 FROM 子句里用逗号分隔的后续表**（隐式 CROSS JOIN）。
+           例：`FROM dwd_trade_order_detail a, ods_orders b` → 两张表都要报。
+           这是 Sprint 13A 修的权限绕过缺口，见文件上方 `_TABLE_RE` 处的长注释。
+
+    ⚠️ 逗号**只在"前面已经是一个表项"时才算表分隔符**：
+        `SELECT a, b FROM t` 里的逗号前面是列（不是表项），因此不产生表名。
+        "见逗号就当表"会让所有多列查询变成 `TABLE_NOT_ALLOWED` —— 那不是更安全，
+        而是更快被人加白名单绕过。反向用例见 `tests/test_sql_guard_adversarial.py` 第 7 节。
     """
     seen: list[str] = []
-    for match in _TABLE_RE.finditer(sql):
-        name = _normalize_table(match.group(1))
+    if not sql:
+        return seen
+
+    depths = _paren_depth(sql)
+
+    def _add(raw: str) -> None:
+        name = _normalize_table(raw)
         if name and name not in seen:
             seen.append(name)
+
+    for keyword in re.finditer(r"\b(?:from|join)\b", sql, re.I):
+        depth = depths[keyword.start()]
+        # 从关键字之后开始，按"表清单"的结构推进：表名 [别名] (, 表名 [别名])*
+        index = _skip_spaces(sql, keyword.end())
+        while True:
+            # 每一轮都先跳过空白：第一轮跳 `FROM` 与表名之间的，后续轮跳逗号与表名之间的。
+            index = _skip_spaces(sql, index)
+            match = _TABLE_RE.match(sql, index)
+            if match is None:
+                # 子查询（`FROM (SELECT ...)`）或写法无法识别 —— 停止本子句的推进，
+                # **绝不猜**：猜错的代价是"把列名当表名"（误杀）或"漏一张表"（放行）。
+                break
+            _add(match.group(1))
+            index = match.end()
+
+            # 跳过表别名：`AS t` 或裸 `t`；`FROM t WHERE ...` 这类没有别名。
+            # 判据是"这个单词在不在子句边界集合里"，因此 `FROM t WHERE ...`
+            # 不会把 `where` 当别名吃掉（那会让后面的逗号误判成表分隔符）。
+            index = _skip_spaces(sql, index)
+            word = _word_at(sql, index)
+            if word == "as":
+                index = _skip_spaces(sql, index + 2)
+                word = _word_at(sql, index)
+            if word and word not in _CLAUSE_BOUNDARY:
+                index += len(word)
+
+            # 表项之间必须是逗号，且这个逗号与 FROM 在**同一层括号**内；
+            # 括号内的逗号（函数参数 / 子查询内部）不是表分隔符。
+            index = _skip_spaces(sql, index)
+            if index >= len(sql) or sql[index] != "," or depths[index] != depth:
+                break
+            index += 1
+
     return seen
 
 
@@ -177,7 +297,14 @@ def validate_select(sql: str, max_limit: int = 1000) -> str:
             raise SqlRejected("FORBIDDEN_KEYWORD", f"语句中包含禁止的关键字：{keyword}")
 
     # 4) 表白名单
-    tables = {_normalize_table(match.group(1)) for match in _TABLE_RE.finditer(text)}
+    #
+    # !! 这里直接调 extract_tables，而不是自己再写一遍提取 !!
+    #   旧实现是"校验"与"血缘"各写一次同样的 finditer —— 表面同一套规则，
+    #   实际是**两份代码**。而逗号连接缺口恰好证明了这有多危险：
+    #   修好血缘却忘了改校验（或反过来），会出现"血缘报了表、校验却没看"或
+    #   "校验放行、血缘漏报"这类**只在一边成立**的状态，比两边都错更难发现。
+    #   现在两者共用同一个函数：改了提取规则，校验与血缘**必然同时**改变。
+    tables = set(extract_tables(text))
     if not tables:
         raise SqlRejected("NO_TABLE", "语句中没有可识别的表名")
     illegal = sorted(t for t in tables if t not in ALLOWED_TABLES)
