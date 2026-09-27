@@ -128,6 +128,34 @@
         <path d="M3.5 8.5L5.8 3.6A1.5 1.5 0 0 1 7.1 3h9.8a1.5 1.5 0 0 1 1.3.6l2.3 4.9"></path>
         <path d="M9.6 12.6h4.8"></path>
       </template>
+      <!-- 实时链路：折线脉冲 + 端点，表示"持续产出的秒级指标" -->
+      <template v-else-if="name === 'realtime'">
+        <path d="M2.5 12.5h3.6l2.2-5.4 3 10.4 2.4-6.6 1.8 3.4h6"></path>
+        <circle cx="20.4" cy="14.3" r="1.5"></circle>
+      </template>
+      <!-- 数据质量：清单 + 对勾，表示"逐条校验" -->
+      <template v-else-if="name === 'quality'">
+        <path d="M4.5 4.5h11a1.5 1.5 0 0 1 1.5 1.5v13a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 3 19V6a1.5 1.5 0 0 1 1.5-1.5z"></path>
+        <path d="M6.8 9.2h6.4"></path>
+        <path d="M6.8 13h4.2"></path>
+        <path d="M14.6 14.4l2 2 3.9-4.2"></path>
+      </template>
+      <!-- 系统监控：仪表盘表头，表示"观测/指标采集" -->
+      <template v-else-if="name === 'monitor'">
+        <path d="M3.6 17.5a9 9 0 1 1 16.8 0"></path>
+        <path d="M12 17.5l4.3-5.6"></path>
+        <circle cx="12" cy="17.5" r="1.4"></circle>
+      </template>
+      <!-- !! 兜底图标（有意保留）!!
+           原先没有任何 else 分支：图标名拼错或忘记新增时，会安静地渲染成
+           一个空的 <svg> —— 侧栏里表现为"某一行只有文字没有图标"，
+           不报错、不告警，只能靠肉眼发现。
+           加一个中性的圆点占位后，缺图标会**看得见是占位**，
+           而不是看起来像"设计就是这样"。 -->
+      <template v-else>
+        <circle cx="12" cy="12" r="7"></circle>
+        <path d="M12 8.6v.1"></path>
+      </template>
     </svg>
   </script>
 
@@ -159,7 +187,7 @@
 
   <!-- 指标卡：value 为 null 时统一显示 —，与后端"比率分母为 0 返回 null"的约定对齐 -->
   <script type="text/x-template" id="tpl-kpi">
-    <div class="kpi" :class="domain ? ('kpi--' + domain) : null">
+    <div class="kpi" :class="[domain ? ('kpi--' + domain) : null, hero ? 'kpi--hero' : null, wide ? 'kpi--wide' : null]">
       <div class="kpi__label">
         <span>{{ label }}</span>
         <span class="tip" v-if="tip" :data-tip="tip" tabindex="0" role="note" aria-label="查看指标口径">?</span>
@@ -168,12 +196,22 @@
         {{ displayValue }}<span class="kpi__unit" v-if="unit && displayValue !== '—'">{{ unit }}</span>
       </div>
       <div class="kpi__sub" v-if="sub">{{ sub }}</div>
-      <div class="kpi__foot" v-if="delta">
+      <!-- 两种"脚注"形态互斥：
+           ① pending（还比不了环比）→ 一行灰字。原先 6 张卡同时套彩色 pill，
+              在 Overview 上形成一条灰色徽标矩阵，看起来像 6 处系统异常，
+              而它表达的其实是"正常且诚实"的状态（最新窗口为 0 不算环比）。
+           ② 真实环比 → 保留 pill（绿涨红跌 + 箭头 + title 三重冗余）。
+           判据用 delta.pending 标记，不用 tone —— 见 buildDelta 里的说明。 -->
+      <div class="kpi__foot kpi__foot--muted" v-if="delta && delta.pending">
+        <span class="kpi__pending" :title="deltaTitle">{{ delta.text }}</span>
+      </div>
+      <div class="kpi__foot" v-else-if="delta">
         <span class="kpi__delta" :class="deltaClass" :title="deltaTitle">
           <span aria-hidden="true">{{ deltaGlyph }}</span>
           <span>{{ delta.text }}<span class="sr-only">，{{ delta.a11y }}</span></span>
         </span>
       </div>
+      <div class="kpi__extra" v-if="$slots.default"><slot></slot></div>
     </div>
   </script>
 
@@ -204,22 +242,63 @@
   <!-- ==================== 1. 总览 ==================== -->
   <script type="text/x-template" id="tpl-overview">
     <div class="page">
+
+      <!-- A. IdentityRow：10 秒内说清"这是什么系统 + 现在健康吗"
+           放在最上面的理由：原先顶栏之下立刻是 6 张 KPI 卡，
+           读者不知道这些数字属于什么系统、链路是否正常。
+           三枚状态芯片全部来自**已有的只读接口**，没有任何造数。 -->
+      <section class="identity">
+        <div class="identity__lead">
+          <h2 class="identity__name">批流一体智能数据分析平台</h2>
+          <p class="identity__tags">
+            <span class="identity__tag">Lakehouse</span>
+            <span class="identity__tag">Kafka → Flink → Doris 实时链路</span>
+            <span class="identity__tag">Spark → Iceberg 离线链路</span>
+            <span class="identity__tag identity__tag--ai">AI Agent 取数</span>
+          </p>
+        </div>
+        <ul class="status-strip" aria-label="平台状态">
+          <li v-for="chip in statusChips" :key="chip.key" class="chip"
+              :class="'chip--' + chip.tone" :title="chip.title">
+            <span class="chip__dot" aria-hidden="true"></span>
+            <span class="chip__label">{{ chip.label }}</span>
+            <span class="chip__value">{{ chip.value }}</span>
+          </li>
+        </ul>
+      </section>
+
+      <!-- B. Hero KPI（一级）
+           左侧 GMV、右侧"批流一致性"：两者同为一级信息（各占 1 列）。
+           批流一致性是本项目最核心的差异化能力，所以与 GMV 同级。 -->
+      <div class="kpi-grid kpi-grid--hero">
+        <kpi :label="heroGmv.label" :value="heroGmv.value" :unit="heroGmv.unit"
+             :sub="heroGmv.sub" :tip="heroGmv.tip" domain="trade" hero
+             :delta="heroGmv.delta"></kpi>
+        <kpi :label="reconcileCard.label" :value="reconcileCard.value" :unit="reconcileCard.unit"
+             :sub="reconcileCard.sub" :tip="reconcileCard.tip" hero
+             :domain="reconcileCard.domain"></kpi>
+      </div>
+
+      <!-- C. Secondary KPI（二级，4 卡）
+           与上面分开成独立的 grid：层级靠"分组 + 字号"双重表达，
+           而不是只靠字号（只靠字号时 4 卡与 hero 卡仍会被读成同一层）。 -->
       <section class="panel">
         <div class="panel__head">
           <div>
             <h2 class="panel__title">核心指标</h2>
-            <p class="panel__desc">指标口径来自 <code>/api/meta/metrics</code>，悬停或聚焦「?」可查看定义。</p>
+            <p class="panel__desc">悬停或聚焦「?」可查看口径定义；完整字典见「指标口径」页。</p>
           </div>
           <p class="panel__meta" v-if="overview">数据窗口 {{ fmtTime(overview.earliest_window) }} ~ {{ fmtTime(overview.latest_window) }}</p>
         </div>
-        <skeleton v-if="loading && !overview" variant="kpi" :rows="6"></skeleton>
-        <div class="kpi-grid" v-else-if="overview">
-          <kpi v-for="card in kpiCards" :key="card.label" :label="card.label" :value="card.value"
+        <skeleton v-if="loading && !overview" variant="kpi" :rows="4"></skeleton>
+        <div class="kpi-grid kpi-grid--overview" v-else-if="overview">
+          <kpi v-for="card in secondaryCards" :key="card.label" :label="card.label" :value="card.value"
                :unit="card.unit" :sub="card.sub" :tip="card.tip" :domain="card.domain"
                :delta="card.delta"></kpi>
         </div>
       </section>
 
+      <!-- D. Trends（三级） -->
       <section class="panel">
         <div class="panel__head">
           <h2 class="panel__title">交易趋势</h2>
@@ -255,11 +334,43 @@
         </section>
       </div>
 
-      <section class="panel">
-        <div class="panel__head">
-          <h2 class="panel__title">明细快照</h2>
-          <p class="panel__meta">最近一个窗口的类目聚合结果</p>
-        </div>
+      <!-- E. Platform Entry：把三个"更深的能力"从导航里提上来
+           评审通常不会自己点侧栏，入口卡的作用是**提示这里还有别的东西可看**。 -->
+      <section class="entry-grid" aria-label="平台能力入口">
+        <a class="entry" href="#/ask">
+          <span class="entry__icon entry__icon--ai"><icon name="ask" :size="18"></icon></span>
+          <span class="entry__body">
+            <strong class="entry__title">数据问答</strong>
+            <span class="entry__desc">自然语言提问，经只读接口取数并给出可核对的 SQL 与表来源</span>
+          </span>
+          <span class="entry__go" aria-hidden="true">→</span>
+        </a>
+        <a class="entry" href="#/batch">
+          <span class="entry__icon"><icon name="batch" :size="18"></icon></span>
+          <span class="entry__body">
+            <strong class="entry__title">离线与对账</strong>
+            <span class="entry__desc">实时与离线逐窗口比对：窗口数、不一致数、双塔对比</span>
+          </span>
+          <span class="entry__go" aria-hidden="true">→</span>
+        </a>
+        <a class="entry" :href="monitorUrl" target="_blank" rel="noopener noreferrer">
+          <span class="entry__icon"><icon name="monitor" :size="18"></icon></span>
+          <span class="entry__body">
+            <strong class="entry__title">系统监控 <span class="entry__ext">新窗口</span></strong>
+            <span class="entry__desc">Prometheus 指标与 Grafana 看板（独立站点，不在本页内嵌）</span>
+          </span>
+          <span class="entry__go" aria-hidden="true">→</span>
+        </a>
+      </section>
+
+      <!-- F. 明细快照：默认折叠
+           它与上方「类目销售 Top5」是同一份数据的两种呈现，默认展开属于信息重复。
+           details/summary 是原生元素：自带键盘与可访问性语义，不需要自己写 JS。 -->
+      <details class="panel panel--foldable">
+        <summary class="panel__summary">
+          <span class="panel__title">明细快照</span>
+          <span class="panel__meta">最近一个窗口的类目聚合结果（默认折叠，避免与上方图表重复）</span>
+        </summary>
         <div class="table-wrap" v-if="categoryTop.length">
           <table class="table">
             <caption class="sr-only">最近一个窗口各类目的订单量、GMV、件数与客单价</caption>
@@ -288,20 +399,37 @@
   <!-- ==================== 2. 交易分析 ==================== -->
   <script type="text/x-template" id="tpl-trade">
     <div class="page">
+      <!-- 一级：GMV 合计（hero 卡）
+           为什么单独提出来：原先 4 张卡等权，GMV 合计与"支付成功率"同尺寸，
+           而 GMV 是这一页的主角。层级靠 hero 字号 + 独立成行表达，
+           其余 3 个二级指标放到下一行的 4 列栅格（第 4 格留给客单价）。
+           口径细节（整数分重算）从可见描述降级到 KPI 的「?」提示里 ——
+           AGENTS/审计的要求是"实现细节不应作为默认主文案"，但**不能丢**，
+           所以移到 tooltip 而不是删掉。 -->
       <section class="panel">
         <div class="panel__head">
           <div>
             <h2 class="panel__title">交易指标</h2>
-            <p class="panel__desc">客单价按整数分口径重算：SUM(GMV) ÷ SUM(订单量)，不使用浮点累加。</p>
+            <p class="panel__desc">窗口内累计；悬停或聚焦「?」可查看每项的口径定义。</p>
           </div>
           <p class="panel__meta" v-if="series.length">最近 {{ series.length }} 个窗口累计</p>
         </div>
         <skeleton v-if="loading && !series.length" variant="kpi" :rows="4"></skeleton>
-        <div class="kpi-grid kpi-grid--4" v-else>
-          <kpi v-for="card in cards" :key="card.label" :label="card.label" :value="card.value"
-               :unit="card.unit" :sub="card.sub" :tip="card.tip" :domain="card.domain"
-               :delta="card.delta"></kpi>
-        </div>
+        <template v-else>
+          <div class="kpi-grid kpi-grid--hero" v-if="heroCard">
+            <kpi :label="heroCard.label" :value="heroCard.value" :unit="heroCard.unit"
+                 :sub="heroCard.sub" :tip="heroCard.tip" :domain="heroCard.domain"
+                 hero :delta="heroCard.delta"></kpi>
+            <kpi :label="avgCard.label" :value="avgCard.value" :unit="avgCard.unit"
+                 :sub="avgCard.sub" :tip="avgCard.tip" :domain="avgCard.domain" hero
+                 :delta="avgCard.delta"></kpi>
+          </div>
+          <div class="kpi-grid kpi-grid--4" style="margin-top: var(--sp-3)">
+            <kpi v-for="card in restCards" :key="card.label" :label="card.label" :value="card.value"
+                 :unit="card.unit" :sub="card.sub" :tip="card.tip" :domain="card.domain"
+                 :delta="card.delta"></kpi>
+          </div>
+        </template>
       </section>
 
       <section class="panel">
@@ -417,8 +545,25 @@
             <kpi v-for="card in rateCards" :key="card.label" :label="card.label" :value="card.value"
                  :unit="card.unit" :sub="card.sub" :tip="card.tip" :domain="card.domain"></kpi>
           </div>
+          <!-- 漏斗断点：某一级为 0 时，后面所有比率都必然是 0 ——
+               四个 0.00% 并排看不出问题出在哪一级。
+               这里显式把"断在哪一级"写出来（warning 色左边条 + 文字），
+               而不是让人自己从四个 0 里推断。
+               判据只用**真实计数**，不猜、不补。 -->
+          <div class="notice notice--warn funnel-break" v-if="funnelBreak">
+            <icon name="down" :size="18"></icon>
+            <div class="notice__body">
+              <strong>漏斗断点：{{ funnelBreak.from }} → {{ funnelBreak.to }}</strong>
+              <p>
+                「{{ funnelBreak.from }}」计数为 <span class="mono">0</span>，
+                因此从这一级往后（{{ funnelBreak.to }}）的转化率全部为 0 ——
+                这是**数据在该窗口内没有该行为**，不是链路故障。
+              </p>
+            </div>
+          </div>
           <ul class="steps" v-if="steps.length">
-            <li class="steps__item" v-for="s in steps" :key="s.label">
+            <li class="steps__item" v-for="s in steps" :key="s.label"
+                :class="s.zero ? 'steps__item--break' : ''">
               <span class="steps__label">{{ s.label }}</span>
               <span class="steps__value mono">{{ s.value }}</span>
               <span class="steps__note">{{ s.note }}</span>
@@ -447,7 +592,7 @@
         <div class="panel__head">
           <div>
             <h2 class="panel__title">类目 GMV 排行</h2>
-            <p class="panel__desc">按 GMV 降序；切换时间范围会重新请求 <code>/api/metrics/category</code>。</p>
+            <p class="panel__desc">按 GMV 降序；切换时间范围或排行条数会重新聚合。</p>
           </div>
           <div class="toolbar">
             <div class="seg" role="group" aria-label="时间范围">
@@ -705,7 +850,7 @@
         <div class="panel__head">
           <div>
             <h2 class="panel__title">指标字典</h2>
-            <p class="panel__desc">来源：<code>/api/meta/metrics</code>，共 {{ metrics.length }} 条定义<span v-if="keyword.trim()">，筛选出 {{ filteredMetrics.length }} 条</span>。</p>
+            <p class="panel__desc">指标口径的唯一定义来源，共 {{ metrics.length }} 条定义<span v-if="keyword.trim()">，筛选出 {{ filteredMetrics.length }} 条</span>。</p>
           </div>
           <label class="field field--inline">
             <icon name="search"></icon>
@@ -745,7 +890,7 @@
         <div class="panel__head">
           <div>
             <h2 class="panel__title">表结构</h2>
-            <p class="panel__desc">来源：<code>/api/meta/tables</code>，共 {{ tables.length }} 张表。点击表头行展开字段清单。</p>
+            <p class="panel__desc">数据服务实际放行的表，共 {{ tables.length }} 张。点击表头行展开字段清单。</p>
           </div>
           <button type="button" class="btn btn--ghost" @click="toggleAll"
                   :aria-label="allOpen ? '折叠全部表结构' : '展开全部表结构'">
@@ -781,7 +926,7 @@
             </div>
           </div>
         </div>
-        <empty v-else text="元数据服务未返回表结构" hint="请确认后端 /api/meta/tables 可用"></empty>
+        <empty v-else text="元数据服务未返回表结构" hint="请确认数据服务与元数据接口均可用（bash scripts/verify-sprint-6.sh）"></empty>
       </section>
     </div>
   </script>
@@ -792,24 +937,123 @@
        ============================================================ -->
   <script type="text/x-template" id="tpl-batch">
     <div class="page">
-      <section class="panel panel--notice" v-if="reconcile && reconcile.latest && reconcile.latest.batch_id">
-        <div class="notice" :class="isPass ? 'notice--ok' : 'notice--warn'">
-          <icon :name="isPass ? 'reconcile' : 'down'" :size="18"></icon>
+
+      <!-- A. Reconcile Hero Banner（一级信息）
+           为什么把对账结论提到最上面：本页是答辩核心页，
+           读者要一眼看到"两条链路算的是同一个数"这个结论，
+           而不是先滚过 6 张离线 KPI 才找到结论。 -->
+      <section class="rc-hero" :class="isPass ? 'rc-hero--pass' : 'rc-hero--fail'"
+               v-if="reconcile && reconcile.latest && reconcile.latest.batch_id">
+        <div class="rc-hero__status">
+          <span class="rc-hero__badge">
+            <icon :name="isPass ? 'reconcile' : 'down'" :size="20"></icon>
+            <span class="rc-hero__verdict">{{ isPass ? 'PASS' : 'FAIL' }}</span>
+          </span>
+          <p class="rc-hero__headline">批流对账{{ isPass ? '一致' : '存在差异' }}</p>
+          <p class="rc-hero__scope">
+            对账区间
+            <span class="mono">{{ formatTime(reconcile.latest.scope_start) }}</span>
+            ~
+            <span class="mono">{{ formatTime(reconcile.latest.scope_end) }}</span>
+          </p>
+        </div>
+        <ul class="rc-hero__metrics">
+          <li>
+            <span class="rc-hero__k">比对窗口</span>
+            <span class="rc-hero__v mono">{{ formatInt(reconcile.latest.batch_windows) }}</span>
+          </li>
+          <li>
+            <span class="rc-hero__k">一致窗口</span>
+            <span class="rc-hero__v mono">{{ formatInt(reconcile.latest.matched_windows) }}</span>
+          </li>
+          <li>
+            <span class="rc-hero__k">不一致窗口</span>
+            <span class="rc-hero__v mono">{{ formatInt(reconcile.latest.mismatched_windows) }}</span>
+          </li>
+          <li>
+            <span class="rc-hero__k">对账执行时间</span>
+            <span class="rc-hero__v mono">{{ formatTime(reconcile.latest.compared_at) }}</span>
+          </li>
+        </ul>
+        <!-- 业务静默窗口说明：**必须写**，否则评委看到 11459 个窗口里有
+             5504 个两侧都是 0，会以为是"没数据却判 PASS"。
+             数字 5504/5954 不在这里硬编码 —— 前端拿不到该拆分，
+             所以只做定性说明，不编造具体值。 -->
+        <p class="rc-hero__note">
+          <span class="tip" tabindex="0" role="note"
+                data-tip="对账口径：在两侧数据范围求交、尾部留 3 分钟安全边界的对账区间内，按 window_start 全外连接、缺失侧补 0，逐窗口比对交易域 7 个可加指标 + 1 个去重指标（order_user_cnt）。比率列是派生指标，只做每侧自洽性诊断，不参与判据。">?</span>
+          判据为**逐窗口数值相等**（缺失侧补 0）。比对窗口包含"两侧均为 0"的业务静默窗口 ——
+          它们计入"一致"但不构成独立证据，真正承载判别力的是有业务量的窗口。
+        </p>
+      </section>
+
+      <section class="panel panel--notice" v-else>
+        <div class="notice notice--warn">
+          <icon name="down" :size="18"></icon>
           <div class="notice__body">
-            <strong>
-              批流对账{{ isPass ? '一致' : '存在差异' }} ·
-              比对窗口 {{ formatInt(reconcile.latest.batch_windows) }} 个，
-              不一致 {{ formatInt(reconcile.latest.mismatched_windows) }} 个
-            </strong>
-            <p>
-              实时链路（Flink → Doris）与离线链路（Spark → 湖仓 → Doris）
-              在 <span class="mono">{{ shortDate(reconcile.latest.scope_start) }}</span> ~
-              <span class="mono">{{ shortDate(reconcile.latest.scope_end) }}</span>
-              上逐分钟比对：差异为 0 表示两条链路算出的指标完全一致。
-              最近一次对账时间 <span class="mono">{{ shortTime(reconcile.latest.compared_at) }}</span>。
-            </p>
+            <strong>暂未取到对账结论</strong>
+            <p>离线链路尚未运行过对账阶段。执行 <span class="mono">bash scripts/batch-mode.sh</span> 后再刷新本页。</p>
           </div>
         </div>
+      </section>
+
+      <!-- B. Twin Compare（一级视觉）：Realtime | Offline | Δ
+           原先只是"实时 vs 离线：全量对比"四行表格，读者要自己逐行比对；
+           改成双塔后，"两边相等"这个事实变成**结构可见**的。 -->
+      <section class="panel" v-if="compareRows.length">
+        <header class="panel__head">
+          <div>
+            <h2 class="panel__title">双塔对比：实时链路 vs 离线链路</h2>
+            <p class="panel__desc">同一批业务事实、两条独立技术栈，指标必须逐项相等</p>
+          </div>
+          <p class="panel__meta" v-if="compareAllZero">差异全部为 0</p>
+        </header>
+        <div class="twin">
+          <div class="twin__col twin__col--rt">
+            <p class="twin__head"><span class="twin__dot"></span>实时链路</p>
+            <p class="twin__sub">Kafka → Flink → Doris（1 分钟窗口）</p>
+            <ul class="twin__list">
+              <li v-for="row in compareRows" :key="'rt-' + row.label">
+                <span class="twin__k">{{ row.label }}</span>
+                <span class="twin__v mono">{{ row.realtime }}</span>
+              </li>
+            </ul>
+          </div>
+          <div class="twin__mid" aria-hidden="true">
+            <span class="twin__vs">vs</span>
+          </div>
+          <div class="twin__col twin__col--bt">
+            <p class="twin__head"><span class="twin__dot"></span>离线链路</p>
+            <p class="twin__sub">Spark → Iceberg → Doris（按天 + 逐窗口对账）</p>
+            <ul class="twin__list">
+              <li v-for="row in compareRows" :key="'bt-' + row.label">
+                <span class="twin__k">{{ row.label }}</span>
+                <span class="twin__v mono">{{ row.batch }}</span>
+              </li>
+            </ul>
+          </div>
+        </div>
+        <table class="table table--compact twin__table">
+          <caption class="sr-only">实时链路与离线链路的全量指标差异</caption>
+          <thead>
+            <tr>
+              <th scope="col">指标</th>
+              <th scope="col" class="num">实时链路</th>
+              <th scope="col" class="num">离线链路</th>
+              <th scope="col" class="num">差异</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="row in compareRows" :key="row.label">
+              <td>{{ row.label }}</td>
+              <td class="num mono">{{ row.realtime }}</td>
+              <td class="num mono">{{ row.batch }}</td>
+              <td class="num mono" :class="row.diff === '0' || row.diff === '0.00' ? 'diff-ok' : 'diff-bad'">
+                {{ row.diff }}
+              </td>
+            </tr>
+          </tbody>
+        </table>
       </section>
 
       <section class="panel">
@@ -822,7 +1066,7 @@
             </p>
           </div>
         </header>
-        <div class="kpi-grid" v-if="kpiCards.length">
+        <div class="kpi-grid kpi-grid--4" v-if="kpiCards.length">
           <kpi v-for="card in kpiCards" :key="card.label" v-bind="card"></kpi>
         </div>
         <skeleton v-else variant="kpi" :count="6"></skeleton>
@@ -843,37 +1087,6 @@
              aria-label="离线链路按天 GMV 与订单量趋势图"></div>
         <empty v-if="!daily.length" text="暂无离线数据"
                hint="请先执行 bash scripts/batch-mode.sh 生成离线分层结果"></empty>
-      </section>
-
-      <section class="panel">
-        <header class="panel__head">
-          <div>
-            <h2 class="panel__title">实时 vs 离线：全量对比</h2>
-            <p class="panel__desc">同一批业务事实、两条独立链路，指标必须逐项相等</p>
-          </div>
-        </header>
-        <table class="table" v-if="compareRows.length">
-          <caption class="sr-only">实时链路与离线链路的全量指标对比</caption>
-          <thead>
-            <tr>
-              <th scope="col">指标</th>
-              <th scope="col" class="num">实时链路</th>
-              <th scope="col" class="num">离线链路</th>
-              <th scope="col" class="num">差异</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="row in compareRows" :key="row.label">
-              <td>{{ row.label }}</td>
-              <td class="num mono">{{ row.realtime }}</td>
-              <td class="num mono">{{ row.batch }}</td>
-              <td class="num mono" :class="row.diff === '0' || row.diff === '0.00' ? 'diff-ok' : 'diff-bad'">
-                {{ row.diff }}
-              </td>
-            </tr>
-          </tbody>
-        </table>
-        <empty v-else text="暂无对账结果" hint="请先执行 bash scripts/batch-mode.sh 完成对账与装载"></empty>
       </section>
 
       <section class="panel">
@@ -1000,12 +1213,19 @@
         </div>
       </section>
 
-      <!-- 加载中：明确写出 Agent 正在做什么，而不是只转圈 -->
+      <!-- 加载中：驱动 StepRail，明确写出 Agent 走到哪一步，而不是只转圈 -->
       <section class="panel" v-if="loading">
-        <div class="ask__progress">
-          <skeleton variant="kpi" :count="1"></skeleton>
-          <p class="dim">正在分析：识别指标 → 核对口径 → 生成并校验 SQL → 查询 → 汇总结论…</p>
-        </div>
+        <header class="panel__head">
+          <h2 class="panel__title">正在分析</h2>
+          <p class="panel__meta">识别指标 → 核对口径 → 生成并校验 SQL → 查询 → 汇总结论</p>
+        </header>
+        <ol class="rail rail--loading" aria-label="分析进度">
+          <li class="rail__item is-active"><span class="rail__dot"></span><span class="rail__label">口径检索</span></li>
+          <li class="rail__item"><span class="rail__dot"></span><span class="rail__label">生成 SQL</span></li>
+          <li class="rail__item"><span class="rail__dot"></span><span class="rail__label">安全校验</span></li>
+          <li class="rail__item"><span class="rail__dot"></span><span class="rail__label">只读取数</span></li>
+          <li class="rail__item"><span class="rail__dot"></span><span class="rail__label">总结回答</span></li>
+        </ol>
       </section>
 
       <!-- 错误 -->
@@ -1021,6 +1241,34 @@
 
       <!-- 回答 -->
       <template v-if="answer">
+
+        <!-- 执行轨（公开 trace）：每一段都来自服务端返回的 graph.path / steps /
+             executed_sql，**不是** chain-of-thought。
+             拿不到的段显示"未发生"，不编造流程。 -->
+        <section class="panel">
+          <header class="panel__head">
+            <div>
+              <h2 class="panel__title">执行轨迹</h2>
+              <p class="panel__desc">
+                下面每一段都对应服务端**实际报告过**的动作（<span class="mono">graph.path</span> /
+                <span class="mono">steps</span> / <span class="mono">executed_sql</span>），
+                不展示模型的推理过程。
+              </p>
+            </div>
+            <p class="panel__meta">
+              引擎 {{ answer.engine || '—' }} · 重试 {{ answer.retries || 0 }} 次
+            </p>
+          </header>
+          <ol class="rail" aria-label="Agent 执行轨迹">
+            <li v-for="seg in rail" :key="seg.key" class="rail__item"
+                :class="['is-' + seg.state, seg.retried ? 'is-retried' : '']">
+              <span class="rail__dot" aria-hidden="true"></span>
+              <span class="rail__label">{{ seg.label }}</span>
+              <span class="rail__note">{{ seg.note }}</span>
+            </li>
+          </ol>
+        </section>
+
         <section class="panel">
           <header class="panel__head">
             <div>
@@ -1028,11 +1276,22 @@
               <p class="panel__desc">
                 模型 {{ answer.model }} · 耗时 {{ formatMs(answer.elapsed_ms) }} ·
                 工具调用 {{ answer.rounds }} 轮
+                <template v-if="docCount"> · 引用口径 {{ docCount }} 条</template>
                 <template v-if="answer.truncated"> · <span class="diff-bad">已达到调用上限，答案可能不完整</span></template>
               </p>
             </div>
           </header>
-          <div class="ask__answer">{{ answer.answer }}</div>
+          <!-- 校验未通过时**显式提示**，不把它埋进折叠区 -->
+          <div class="notice notice--warn ask__validation" v-if="!validationOk && validationNote">
+            <icon name="down" :size="18"></icon>
+            <div class="notice__body">
+              <strong>本次回答存在问题，请以证据区为准</strong>
+              <p>{{ validationNote }}</p>
+            </div>
+          </div>
+          <!-- 安全 Markdown：MarkdownView 用 render 函数生成 vnode，
+               全程不使用 v-html，因此回答里的 HTML 标签会被当纯文本显示（防 XSS）。 -->
+          <markdown-view :source="answer.answer"></markdown-view>
         </section>
 
         <!-- 数据来源：这是"不得伪造查询结果"的可核对痕迹 -->
@@ -1056,9 +1315,16 @@
             </div>
 
             <div v-if="answer.executed_sql.length">
-              <h3 class="ask__subtitle">实际执行的 SQL</h3>
-              <div v-for="(sql, i) in answer.executed_sql" :key="i" class="ask__sql">
-                <pre class="mono">{{ sql }}</pre>
+              <h3 class="ask__subtitle">实际执行的 SQL（{{ answer.executed_sql.length }} 条）</h3>
+              <!-- SqlCard：等宽 + 复制按钮。复制失败不静默 —— 提示"请手动选择"。 -->
+              <div v-for="(sql, i) in answer.executed_sql" :key="i" class="sqlc">
+                <div class="sqlc__head">
+                  <span class="sqlc__idx mono">SQL {{ i + 1 }}</span>
+                  <button type="button" class="btn btn--ghost btn--xs" @click="copySql(sql, i)">
+                    {{ copied === i ? '已复制' : '复制' }}
+                  </button>
+                </div>
+                <pre class="sqlc__body mono">{{ sql }}</pre>
               </div>
               <p class="dim">
                 语句已通过 SQL 守卫（仅 SELECT、表白名单、强制 LIMIT）；
@@ -1068,24 +1334,30 @@
           </div>
         </section>
 
-        <!-- 执行过程：默认折叠，需要排查时展开 -->
-        <section class="panel" v-if="answer.steps.length">
-          <header class="panel__head">
-            <div>
-              <h2 class="panel__title">执行过程（{{ answer.steps.length }} 步）</h2>
-              <p class="panel__desc">每一步调了什么工具、成功与否 —— 用于排查"为什么这么答"</p>
-            </div>
-          </header>
-          <ol class="steps">
-            <li v-for="(step, i) in answer.steps" :key="i" class="steps__item"
-                :class="step.ok ? 'steps__item--ok' : 'steps__item--fail'">
-              <div class="steps__head">
-                <span class="tag">{{ step.round }}</span>
-                <span class="mono">{{ step.tool }}</span>
-                <span class="dim">{{ step.ok ? '成功' : '失败' }}</span>
-              </div>
-              <pre class="steps__body mono">{{ prettyArgs(step.arguments) }}</pre>
-            </li>
+        <!-- 执行过程：默认折叠（原先默认全展开，把整段 JSON 甩在页面上像调试台）。
+             折叠后每步只留 tool / 成功与否 / 一行摘要，需要时才展开原始入参。 -->
+        <section class="panel panel--foldable" v-if="answer.steps.length">
+          <details>
+            <summary class="panel__summary">
+              <span class="panel__title">执行过程（{{ answer.steps.length }} 步）</span>
+              <span class="panel__meta">默认折叠；展开可看到每一步的工具入参</span>
+            </summary>
+            <ol class="steps steps--padded">
+              <li v-for="(step, i) in answer.steps" :key="i" class="steps__item"
+                  :class="step.ok ? 'steps__item--ok' : 'steps__item--fail'">
+                <details class="steps__fold">
+                  <summary class="steps__head">
+                    <span class="tag">第 {{ step.round }} 轮</span>
+                    <span class="mono">{{ step.tool }}</span>
+                    <span class="dim">{{ step.ok ? '成功' : '失败' }}</span>
+                    <span class="steps__brief">{{ stepSummary(step) }}</span>
+                  </summary>
+                  <p class="steps__purpose" v-if="step.arguments && step.arguments.purpose">
+                    <strong>目的：</strong>{{ step.arguments.purpose }}
+                  </p>
+                  <pre class="steps__body mono">{{ prettyArgs(step.arguments) }}</pre>
+                </details>
+              </li>
           </ol>
         </section>
       </template>
@@ -1100,6 +1372,236 @@
             最后这类问题 Agent 会用批流对账结论回答。
           </p>
         </div>
+      </section>
+    </div>
+  </script>
+
+  <!-- ============================================================
+       页面：数据质量（#/quality）
+       数据来源：校验清单（checks.conf 的静态镜像，见 app.js 的 QUALITY_GROUPS）
+                 + GET /batch/reconcile（真实完整性信号）
+                 + GET /meta/tables（数据服务实际放行的表白名单）
+       !! 本页**不显示** PASS/FAIL 通过率：数据服务没有质量校验接口，
+          前端算不出来，写死就是伪造。见 app.js 中 QualityPanel 的说明。!!
+       ============================================================ -->
+  <script type="text/x-template" id="tpl-quality">
+    <div class="page">
+
+      <!-- 先说清"这一页能看到什么、看不到什么" —— 比任何图表都重要 -->
+      <section class="panel panel--notice">
+        <div class="notice notice--ok">
+          <icon name="quality" :size="18"></icon>
+          <div class="notice__body">
+            <strong>校验清单共 {{ totalChecks }} 条，全部为 error 级（任一失败即让脚本退出码非 0）</strong>
+            <p>
+              校验由 CLI 引擎执行：<span class="mono">bash scripts/run-quality-checks.sh</span>
+              （加 <span class="mono">--with-lake</span> 才跑需要读 Iceberg 的那 1 条）。
+              本页**不展示**每条的通过情况 —— 数据服务没有暴露质量结论的只读接口，
+              前端无法取得真实结果，因此不做任何推测。下面给出的是
+              **清单本身**与**接口能真实取到的完整性信号**。
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ① 实时完整性信号：全部来自 /batch/reconcile 的真实字段 -->
+      <section class="panel">
+        <header class="panel__head">
+          <div>
+            <h2 class="panel__title">实时完整性信号（来自对账接口）</h2>
+            <p class="panel__desc">
+              下面每个数字都是服务端算出来的：<span class="mono">GET /data/api/batch/reconcile</span>。
+              它不是"质量校验的结论"，而是**同一批业务事实经两条独立链路计算后的比对结果**。
+            </p>
+          </div>
+          <p class="panel__meta" v-if="integrity">对账批次 {{ integrity.batchId }}</p>
+        </header>
+        <skeleton v-if="loading && !integrity" variant="kpi" :rows="4"></skeleton>
+        <template v-else-if="integrity">
+          <div class="kpi-grid kpi-grid--4">
+            <kpi label="对账总体结论" :value="integrity.pass ? 'PASS' : 'FAIL'" unit=""
+                 sub="不一致窗口数为 0 即 PASS"
+                 tip="逐窗口比对：在两侧求交、尾部留 3 分钟安全边界的对账区间内，按 window_start 全外连接、缺失侧补 0，比对交易域 7 个可加指标 + 1 个去重指标。"></kpi>
+            <kpi label="已比对窗口" :value="formatInt(integrity.windows)" unit="个"
+                 sub="实时侧与离线侧逐窗口" tip="参与比对的分钟窗口总数（两侧求交后）。"></kpi>
+            <kpi label="不一致窗口" :value="formatInt(integrity.mismatched)" unit="个"
+                 sub="必须为 0" tip="某一窗口的任一判据列两侧取值不等，即计入不一致。"></kpi>
+            <kpi label="两侧 GMV 是否相等" :value="integrity.gmvEqual ? '相等' : '不等'" unit=""
+                 :sub="'实时 ' + formatMoney(integrity.gmvRt) + ' / 离线 ' + formatMoney(integrity.gmvBt)"
+                 tip="GMV 为可加指标，按整数分精确比较，不使用浮点累加。"></kpi>
+          </div>
+          <p class="panel__meta" style="margin-top: var(--sp-3)">
+            对账执行时间 <span class="mono">{{ formatTime(integrity.comparedAt) }}</span>
+          </p>
+        </template>
+        <empty v-else text="暂未取到对账结论"
+               hint="离线流水线尚未运行过对账阶段时会这样，执行 bash scripts/batch-mode.sh 后刷新"></empty>
+      </section>
+
+      <!-- ② 校验清单：checks.conf 的镜像，按域分组 + 前端筛选 -->
+      <section class="panel">
+        <header class="panel__head">
+          <div>
+            <h2 class="panel__title">校验清单（{{ totalChecks }} 条）</h2>
+            <p class="panel__desc">
+              清单来源：<span class="mono">infrastructure/quality/checks.conf</span>。
+              每条校验 = 一段配置 + 一个返回标量的 SQL，由引擎逐条解释执行。
+              标注「spark」的那条需要读 Iceberg，默认不跑。
+            </p>
+          </div>
+          <div class="panel__tools">
+            <div class="seg" role="group" aria-label="按域筛选">
+              <button v-for="f in filters" :key="f.key" type="button"
+                      class="seg__btn" :class="{ 'is-active': filter === f.key }"
+                      :aria-pressed="filter === f.key ? 'true' : 'false'"
+                      @click="filter = f.key">{{ f.label }}</button>
+            </div>
+          </div>
+        </header>
+
+        <div class="qgroup" v-for="g in groups" :key="g.domain">
+          <div class="qgroup__head">
+            <h3 class="qgroup__title">{{ g.label }}</h3>
+            <p class="qgroup__desc">{{ g.desc }}</p>
+            <span class="qgroup__count">{{ g.checks.length }} 条</span>
+          </div>
+          <ol class="qlist">
+            <li v-for="c in g.checks" :key="c.id" class="qlist__item">
+              <span class="qlist__id mono">{{ c.id }}</span>
+              <span class="qlist__title">{{ c.title }}</span>
+              <span class="qlist__engine" :class="c.engine === 'spark' ? 'is-spark' : 'is-doris'">
+                {{ c.engine === 'spark' ? 'spark' : 'doris' }}
+              </span>
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <!-- ③ 权限边界：数据服务实际放行的表白名单 -->
+      <section class="panel">
+        <header class="panel__head">
+          <div>
+            <h2 class="panel__title">只读权限边界（{{ tableCount }} 张表）</h2>
+            <p class="panel__desc">
+              这是**数据服务实际放行的白名单**（<span class="mono">GET /data/api/meta/tables</span>），
+              也是 Agent 能读到的全部范围 —— 白名单之外的表一律被 SQL 守卫拒绝，
+              这一条由 <span class="mono">services/api/app/sqlguard.py</span> 强制，不依赖调用方自觉。
+            </p>
+          </div>
+        </header>
+        <skeleton v-if="loading && !tableCount" :rows="5"></skeleton>
+        <div v-else-if="tableCount" class="qschema">
+          <div class="qschema__col" v-for="s in schemaNames" :key="s">
+            <p class="qschema__name mono">{{ s }}</p>
+            <ul class="qschema__list">
+              <li v-for="t in tablesBySchema[s]" :key="s + '.' + t.table" class="mono">{{ t.table }}</li>
+            </ul>
+          </div>
+        </div>
+        <empty v-else text="元数据服务未返回表清单" hint="请确认 /data/api/meta/tables 可用"></empty>
+      </section>
+
+      <!-- 怎么跑：命令与退出码语义（这是"错误不是只打印出来"的说明） -->
+      <section class="panel">
+        <header class="panel__head">
+          <div>
+            <h2 class="panel__title">怎么跑这套校验</h2>
+            <p class="panel__desc">下面是可复现的命令，不是示意</p>
+          </div>
+        </header>
+        <div class="qrun">
+          <div class="qrun__row">
+            <span class="qrun__k">全量（不含湖仓）</span>
+            <code class="mono">bash scripts/run-quality-checks.sh</code>
+          </div>
+          <div class="qrun__row">
+            <span class="qrun__k">含湖仓 Iceberg</span>
+            <code class="mono">bash scripts/run-quality-checks.sh --with-lake</code>
+          </div>
+          <div class="qrun__row">
+            <span class="qrun__k">故意制造失败（证明退出码）</span>
+            <code class="mono">bash scripts/run-quality-checks.sh --proof-fail</code>
+          </div>
+          <div class="qrun__row">
+            <span class="qrun__k">只列清单，不执行</span>
+            <code class="mono">bash scripts/run-quality-checks.sh --list</code>
+          </div>
+        </div>
+        <p class="qrun__note">
+          失败路径**不是打印一行字而已**：任一条 error 级校验失败，脚本以**非 0 退出码**结束，
+          可被调度与 CI 真实拦截。<span class="mono">--proof-fail</span> 会把期望值故意改坏来验证这一点
+          （实测两种改法都返回退出码 1，恢复后重跑仍全绿 —— 说明失败来自断言而不是数据被改坏）。
+        </p>
+      </section>
+    </div>
+  </script>
+
+  <!-- ============================================================
+       页面：实时链路（#/realtime）
+       数据来源：/metrics/trade 与 /metrics/traffic（已有接口，未新增）
+       与 #/trade、#/traffic 的分工：那两页是"按指标主题看业务"，
+       本页是"按链路健康看工程" —— 新鲜度 / 窗口密度 / 本窗口取值。
+       ============================================================ -->
+  <script type="text/x-template" id="tpl-realtime">
+    <div class="page">
+
+      <section class="panel">
+        <header class="panel__head">
+          <div>
+            <h2 class="panel__title">实时链路健康</h2>
+            <p class="panel__desc">
+              Kafka → Flink（1 分钟滚动窗口）→ Doris。本页看的是**链路本身的运行状态**，
+              不是业务主题的历史序列（后者见「交易分析」「流量分析」）。
+            </p>
+          </div>
+        </header>
+        <skeleton v-if="loading && !trade.length" variant="kpi" :rows="3"></skeleton>
+        <div class="kpi-grid kpi-grid--4" v-else-if="trade.length">
+          <kpi label="最新窗口" :value="freshness ? fmtShort(freshness.windowStart) : '—'" unit=""
+               :sub="freshness ? ('滞后约 ' + freshness.lagMin + ' 分钟') : '未取到'"
+               tip="实时链路按 1 分钟窗口产出。滞后 = 现在 − 最新窗口时间。本页只如实显示测得值，不设通过阈值——阈值属于告警策略（Prometheus 侧），前端不代替它下结论。"></kpi>
+          <kpi :label="'窗口密度（最近 ' + trade.length + ' 个）'" :value="density ? density.active : '—'" unit="个"
+               :sub="density ? ('占 ' + density.pct.toFixed(1) + '%，其余为无业务量窗口') : '未取到'"
+               tip="实时链路在数据稀疏时会出现 count=0 的窗口，那不是故障，但会让人误判“链路没在写”。这里把比例显式写出来。"></kpi>
+          <kpi label="GMV 跨窗口可加性" value="可加" unit=""
+               sub="GMV / 订单量 / PV 等可直接 SUM 上卷"
+               tip="可加指标：逐窗口求和等于总体。注意区分——去重指标（UV、下单用户数）与派生比率（客单价、支付成功率）**不可**跨窗口相加或求平均，必须在明细层重新计算。"></kpi>
+          <kpi label="去重指标" value="不可加" unit=""
+               sub="UV / 下单用户数须回明细去重"
+               tip="COUNT(DISTINCT user_id) 在窗口之间不可加：SUM(uv) 得到的不是任何有意义的量。要天粒度必须回到明细重新去重。"></kpi>
+        </div>
+        <empty v-else text="暂无实时数据"
+               hint="请确认 Flink 作业在运行：bash scripts/health-check.sh"></empty>
+      </section>
+
+      <section class="panel" v-if="trade.length">
+        <header class="panel__head">
+          <div>
+            <h2 class="panel__title">最新窗口取值</h2>
+            <p class="panel__desc">最近一个 1 分钟窗口的原始指标（不是累计值；累计值见「交易分析」）</p>
+          </div>
+        </header>
+        <div class="kpi-grid kpi-grid--4">
+          <kpi v-for="card in windowKpi" :key="card.label" :label="card.label" :value="card.value"
+               :unit="card.unit" :sub="card.sub" :tip="card.tip" :domain="card.domain"></kpi>
+        </div>
+        <p class="panel__meta" style="margin-top: var(--sp-3)">
+          说明：最新窗口常常尚未写满（例如窗口刚到、事件还在流入），
+          因此它的取值通常明显小于历史窗口的中位水平。这属于正常现象，
+          与本页要看的"链路是否在产出"是两件事。
+        </p>
+      </section>
+
+      <section class="panel">
+        <header class="panel__head">
+          <div>
+            <h2 class="panel__title">近 60 个窗口：GMV 与订单量</h2>
+            <p class="panel__desc">左轴 GMV（元） / 右轴 订单量（笔）</p>
+          </div>
+        </header>
+        <div class="chart chart--md" ref="tradeEl" v-show="trade.length" role="img"
+             aria-label="实时链路最近 60 个分钟窗口的 GMV 与订单量"></div>
+        <empty v-if="!trade.length" text="暂无实时数据"></empty>
       </section>
     </div>
   </script>
@@ -1122,15 +1624,41 @@
           </div>
         </div>
 
-        <p class="sidebar__section" v-show="!collapsed || isNarrow">数据看板</p>
-        <nav class="sidebar__nav">
-          <a v-for="item in routes" :key="item.key" class="nav-item"
-             :class="{ 'is-active': item.key === page }" :href="'#/' + item.key"
-             :aria-current="item.key === page ? 'page' : null"
-             :title="(collapsed && !isNarrow) ? item.title : null" @click="navOpen = false">
-            <icon :name="item.key"></icon>
-            <span class="nav-item__text" v-show="!collapsed || isNarrow">{{ item.title }}</span>
-          </a>
+        <!-- 分组导航：分组是**信息架构的表达**，不新增路由。
+             组标题用 role="presentation"：它是纯视觉分组节点，
+             让键盘 Tab 序列里不会多出 5 个无语义的停留点。 -->
+        <nav class="sidebar__nav" aria-label="主导航">
+          <div class="nav-group" v-for="group in navGroups" :key="group.title">
+            <p class="nav-group__title" role="presentation" v-show="!collapsed || isNarrow">{{ group.title }}</p>
+            <template v-for="item in group.items" :key="item.key">
+              <!-- 内部路由 -->
+              <a v-if="!item.external" class="nav-item"
+                 :class="{ 'is-active': item.key === page }" :href="'#/' + item.key"
+                 :aria-current="item.key === page ? 'page' : null"
+                 :title="(collapsed && !isNarrow) ? item.title : null" @click="navOpen = false">
+                <icon :name="item.key"></icon>
+                <span class="nav-item__text" v-show="!collapsed || isNarrow">{{ item.title }}</span>
+                <span class="nav-item__tag" v-if="item.tag && (!collapsed || isNarrow)">{{ item.tag }}</span>
+              </a>
+              <!-- 外链（系统监控 → Grafana）：不是 SPA 路由，所以用 <a target="_blank">。
+                   不用 $router：本项目是 hash 路由，外链混进 ROUTES 会让 readHash()
+                   把它当成一个永远匹配不上的页面。 -->
+              <a v-else class="nav-item nav-item--external" :href="item.href"
+                 target="_blank" rel="noopener noreferrer"
+                 :title="(collapsed && !isNarrow) ? (item.title + '（新窗口打开）') : null"
+                 @click="navOpen = false">
+                <icon :name="item.key"></icon>
+                <span class="nav-item__text" v-show="!collapsed || isNarrow">{{ item.title }}</span>
+                <svg class="nav-item__ext" v-show="!collapsed || isNarrow" viewBox="0 0 24 24"
+                     width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"
+                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M14 5h5v5"></path><path d="M19 5l-9 9"></path>
+                  <path d="M18 14v4a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h4"></path>
+                </svg>
+                <span class="sr-only">（在新窗口打开）</span>
+              </a>
+            </template>
+          </div>
         </nav>
 
         <div class="sidebar__foot">
@@ -1169,7 +1697,11 @@
             </button>
             <span class="src-badge" :title="'接口基址：' + apiBase + (sourceDetail ? '\n' + sourceDetail : '')">
               <span class="src-badge__dot" aria-hidden="true"></span>
-              <span class="sr-only">数据来源：</span>{{ sourceLabel }}
+              <span class="sr-only">数据来源：</span>
+              <!-- 可见文案单行截断（.src-badge__note）；完整内容在父级 title 里。
+                   为什么必须包一个 span：对 inline-flex 的外层容器设 max-width
+                   管不住内部文本，还会破坏父级的收缩计算（实测反而多溢出 511px）。 -->
+              <span class="src-badge__note">{{ sourceLabel }}</span>
             </span>
             <span class="topbar__stamp">
               <span class="topbar__stamp-label">数据时间</span>
@@ -1196,12 +1728,14 @@
 
         <!-- 用 key 强制卸载旧页面：组件销毁时统一 dispose 图表实例，避免内存泄漏 -->
         <overview-panel v-if="page === 'overview'" key="overview"></overview-panel>
+        <realtime-panel v-else-if="page === 'realtime'" key="realtime"></realtime-panel>
         <trade-panel v-else-if="page === 'trade'" key="trade"></trade-panel>
         <traffic-panel v-else-if="page === 'traffic'" key="traffic"></traffic-panel>
         <category-panel v-else-if="page === 'category'" key="category"></category-panel>
         <orders-panel v-else-if="page === 'orders'" key="orders"></orders-panel>
         <batch-panel v-else-if="page === 'batch'" key="batch"></batch-panel>
         <ask-panel v-else-if="page === 'ask'" key="ask"></ask-panel>
+        <quality-panel v-else-if="page === 'quality'" key="quality"></quality-panel>
         <metrics-panel v-else-if="page === 'metrics'" key="metrics"></metrics-panel>
 
         <footer class="foot">

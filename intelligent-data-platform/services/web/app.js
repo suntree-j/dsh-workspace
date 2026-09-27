@@ -60,6 +60,9 @@
   var onMounted = Vue.onMounted;
   var onBeforeUnmount = Vue.onBeforeUnmount;
   var createApp = Vue.createApp;
+  // h：创建 vnode。Ask 页的安全 Markdown 渲染用它 ——
+  // 全程不碰 innerHTML，模型输出里的 HTML 标签天然不会被解析成元素。
+  var h = Vue.h;
 
   // ============================================================
   // ---------- 常量与元信息 ----------
@@ -103,8 +106,20 @@
     series: ['#5b9cff', '#22c9b6', '#a884ff', '#e2b04a', '#ff7a72', '#4fd1e0', '#f0883e', '#8b9bb4']
   };
 
-  // 类目页「全部」选项：窗口上限取一个足够大的值，语义等价于"不限窗口"
-  var ALL_WINDOWS = 1000000;
+  // 类目页「全部」选项：窗口上限。
+  //
+  // !! 这里曾经写 1000000，是一个**真实存在的线上缺陷**（Sprint 13 前端收口时发现）!!
+  //   后端契约是 `window_limit: int = Query(0, ge=0, le=20160)` ——
+  //   上限 20160（= 14 天 × 1440 分钟），且**用 0 表示"全量口径"**。
+  //   传 1000000 会在 FastAPI 的参数校验层就被拒：
+  //     GET /metrics/category?limit=50&window_limit=1000000 → 422 Unprocessable Entity
+  //   后果并不显眼，所以一直没被发现：
+  //     - 类目页选「全部」时请求失败，页面走错误分支而不是崩溃；
+  //     - 订单页的"类目候选项"拉取失败后被 `.catch` 静默兜底成空数组，
+  //       表现只是"类目下拉里没有可选项"——容易被当成"数据就是这样"。
+  //   修法：改用后端自己的哨兵值 0。**不要**改成 20160 ——
+  //   那会悄悄把"全部"变成"最近 14 天"，是语义降级。
+  var ALL_WINDOWS = 0;
   var PAGE_SIZE = 20;
   var TRADE_WINDOW_LIMIT = 200;
 
@@ -464,6 +479,11 @@
         text: '待下一窗口',
         glyph: '·',
         tone: 'flat',
+        // !! 用显式标记区分"真的持平"与"还没得比" !!
+        //   两条路径的 tone 都是 'flat'，如果只靠 tone 判断，
+        //   模板会把"0.0% 真持平"也一起降级成灰字。
+        //   也刻意**不**用"文本里有没有 %"来判断 —— 那种判据会在改文案时静默失效。
+        pending: true,
         a11y: '最近一个窗口取值为 0，暂不计算环比',
         title: '最近一个窗口取值为 0（实时链路可能尚未写满），因此不展示环比'
       };
@@ -477,6 +497,7 @@
       text: text,
       glyph: up ? '▲' : (down ? '▼' : '—'),
       tone: up ? 'up' : (down ? 'down' : 'flat'),
+      pending: false,
       a11y: '最近窗口较上一窗口' + (up ? '上升' : (down ? '下降' : '基本持平')) + Math.abs(pct).toFixed(1) + '%',
       title: '环比：' + formatTime(list[list.length - 1].window_start) + ' 窗口 ' + shown + (unit || '') +
         '，对比上一个窗口 ' + ((mode === 'money') ? formatMoney(prev) : formatInt(prev)) + (unit || '')
@@ -528,6 +549,17 @@
    * 看板必须能自证"这份数据来自哪张表、可不可信"，所以这里做兼容解析：
    * 顶栏徽标显示短标签（note），鼠标悬停给出涉及的 ADS 表清单。
    */
+  // 顶栏数据源徽标的文案（Sprint 13 前端收口）
+  //
+  // !! 为什么不再直接把后端 source.note 当可见文案 !!
+  //   note 是一整句工程说明（例如"只读账号 + SQL 守卫（仅 SELECT、强制 LIMIT）"），
+  //   放在顶栏里有两个问题：
+  //     ① 它是顶栏里唯一长度不可控的部分，会把"数据时间 + 刷新"挤走
+  //        （实测 1280×800 下整页横向溢出 35px）；
+  //     ② 审计指出它"像文档引用，不像数据源状态"。
+  //   改成**固定短标签**，完整 note + 表清单全部保留在 title 提示里 ——
+  //   信息一点没少，只是不再占主视线。
+  //   `source.note` 仍然被读取（见下面的 detail），只是不作为主标签。
   function resolveSource(source) {
     if (typeof source === 'string') {
       var text = source.trim();
@@ -536,9 +568,14 @@
     if (source && typeof source === 'object') {
       var note = typeof source.note === 'string' ? source.note.trim() : '';
       var tables = Array.isArray(source.tables) ? source.tables.filter(Boolean) : [];
-      var detail = tables.length ? ('数据表：' + tables.join('、')) : '';
-      if (!note && !detail) return null;
-      return { label: note || ('来源表 ' + tables.length + ' 张'), detail: detail };
+      var bits = [];
+      if (note) bits.push(note);
+      if (tables.length) bits.push('数据表：' + tables.join('、'));
+      var detail = bits.join('\n');
+      if (!detail) return null;
+      // 短标签：只表达"数据从哪来"，不表达"怎么保证安全"
+      var label = tables.length ? ('只读数据服务 · ' + tables.length + ' 张表') : '只读数据服务';
+      return { label: label, detail: detail };
     }
     return null;
   }
@@ -635,6 +672,121 @@
     agentHealth: function () { return apiGet('/health', null, AGENT_BASE); },
     agentAsk: function (question) { return apiPost('/ask', { question: question }, AGENT_BASE); }
   };
+
+  // ============================================================
+  // ---------- 状态探针（Overview / 实时链路共用） ----------
+  // ============================================================
+  //
+  // 为什么单独抽出来：状态芯片要出现在两个页面上，如果各写一份，
+  // "对账 PASS 的判据"就会有两处实现 —— 日后改一处必然漂移。
+  //
+  // !! 三条探针必须**互不阻塞** !!
+  //   FRONTEND_UI_AUDIT §16 明确列为中风险：
+  //   "Overview 增加 reconcile/agent 请求致 502 放大"。
+  //   所以用 allSettled 语义（每个自行 catch），任何一条失败只让
+  //   **它自己那枚芯片**变灰，绝不影响 GMV 与其它芯片 ——
+  //   状态芯片属于增强信息，不该有能力把主页打空。
+  var MONITOR_HREF = (function () {
+    var p = window.location.pathname.replace(/\/data\/.*$/, '/');
+    return p + 'grafana/';
+  })();
+
+  function probeStatus() {
+    function settle(promise, fallback) {
+      return promise.then(
+        function (v) { return { ok: true, value: v }; },
+        function () { return { ok: false, value: fallback }; }
+      );
+    }
+    return Promise.all([
+      settle(api.health(), null),
+      settle(api.batchReconcile(), null),
+      settle(api.agentHealth(), null)
+    ]).then(function (r) {
+      return { health: r[0], reconcile: r[1], agent: r[2] };
+    });
+  }
+
+  // 把探针结果翻译成三枚芯片。**全部字段来自接口真实返回**：
+  //   health    → data.status / data.doris
+  //   reconcile → data.latest.is_pass / .mismatched_windows / .batch_windows
+  //               （**注意是 latest 里**，不是 data 顶层；见下方 ② 的说明）
+  //   agent     → data.status / data.engine
+  // 任何一项拿不到就显示"未知"，不猜、不编。
+  function buildStatusChips(probe) {
+    var chips = [];
+    var p = probe || {};
+
+    // ① 数据服务 + Doris
+    // 注意：局部变量名**不能**叫 h —— 外层 h 是 Vue.h（创建 vnode 用），
+    // 在内层作用域覆盖它会让同名函数在别处静默失效（本项目已踩过同类坑）。
+    var health = p.health && p.health.ok ? (p.health.value || {}) : null;
+    if (health && health.status === 'ok') {
+      var doris = health.doris === 'ok' ? 'Doris 正常' : ('Doris ' + (health.doris || '未知'));
+      var lat = (health.doris_latency_ms === undefined || health.doris_latency_ms === null)
+        ? '' : ' · ' + health.doris_latency_ms + ' ms';
+      chips.push({
+        key: 'api', tone: health.doris === 'ok' ? 'ok' : 'warn',
+        label: '数据服务', value: doris + lat,
+        title: 'GET /data/api/health：' + doris +
+          (health.readonly_user ? '；只读账号 ' + health.readonly_user : '')
+      });
+    } else {
+      chips.push({
+        key: 'api', tone: 'unknown', label: '数据服务', value: '未就绪',
+        title: '健康检查未返回，或数据服务不可用'
+      });
+    }
+
+    // ② 批流对账（本平台的差异化能力，所以在首页就要看得见）
+    //
+    // !! 字段位置：必须在 `latest` 里取，不是 data 顶层 !!
+    //   实测 GET /batch/reconcile 的 data 是：
+    //     { latest: {batch_id, batch_windows, matched_windows,
+    //                mismatched_windows, is_pass, compared_at, scope_*},
+    //       totals: {realtime:{...}, batch:{...}}, deltas:{...}, mismatches:[...] }
+    //   我第一版写成直接在 data 上取 batch_windows —— 那个字段不存在，
+    //   于是首页芯片恒显示"未取得"，而 Batch 页（读 .latest）正常。
+    //   这类"取错层级"不会报错、只会静默显示兜底文案，所以只能靠对比实测发现。
+    var rc = p.reconcile && p.reconcile.ok ? (p.reconcile.value || {}) : null;
+    var rl = rc && rc.latest;
+    if (rl && rl.batch_windows !== undefined && rl.batch_windows !== null) {
+      var pass = rl.is_pass === true || rl.is_pass === 1 || rl.is_pass === '1';
+      var mism = formatInt(rl.mismatched_windows);
+      chips.push({
+        key: 'reconcile', tone: pass ? 'ok' : 'bad',
+        label: '批流对账', value: (pass ? 'PASS' : 'FAIL') + ' · 不一致 ' + mism,
+        title: '对账批次 ' + (rl.batch_id || '—') +
+          '；比对窗口 ' + formatInt(rl.batch_windows) +
+          '；不一致 ' + mism +
+          (rl.compared_at ? '；执行于 ' + formatTime(rl.compared_at) : '')
+      });
+    } else {
+      chips.push({
+        key: 'reconcile', tone: 'unknown', label: '批流对账', value: '未取得',
+        title: '未取到对账结论（离线流水线可能尚未运行过对账阶段）'
+      });
+    }
+
+    // ③ Agent
+    var ag = p.agent && p.agent.ok ? (p.agent.value || {}) : null;
+    if (ag && ag.status) {
+      var ready = ag.status === 'ok';
+      chips.push({
+        key: 'agent', tone: ready ? 'ok' : 'warn',
+        label: 'Agent', value: ready ? ('就绪 · ' + (ag.engine || 'ready')) : ag.status,
+        title: 'GET /data/agent/health：' + ag.status +
+          (ag.engine ? '；编排引擎 ' + ag.engine : '')
+      });
+    } else {
+      chips.push({
+        key: 'agent', tone: 'unknown', label: 'Agent', value: '未就绪',
+        title: '问答 Agent 健康检查未返回'
+      });
+    }
+
+    return chips;
+  }
 
   // ============================================================
   // ---------- 指标口径缓存 ----------
@@ -944,18 +1096,81 @@
   // ---------- 路由（URL hash） ----------
   // ============================================================
 
+  // 侧栏分组（Sprint 13 前端收口）
+  //
+  // !! 这里只是"把已有路由分组展示"，**不新增业务页** !!
+  //   FRONTEND_UI_AUDIT §2 的原则：只重排/重命名现有路由。
+  //   分组名表达平台的四层能力：概览 / 实时分析 / 离线与可信 / AI / 治理。
+  //
+  // 为什么 `monitor` 不在 ROUTES 里：
+  //   它是 **Grafana 外链**，不是 SPA 路由。若混进 ROUTES，
+  //   readHash() 会把它当成一个合法页面 key，而 #/monitor 下没有任何模板，
+  //   结果是白屏。外链单独放在 NAV_GROUPS 里，走 <a target="_blank">。
+  var MONITOR_URL = (function () {
+    // 与 /data/ 同级部署：站点根 + /grafana/
+    // 用 location 推导而不是硬编码 IP，换域名后不用改代码。
+    var p = window.location.pathname.replace(/\/data\/.*$/, '/');
+    return p + 'grafana/';
+  })();
+
   var ROUTES = [
     { key: 'overview', title: '总览', subtitle: '核心指标、交易与流量趋势、类目 Top5' },
+    { key: 'realtime', title: '实时链路', subtitle: '实时 ADS 分钟窗口：交易、流量与新鲜度' },
     { key: 'trade', title: '交易分析', subtitle: 'GMV、客单价、支付成功率与退款率' },
     { key: 'traffic', title: '流量分析', subtitle: 'UV / PV、行为漏斗与转化率' },
     { key: 'category', title: '类目销售', subtitle: '类目 GMV 排行、占比与明细' },
     { key: 'orders', title: '订单明细', subtitle: '按类目与日期筛选，查看订单支付与退款记录' },
     { key: 'batch', title: '离线与对账', subtitle: '离线分层指标、按天趋势，以及实时/离线逐窗口对账结论' },
     { key: 'ask', title: '数据问答', subtitle: '用自然语言提问，Agent 经只读接口取数并给出可核对的来源' },
+    { key: 'quality', title: '数据质量', subtitle: '校验清单、覆盖类别与运行方式（CLI 驱动）' },
     { key: 'metrics', title: '指标口径', subtitle: '指标字典与表结构（Agent 回答问题的口径来源）' }
   ];
 
+  // 导航分组：items 里引用路由 key，渲染时再去 ROUTES 取标题，
+  // 避免同一份标题写两遍（写两遍必然漂移）。
+  var NAV_GROUPS = [
+    { title: '概览', keys: ['overview'] },
+    { title: '实时分析', keys: ['realtime', 'trade', 'traffic', 'category', 'orders'] },
+    { title: '离线与可信', keys: ['batch'] },
+    { title: 'AI', keys: ['ask'] },
+    { title: '治理', keys: ['quality', 'metrics'] }
+  ];
+
   var currentPage = ref('overview');
+
+  // 把 NAV_GROUPS 展开成渲染所需的形状：补标题、补外链、补标记。
+  //
+  // 只在这里做一次映射，模板里就能直接 v-for —— 模板里不做查找逻辑，
+  // 是因为 x-template 没有类型检查，逻辑越少越不容易在改文案时写崩。
+  var navGroups = computed(function () {
+    var byKey = {};
+    ROUTES.forEach(function (r) { byKey[r.key] = r; });
+
+    var groups = NAV_GROUPS.map(function (g) {
+      var items = [];
+      g.keys.forEach(function (k) {
+        var r = byKey[k];
+        if (!r) return;  // 分组里写了不存在的 key：跳过而不是渲染一个死链
+        items.push({ key: r.key, title: r.title, external: false, href: null, tag: null });
+      });
+      return { title: g.title, items: items };
+    }).filter(function (g) { return g.items.length > 0; });
+
+    // 系统监控：Grafana 外链，挂在"治理"组下（与"指标口径"同属治理能力）。
+    // 它是**外链不是路由**，所以不放进 ROUTES（见 ROUTES 上方注释）。
+    for (var i = 0; i < groups.length; i++) {
+      if (groups[i].title === '治理') {
+        groups[i].items.push({
+          key: 'monitor',
+          title: '系统监控',
+          external: true,
+          href: MONITOR_URL,
+          tag: 'Grafana'
+        });
+      }
+    }
+    return groups;
+  });
 
   function readHash() {
     var raw = String(window.location.hash || '').replace(/^#\/?/, '').split('?')[0];
@@ -1030,7 +1245,12 @@
       tip: { type: String, default: '' },
       // 域语义色：trade / traffic / category，对应卡片顶部细线
       domain: { type: String, default: '' },
-      // 环比：{ text, glyph, tone, a11y, title }
+      // 一级主指标：字号提到 --fs-kpi-hero（28px），每页最多 1~2 个。
+      // 它解决的是"6 张卡同字号、GMV 与退款笔数视觉等权"这个层级问题。
+      hero: { type: Boolean, default: false },
+      // 跨 2 列（配合 .kpi-grid 的列轨道使用）
+      wide: { type: Boolean, default: false },
+      // 环比：{ text, glyph, tone, pending, a11y, title }
       delta: { type: Object, default: null }
     },
     computed: {
@@ -1107,6 +1327,7 @@
       var overview = ref(null);
       var trade = ref([]);
       var traffic = ref([]);
+      var statusProbe = ref(null);
 
       var tradeEl = ref(null);
       var trafficEl = ref(null);
@@ -1119,10 +1340,14 @@
 
       function load() {
         return panel.run(function () {
+          // 状态探针与主数据**并行**发起，且不参与 Promise.all 的失败传播：
+          // probeStatus 内部每条已 catch，所以它自己不会 reject。
+          var probe = probeStatus().then(function (r) { statusProbe.value = r; });
           return Promise.all([
             api.overview(60),
             api.trade(60),
-            api.traffic(60)
+            api.traffic(60),
+            probe
           ]).then(function (res) {
             overview.value = res[0] || null;
             trade.value = res[1] || [];
@@ -1137,46 +1362,83 @@
       panel.setReload(load);
       onMounted(load);
 
-      // —— KPI 卡片：GMV / 订单量 / 支付笔数 / 退款笔数 / UV / PV ——
+      var statusChips = computed(function () { return buildStatusChips(statusProbe.value); });
+      var monitorUrl = MONITOR_HREF;
+
+      // —— 一级 Hero：GMV ——
+      var heroGmv = computed(function () {
+        var data = overview.value;
+        if (!data) {
+          return { label: 'GMV（下单金额）', value: null, unit: '元', sub: '', tip: definitionOf('gmv'), delta: null };
+        }
+        var kpi = data.kpi || {};
+        var windows = data.windows || {};
+        return {
+          label: 'GMV（下单金额）',
+          value: formatMoney(kpi.gmv),
+          unit: '元',
+          sub: '最近 ' + formatInt(windows.trade) + ' 个交易窗口（分钟级）累计',
+          tip: definitionOf('gmv'),
+          delta: buildDelta(trade.value, 'gmv', 'money', ' 元')
+        };
+      });
+
+      // —— 一级 Hero：批流一致性 ——
+      //   判据与状态芯片**同源**（都读 /batch/reconcile 的 is_pass），
+      //   避免"卡片说 PASS、芯片说 FAIL"这种自相矛盾。
+      var reconcileCard = computed(function () {
+        var rc = statusProbe.value && statusProbe.value.reconcile;
+        var payload = rc && rc.ok ? (rc.value || {}) : null;
+        // 与状态芯片同一个坑：结论在 payload.latest 里，不是顶层
+        var d = payload && payload.latest;
+        if (!d || d.batch_windows === undefined || d.batch_windows === null) {
+          return {
+            label: '批流一致性（实时 vs 离线）', value: '—', unit: '',
+            sub: '未取到对账结论', domain: '', tip: '逐窗口比对的结论来自 GET /batch/reconcile'
+          };
+        }
+        var pass = d.is_pass === true || d.is_pass === 1 || d.is_pass === '1';
+        return {
+          label: '批流一致性（实时 vs 离线）',
+          value: pass ? 'PASS' : 'FAIL',
+          unit: '',
+          sub: '比对窗口 ' + formatInt(d.batch_windows) + ' · 不一致 ' + formatInt(d.mismatched_windows),
+          domain: pass ? '' : 'traffic',
+          tip: '在两侧数据范围求交、尾部留 3 分钟安全边界的**对账区间内**，按 window_start 全外连接、' +
+            '缺失侧补 0，逐窗口比对交易域 7 个可加指标 + 1 个去重指标；不一致窗口数为 0 即 PASS。' +
+            '注意 matched 含"两侧均为 0"的业务静默窗口，属正常而非异常。'
+        };
+      });
+
+      // —— 二级 KPI：4 卡 ——
       // 环比取"最近两个窗口"，两个窗口都非零时才展示（见 buildDelta 的说明）。
-      var kpiCards = computed(function () {
+      var secondaryCards = computed(function () {
         var data = overview.value;
         if (!data) return [];
         var kpi = data.kpi || {};
-        var windows = data.windows || {};
         var latest = trade.value.length ? trade.value[trade.value.length - 1] : null;
         var windowText = data.latest_window ? '窗口 ' + shortTime(data.latest_window) : '';
-        var countText = '最近 ' + formatInt(windows.trade) + ' 个交易窗口';
 
         return [
-          {
-            label: 'GMV（下单金额）', value: formatMoney(kpi.gmv), unit: '元', domain: 'trade',
-            sub: countText, tip: definitionOf('gmv'),
-            delta: buildDelta(trade.value, 'gmv', 'money', ' 元')
-          },
           {
             label: '订单量', value: formatInt(kpi.order_cnt), unit: '笔', domain: 'trade',
             sub: '下单用户 ' + formatInt(kpi.order_user_cnt) + ' 人', tip: definitionOf('order_cnt'),
             delta: buildDelta(trade.value, 'order_cnt', 'int', ' 笔')
           },
           {
-            label: '支付笔数', value: formatInt(kpi.payment_cnt), unit: '笔', domain: 'trade',
-            sub: latest ? '当前窗口 ' + formatInt(latest.payment_cnt) + ' 笔' : windowText,
-            tip: definitionOf('payment_cnt'),
-            delta: buildDelta(trade.value, 'payment_cnt', 'int', ' 笔')
+            label: '支付金额', value: formatMoney(kpi.payment_amount), unit: '元', domain: 'trade',
+            sub: '支付笔数 ' + formatInt(kpi.payment_cnt) + ' 笔', tip: definitionOf('payment_amount'),
+            delta: buildDelta(trade.value, 'payment_amount', 'money', ' 元')
           },
           {
-            label: '退款笔数', value: formatInt(kpi.refund_cnt), unit: '笔', domain: 'trade',
-            sub: '退款金额 ' + formatMoney(kpi.refund_amount) + ' 元', tip: definitionOf('refund_cnt'),
-            delta: buildDelta(trade.value, 'refund_cnt', 'int', ' 笔')
-          },
-          {
-            label: 'UV（去重用户）', value: formatInt(kpi.uv), unit: '人', domain: 'traffic',
-            sub: '最近 ' + formatInt(windows.traffic) + ' 个流量窗口', tip: definitionOf('uv')
+            label: '退款金额', value: formatMoney(kpi.refund_amount), unit: '元', domain: 'trade',
+            sub: '退款笔数 ' + formatInt(kpi.refund_cnt) + ' 笔', tip: definitionOf('refund_amount'),
+            delta: buildDelta(trade.value, 'refund_amount', 'money', ' 元')
           },
           {
             label: 'PV（行为事件）', value: formatInt(kpi.pv), unit: '次', domain: 'traffic',
-            sub: windowText || '行为事件总数', tip: definitionOf('pv')
+            sub: windowText || '行为事件总数', tip: definitionOf('pv'),
+            delta: latest ? null : null
           }
         ];
       });
@@ -1244,7 +1506,11 @@
         trade: trade,
         traffic: traffic,
         categoryTop: categoryTop,
-        kpiCards: kpiCards,
+        statusChips: statusChips,
+        heroGmv: heroGmv,
+        reconcileCard: reconcileCard,
+        secondaryCards: secondaryCards,
+        monitorUrl: monitorUrl,
         tradeEl: tradeEl,
         trafficEl: trafficEl,
         categoryEl: categoryEl,
@@ -1353,7 +1619,15 @@
         };
       });
 
-      var cards = computed(function () {
+      // —— 交易指标卡：一级 2 张（GMV / 客单价）+ 二级 2 张 ——
+      //
+      // 为什么拆成三段而不是一个数组：
+      //   模板里一级与二级用**不同的栅格**（hero 2 列 / 二级 4 列），
+      //   一个数组没法同时喂给两个 grid；拆开比在模板里 slice 更好读。
+      // 客单价提到一级的理由：它是"每单多少钱"，与 GMV 合计构成
+      //   "总量 × 单价"这一对最基本的经营读数；支付成功率与退款率
+      //   是质量类指标，属于二级。
+      var cardModel = computed(function () {
         var t = totals.value;
         var avgCents = (t.gmvCents !== null && t.orders > 0) ? (t.gmvCents / BigInt(t.orders)) : null;
         var successRate = (t.payCnt + t.payFail) > 0 ? (t.payCnt / (t.payCnt + t.payFail)) : null;
@@ -1364,26 +1638,37 @@
           ? shortTime(series.value[0].window_start) + ' ~ ' + shortTime(series.value[series.value.length - 1].window_start)
           : '暂无窗口';
 
-        return [
-          {
+        return {
+          hero: {
             label: 'GMV 合计', value: formatCents(t.gmvCents), unit: '元', domain: 'trade',
             sub: span, tip: definitionOf('gmv'),
             delta: buildDelta(series.value, 'gmv', 'money', ' 元')
           },
-          {
+          avg: {
             label: '客单价', value: formatCents(avgCents), unit: '元', domain: 'trade',
             sub: 'GMV ÷ 订单量 ' + formatInt(t.orders) + ' 笔', tip: definitionOf('avg_order_amount'),
             delta: buildDelta(series.value, 'avg_order_amount', 'money', ' 元')
           },
-          {
-            label: '支付成功率', value: formatRate(successRate), unit: '', domain: 'trade',
-            sub: '成功 ' + formatInt(t.payCnt) + ' / 失败 ' + formatInt(t.payFail), tip: definitionOf('payment_success_rate')
-          },
-          {
-            label: '退款率（金额口径）', value: formatRate(refundRate), unit: '', domain: 'trade',
-            sub: '退款 ' + formatCents(t.refundCents) + ' / 支付 ' + formatCents(t.payCents), tip: definitionOf('refund_rate')
-          }
-        ];
+          rest: [
+            {
+              label: '支付成功率', value: formatRate(successRate), unit: '', domain: 'trade',
+              sub: '成功 ' + formatInt(t.payCnt) + ' / 失败 ' + formatInt(t.payFail), tip: definitionOf('payment_success_rate')
+            },
+            {
+              label: '退款率（金额口径）', value: formatRate(refundRate), unit: '', domain: 'trade',
+              sub: '退款 ' + formatCents(t.refundCents) + ' / 支付 ' + formatCents(t.payCents), tip: definitionOf('refund_rate')
+            }
+          ]
+        };
+      });
+
+      var heroCard = computed(function () { return cardModel.value.hero; });
+      var avgCard = computed(function () { return cardModel.value.avg; });
+      var restCards = computed(function () { return cardModel.value.rest; });
+      // 兼容：模板若仍引用 cards，给出同一批数据（避免遗漏引用时报 undefined）
+      var cards = computed(function () {
+        var m = cardModel.value;
+        return [m.hero, m.avg].concat(m.rest);
       });
 
       // —— 双轴折线：GMV（左轴）+ 支付金额（右轴） ——
@@ -1412,6 +1697,9 @@
         series: series,
         chartEl: chartEl,
         cards: cards,
+        heroCard: heroCard,
+        avgCard: avgCard,
+        restCards: restCards,
         page: page,
         pageCount: pageCount,
         pageSize: pageSize,
@@ -1499,13 +1787,40 @@
       var steps = computed(function () {
         var f = funnelTotal.value;
         var pairs = [
-          { label: '浏览 → 点击', from: f.view_cnt, to: f.click_cnt, note: '流失 ' + formatInt(f.view_cnt - f.click_cnt) },
-          { label: '点击 → 加购', from: f.click_cnt, to: f.cart_cnt, note: '流失 ' + formatInt(f.click_cnt - f.cart_cnt) },
-          { label: '加购 → 购买', from: f.cart_cnt, to: f.buy_cnt, note: '流失 ' + formatInt(f.cart_cnt - f.buy_cnt) }
+          { label: '浏览 → 点击', from: '浏览', to: '点击', a: f.view_cnt, b: f.click_cnt },
+          { label: '点击 → 加购', from: '点击', to: '加购', a: f.click_cnt, b: f.cart_cnt },
+          { label: '加购 → 购买', from: '加购', to: '购买', a: f.cart_cnt, b: f.buy_cnt }
         ];
         return pairs.map(function (p) {
-          return { label: p.label, value: formatRate(ratioOf(p.to, p.from)), note: p.note };
+          return {
+            label: p.label,
+            value: formatRate(ratioOf(p.b, p.a)),
+            note: '流失 ' + formatInt(p.a - p.b),
+            // 断点判据：**这一级的分母为 0**（而不是"结果为 0"）。
+            // 分母为 0 时该级及其之后的比率在数学上都无意义，
+            // 与"比例恰好算出来是 0%"是两回事，不能混为一谈。
+            zero: !p.a
+          };
         });
+      });
+
+      // 漏斗断点：找出**最靠前**的那个"分母为 0"的级。
+      // 为什么只报第一个：后面的必然也为 0，全部报出来只是噪声；
+      // 修的人只需要知道"从哪一级开始断的"。
+      var funnelBreak = computed(function () {
+        var f = funnelTotal.value;
+        var chain = [
+          { name: '浏览', v: f.view_cnt },
+          { name: '点击', v: f.click_cnt },
+          { name: '加购', v: f.cart_cnt },
+          { name: '购买', v: f.buy_cnt }
+        ];
+        for (var i = 0; i < chain.length - 1; i++) {
+          if (!chain[i].v) {
+            return { from: chain[i].name, to: chain[chain.length - 1].name };
+          }
+        }
+        return null;
       });
 
       // —— 漏斗图：ECharts funnel，标签显示层名与累计值 ——
@@ -1575,6 +1890,7 @@
         sizeCards: sizeCards,
         rateCards: rateCards,
         steps: steps,
+        funnelBreak: funnelBreak,
         chartEl: chartEl,
         funnelEl: funnelEl,
         fmtInt: formatInt
@@ -2121,6 +2437,16 @@
         ];
       });
 
+      var compareAllZero = computed(function () {
+        var rows = compareRows.value;
+        if (!rows.length) return false;
+        // 判据是"每行 diff 归零"，与表格里 diff-ok / diff-bad 的判据保持一致 ——
+        // 两处若各写一套，会出现"表格全绿但标题说'有差异'"的自相矛盾。
+        return rows.every(function (r) {
+          return r.diff === '0' || r.diff === '0.00';
+        });
+      });
+
       bindChart(function () { return dailyEl.value; }, function () {
         var rows = daily.value;
         if (!rows.length) return null;
@@ -2173,13 +2499,15 @@
         reconcile: reconcile,
         isPass: isPass,
         compareRows: compareRows,
+        compareAllZero: compareAllZero,
         mismatches: mismatches,
         dailyEl: dailyEl,
         categoryEl: categoryEl,
         shortDate: shortDate,
         shortTime: shortTime,
         formatInt: formatInt,
-        formatMoney: formatMoney
+        formatMoney: formatMoney,
+        formatTime: formatTime
       };
     }
   };
@@ -2210,6 +2538,542 @@
     if (n === null) return '—';
     return n < 1000 ? (n + ' ms') : ((n / 1000).toFixed(1) + ' s');
   }
+
+  // ============================================================
+  // ---------- 数据质量校验清单（前端静态镜像） ----------
+  // ============================================================
+  //
+  // !! 这份清单是 infrastructure/quality/checks.conf 的**只读镜像** !!
+  //
+  // 为什么要在前端放一份，而不是从接口取：
+  //   校验清单由 CLI 引擎（infrastructure/quality/run-check.sh）执行，
+  //   数据服务**没有**质量校验的只读接口 —— 本次改造的硬约束是
+  //   "不新增后端功能、不修改 API contract"，所以不能为这一页新开接口。
+  //
+  // 为什么不"顺手造"每个校验的 PASS/FAIL：
+  //   FRONTEND_UI_AUDIT §10 与 IMPLEMENTATION_PROMPT 硬约束 6 都明确禁止
+  //   "新建不存在后端的 Quality 完整页"与伪造数据。
+  //   因此本页只展示两样**真实**的东西：
+  //     ① 校验清单本身（标题/域/级别/执行引擎）—— 静态事实，来自 checks.conf；
+  //     ② **真实可取的完整性信号** —— 来自已有的 GET /batch/reconcile
+  //        （批流逐窗口对账）与 GET /meta/tables（数据服务实际放行的表白名单）。
+  //   每一处都不写"通过/失败"，因为前端拿不到那个结论。
+  //
+  // 与 checks.conf 的一致性如何保证：
+  //   tests/test_frontend_quality_manifest.py 会解析 checks.conf 并逐项比对
+  //   本清单的 id/title，不一致就让测试变红 —— 而不是靠"记得同步"。
+  var QUALITY_GROUPS = [
+    {
+      domain: 'trade',
+      label: '交易域',
+      desc: '订单 / 支付 / 退款三类事实的正确性',
+      checks: [
+        { id: 'rowcount_trade', title: '交易域非空守卫（实时 DWD 三表 + 离线 ADS）' },
+        { id: 'pk_unique_trade', title: '交易域主键唯一（order_id / payment_id / refund_id）' },
+        { id: 'notnull_trade', title: '交易域关键字段非空（主键 / user_id / amount / event_time）' },
+        { id: 'amount_gmv_realtime', title: '金额关系：实时 DWD SUM(amount) == 离线 ADS SUM(gmv)' },
+        { id: 'amount_payment_le_order', title: '金额关系：支付金额 <= 订单金额（不允许超付）' },
+        { id: 'amount_refund_le_payment', title: '金额关系：退款金额 <= 支付金额（不允许超退）' },
+        { id: 'enum_payment_status', title: '支付状态枚举合法（SUCCESS/FAILED）' },
+        { id: 'fresh_ads_trade_1m', title: '新鲜度：ads_batch_trade_1m 最新窗口滞后 <= 48h' }
+      ]
+    },
+    {
+      domain: 'traffic',
+      label: '流量域',
+      desc: '行为事件与漏斗口径',
+      checks: [
+        { id: 'rowcount_traffic', title: '流量域非空守卫（行为明细 + 流量 ADS 三表）' },
+        { id: 'pk_unique_traffic', title: '流量域主键唯一（event_id）' },
+        { id: 'notnull_traffic', title: '流量域关键字段非空（user_id / event_time / event_type / dt）' },
+        { id: 'enum_event_type', title: '行为枚举合法（VIEW/CLICK/CART/FAVORITE/BUY）' },
+        { id: 'funnel_monotonic', title: '漏斗逐级收窄（VIEW>CLICK>CART>BUY）' },
+        { id: 'fresh_ads_traffic_1m', title: '新鲜度：ads_traffic_1m 最新窗口滞后 <= 48h' },
+        { id: 'fresh_ads_traffic_1d', title: '新鲜度：ads_traffic_1d 最新分区日期滞后 <= 48h' },
+        { id: 'fresh_dwd_behavior_dt', title: '新鲜度：DWD 行为明细最新 dt 滞后 <= 48h' }
+      ]
+    },
+    {
+      domain: 'layer',
+      label: '分层与存储',
+      desc: '层间行数一致性与窗口键完整性（含 1 项需读 Iceberg）',
+      checks: [
+        { id: 'rowcount_layer', title: '分层表非空守卫（ODS/DWD/DWS/ADS 各层代表表）' },
+        { id: 'ads_window_positive', title: 'ADS 窗口数 > 0（四个窗口粒度表）' },
+        { id: 'pk_unique_ads', title: '离线 ADS 窗口主键唯一（trade 1m / traffic 1m + 1d）' },
+        { id: 'notnull_ads_win', title: '离线 ADS 窗口字段非空（window_start / window_end）' },
+        { id: 'ads_1m_1d_consistency', title: '离线 ADS 1m 汇总 == 1d 汇总（交易 2 项 + 流量 2 项）' },
+        { id: 'dwd_ads_trade_parity', title: '层间一致：DWD 订单数 == 离线 ADS 订单数合计' },
+        { id: 'dwd_ads_behavior_parity', title: '层间一致：DWD 行为明细 == ADS 窗口 PV 合计（20000）' },
+        { id: 'dwd_ods_parity_all', title: '层间一致：DWD == ODS 逐表（湖仓 Iceberg，5 张交易表）', engine: 'spark' }
+      ]
+    },
+    {
+      domain: 'cross',
+      label: '跨链路',
+      desc: '实时链路与离线链路的一致性',
+      checks: [
+        { id: 'dwd_ads_order_parity', title: '层间一致：实时 DWD 订单数 == 离线 ADS 订单数' }
+      ]
+    }
+  ];
+
+  // ============================================================
+  // ---------- 安全 Markdown 渲染（Ask 页回答正文） ----------
+  // ============================================================
+  //
+  // !! 为什么不能用 v-html !!
+  //   Agent 的回答是**模型生成的文本**，其中可能包含任意字符（含 <script>）。
+  //   用 innerHTML / v-html 渲染等于把"模型输出"当成"可信 HTML"执行 ——
+  //   一旦模型被诱导输出标签，就是一次 XSS。
+  //   所以这里**只生成 vnode**（Vue 的 h()），全程不碰 innerHTML：
+  //   Vue 会把文本节点当纯文本处理，标签天然不会被解析成元素。
+  //
+  // 支持范围（刻意很小，够用即可）：
+  //   ## / ###  标题        - / * 无序列表        1. 有序列表
+  //   | a | b | 表格        **粗体**               `行内代码`
+  //   ``` 代码块            水平线 ---
+  // 不支持也不需要：链接、图片、原生 HTML（回答里出现就按纯文本显示）。
+  //
+  // 为什么自己写而不引 marked/markdown-it：
+  //   项目硬约束"禁止引入 npm 依赖"，而这两者都是 npm 包。
+  function mdInline(text) {
+    // 行内解析：**粗体** 与 `代码`。用一次扫描完成，避免正则互相吃掉。
+    var out = [];
+    var re = /(\*\*[^*]+\*\*|`[^`]+`)/g;
+    var last = 0;
+    var m;
+    while ((m = re.exec(text)) !== null) {
+      if (m.index > last) out.push(text.slice(last, m.index));
+      var tok = m[0];
+      if (tok.slice(0, 2) === '**') {
+        out.push(h('strong', null, tok.slice(2, -2)));
+      } else {
+        out.push(h('code', { class: 'md-code' }, tok.slice(1, -1)));
+      }
+      last = m.index + tok.length;
+    }
+    if (last < text.length) out.push(text.slice(last));
+    return out.length ? out : [text];
+  }
+
+  function mdRow(line) {
+    // "| a | b |" → ['a','b']；去掉首尾空单元格
+    var cells = line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|');
+    return cells.map(function (c) { return c.trim(); });
+  }
+
+  function mdIsDivider(line) {
+    // 表格分隔行：| --- | :--: |
+    return /^\s*\|?[\s:|-]+\|?\s*$/.test(line) && line.indexOf('-') >= 0;
+  }
+
+  function renderMarkdown(src) {
+    var text = String(src === undefined || src === null ? '' : src);
+    if (!text.trim()) return [];
+
+    var lines = text.replace(/\r\n?/g, '\n').split('\n');
+    var blocks = [];
+    var i = 0;
+
+    while (i < lines.length) {
+      var line = lines[i];
+
+      // 代码块
+      if (/^\s*```/.test(line)) {
+        var buf = [];
+        i++;
+        while (i < lines.length && !/^\s*```/.test(lines[i])) { buf.push(lines[i]); i++; }
+        i++; // 跳过结束的 ```
+        blocks.push(h('pre', { class: 'md-pre' }, h('code', null, buf.join('\n'))));
+        continue;
+      }
+
+      // 标题
+      var hm = /^(#{1,6})\s+(.*)$/.exec(line);
+      if (hm) {
+        var level = Math.min(hm[1].length + 2, 6); // h1→h3：页面里 h1/h2 已被顶栏与面板占用
+        blocks.push(h('h' + level, { class: 'md-h' }, mdInline(hm[2])));
+        i++;
+        continue;
+      }
+
+      // 水平线
+      if (/^\s*(-{3,}|\*{3,})\s*$/.test(line)) {
+        blocks.push(h('hr', { class: 'md-hr' }));
+        i++;
+        continue;
+      }
+
+      // 表格：当前行是 |...| 且下一行是分隔行
+      if (/^\s*\|/.test(line) && i + 1 < lines.length && mdIsDivider(lines[i + 1])) {
+        var head = mdRow(line);
+        i += 2;
+        var body = [];
+        while (i < lines.length && /^\s*\|/.test(lines[i])) { body.push(mdRow(lines[i])); i++; }
+        var thead = h('thead', null, h('tr', null, head.map(function (c) {
+          return h('th', { scope: 'col' }, mdInline(c));
+        })));
+        var tbody = h('tbody', null, body.map(function (r) {
+          return h('tr', null, head.map(function (_, ci) {
+            return h('td', null, mdInline(r[ci] === undefined ? '' : r[ci]));
+          }));
+        }));
+        blocks.push(h('div', { class: 'md-table-wrap' }, h('table', { class: 'table table--compact md-table' }, [thead, tbody])));
+        continue;
+      }
+
+      // 列表（有序 / 无序）：连续行归为同一个列表
+      var lm = /^\s*(?:([-*+])\s+(.*)|(\d+)\.\s+(.*))$/.exec(line);
+      if (lm) {
+        var ordered = lm[3] !== undefined;
+        var items = [];
+        while (i < lines.length) {
+          var m2 = /^\s*(?:([-*+])\s+(.*)|(\d+)\.\s+(.*))$/.exec(lines[i]);
+          if (!m2 || (m2[3] !== undefined) !== ordered) break;
+          items.push(h('li', null, mdInline(m2[3] !== undefined ? m2[4] : m2[2])));
+          i++;
+        }
+        blocks.push(h(ordered ? 'ol' : 'ul', { class: 'md-list' }, items));
+        continue;
+      }
+
+      // 空行
+      if (!line.trim()) { i++; continue; }
+
+      // 段落：把连续的普通行合成一段（Markdown 的软换行按空格接续）
+      var para = [];
+      while (i < lines.length && lines[i].trim()
+             && !/^\s*```/.test(lines[i]) && !/^#{1,6}\s/.test(lines[i])
+             && !/^\s*\|/.test(lines[i]) && !/^\s*(?:[-*+]\s|\d+\.\s)/.test(lines[i])
+             && !/^\s*(-{3,}|\*{3,})\s*$/.test(lines[i])) {
+        para.push(lines[i].trim());
+        i++;
+      }
+      blocks.push(h('p', { class: 'md-p' }, mdInline(para.join(' '))));
+    }
+    return blocks;
+  }
+
+  // 执行轨：把**服务端返回的 graph.path / steps / executed_sql** 映射成固定 6 段。
+  //
+  // !! 这不是 chain-of-thought !!
+  //   每一段都对应"服务端确实报告过的动作"：
+  //     Query      —— 用户提问（永远发生）
+  //     Retrieval  —— graph.path 含 'retrieve'，或 docs 非空
+  //     Tool       —— steps 里有成功的工具调用
+  //     SQL        —— executed_sql 非空
+  //     Validation —— graph.path 含 'validate' 或 'reflect'（给出 validation.ok）
+  //     Answer     —— answer 非空
+  //   没有任何一段来自"推测模型在想什么"。拿不到数据时该段显示"未发生"，
+  //   而不是编一个好看的流程。
+  function buildRail(ans) {
+    if (!ans) return [];
+    var path = (ans.graph && ans.graph.path) || [];
+    var has = function (n) { return path.indexOf(n) >= 0; };
+    var steps = ans.steps || [];
+    var sql = ans.executed_sql || [];
+    var okSteps = steps.filter(function (s) { return s && s.ok; });
+    var failed = steps.filter(function (s) { return s && !s.ok; });
+    var v = ans.validation || {};
+    var retries = typeof ans.retries === 'number' ? ans.retries : 0;
+
+    function state(done, blocked) {
+      if (blocked) return 'fail';
+      return done ? 'done' : 'skip';
+    }
+
+    var rail = [];
+    rail.push({ key: 'query', label: '提问', state: 'done',
+      note: '收到问题' });
+
+    rail.push({ key: 'retrieve', label: '口径检索', state: state(has('retrieve') || (ans.docs || []).length > 0),
+      note: (ans.docs || []).length ? ('命中 ' + ans.docs.length + ' 条口径') : '未检索' });
+
+    rail.push({ key: 'tool', label: '工具取数', state: state(okSteps.length > 0, failed.length > 0 && !okSteps.length),
+      note: okSteps.length ? (okSteps.length + ' 次成功') : (failed.length ? (failed.length + ' 次失败') : '未调用') });
+
+    rail.push({ key: 'sql', label: '只读 SQL', state: state(sql.length > 0, failed.length > 0 && !sql.length),
+      note: sql.length ? (sql.length + ' 条已执行') : '未执行' });
+
+    rail.push({ key: 'validate', label: '结果校验', state: state(has('validate') || has('reflect')),
+      note: v.ok === true ? '通过' : (v.ok === false ? '存在问题' : '—') });
+
+    rail.push({ key: 'answer', label: '回答', state: state(!!(ans.answer && String(ans.answer).trim())),
+      note: typeof ans.elapsed_ms === 'number' ? (Math.round(ans.elapsed_ms / 100) / 10 + 's') : '' });
+
+    // 有重试时，在校验段标出来 —— "反思重试"是本项目的核心能力，必须可见
+    if (retries > 0) {
+      rail[4].note = rail[4].note + ' · 重试 ' + retries + ' 次';
+      rail[4].retried = true;
+    }
+    return rail;
+  }
+
+  // 服务端把工具返回压成字符串放在 step.summary 里；这里尽量取出可读字段，
+  // 取不到就原样显示（**不解析失败就不要显示**，也不能编造行数）。
+  function stepSummary(step) {
+    if (!step || !step.summary) return '';
+    var raw = String(step.summary);
+    if (raw.charAt(0) !== '{') return raw.slice(0, 200);
+    try {
+      var o = JSON.parse(raw);
+      var bits = [];
+      if (typeof o.row_count === 'number') bits.push('返回 ' + o.row_count + ' 行');
+      if (typeof o.elapsed_ms === 'number') bits.push(o.elapsed_ms + ' ms');
+      if (o.error && o.error.code) bits.push('错误 ' + o.error.code);
+      return bits.join(' · ') || raw.slice(0, 160);
+    } catch (e) {
+      return raw.slice(0, 160);
+    }
+  }
+
+  // MarkdownView：把 renderMarkdown 生成的 vnode 数组渲染出来。
+  //
+  // !! 为什么用 render 函数而不是在模板里 <component :is="node"> !!
+  //   模板里要把"vnode 数组"逐个渲染需要嵌套 <component :is>，可读性差，
+  //   而且 Vue 对"把 vnode 当 is 传入"的支持有边界情况（数组/片段）。
+  //   直接写 render 函数是最朴素的用法：返回 vnode 数组即可。
+  //   关键点仍然是**不产生 innerHTML**，所以模型输出里的标签始终是纯文本。
+  // ============================================================
+  // ---------- 页面 9：数据质量（#/quality） ----------
+  // ============================================================
+  //
+  // !! 这一页的边界，写在最前面 !!
+  //   数据服务**没有**质量校验的只读接口，本次改造也不允许新增后端功能。
+  //   所以本页**不显示任何 PASS / FAIL / 通过率** —— 那些结论只有 CLI 引擎
+  //   跑出来才有；前端自己算或直接写死都等于伪造。
+  //
+  //   本页展示的三块内容全部是**真实可核**的：
+  //     ① 校验清单（25 条）—— checks.conf 的静态镜像，标出域与执行引擎；
+  //     ② 实时完整性信号 —— 取自 GET /batch/reconcile：
+  //        is_pass / matched / mismatched 是**服务端算出来**的真实结论；
+  //     ③ 权限边界 —— 取自 GET /meta/tables：数据服务实际放行的表白名单。
+  //   以及一块"怎么跑"的说明（命令 + 退出码语义）。
+  var QualityPanel = {
+    name: 'QualityPanel',
+    template: '#tpl-quality',
+    setup: function () {
+      var panel = usePanel();
+      var reconcile = ref(null);
+      var tables = ref([]);
+      var filter = ref('all');
+
+      function load() {
+        return panel.run(function () {
+          // 两条都容错：任一条失败不影响另一块（质量页不该被单个接口打空）
+          var rec = api.batchReconcile().then(
+            function (d) { reconcile.value = d || null; return d; },
+            function () { reconcile.value = null; return null; }
+          );
+          var tb = api.metaTables().then(
+            function (d) { tables.value = Array.isArray(d) ? d : []; return d; },
+            function () { tables.value = []; return null; }
+          );
+          return Promise.all([rec, tb]).then(function () { return true; });
+        }, function () { return null; });
+      }
+      panel.setReload(load);
+      onMounted(load);
+
+      var groups = computed(function () {
+        if (filter.value === 'all') return QUALITY_GROUPS;
+        return QUALITY_GROUPS.filter(function (g) { return g.domain === filter.value; });
+      });
+
+      var totalChecks = computed(function () {
+        return QUALITY_GROUPS.reduce(function (n, g) { return n + g.checks.length; }, 0);
+      });
+
+      var filters = computed(function () {
+        return [{ key: 'all', label: '全部（' + totalChecks.value + '）' }].concat(
+          QUALITY_GROUPS.map(function (g) {
+            return { key: g.domain, label: g.label + '（' + g.checks.length + '）' };
+          })
+        );
+      });
+
+      // 实时完整性信号：**直接用服务端返回的字段**，不做二次判断。
+      var integrity = computed(function () {
+        var r = reconcile.value;
+        var l = r && r.latest;
+        if (!l) return null;
+        var pass = l.is_pass === true || l.is_pass === 1 || l.is_pass === '1';
+        var totals = (r && r.totals) || {};
+        var rt = totals.realtime || {};
+        var bt = totals.batch || {};
+        return {
+          pass: pass,
+          batchId: l.batch_id,
+          comparedAt: l.compared_at,
+          windows: l.batch_windows,
+          matched: l.matched_windows,
+          mismatched: l.mismatched_windows,
+          gmvRt: rt.gmv,
+          gmvBt: bt.gmv,
+          gmvEqual: !isMissing(rt.gmv) && !isMissing(bt.gmv) && moneyToCents(rt.gmv) === moneyToCents(bt.gmv)
+        };
+      });
+
+      var tableCount = computed(function () { return tables.value.length; });
+
+      // 按库分组：metaTables 的行带 schema 字段（ecommerce = 实时链路库，
+      // lakehouse_ads = 离线链路库）。这是**数据服务实际放行的白名单**，
+      // 不是把 checks.conf 抄一遍 —— 它回答的是"Agent 到底能读到哪些表"。
+      var tablesBySchema = computed(function () {
+        var out = {};
+        tables.value.forEach(function (r) {
+          var s = (r && r.schema) || '（未标注库）';
+          if (!out[s]) out[s] = [];
+          out[s].push(r);
+        });
+        return out;
+      });
+      var schemaNames = computed(function () { return Object.keys(tablesBySchema.value).sort(); });
+
+      return {
+        loading: panel.loading,
+        error: panel.error,
+        groups: groups,
+        filters: filters,
+        filter: filter,
+        totalChecks: totalChecks,
+        integrity: integrity,
+        tables: tables,
+        tableCount: tableCount,
+        tablesBySchema: tablesBySchema,
+        schemaNames: schemaNames,
+        formatInt: formatInt,
+        formatMoney: formatMoney,
+        formatTime: formatTime
+      };
+    }
+  };
+
+  // ============================================================
+  // ---------- 页面 10：实时链路（#/realtime） ----------
+  // ============================================================
+  //
+  // 与「交易分析」「流量分析」的分工（避免做成第三份重复页面）：
+  //   #/trade / #/traffic —— 按**指标主题**看历史序列（业务视角）
+  //   #/realtime         —— 按**链路健康**看实时侧（工程视角）：
+  //                        窗口新鲜度、窗口密度、跨窗口不可加指标的提醒
+  // 数据全部来自已有的 /metrics/trade 与 /metrics/traffic，**不新增接口、不造数**。
+  var RealtimePanel = {
+    name: 'RealtimePanel',
+    template: '#tpl-realtime',
+    setup: function () {
+      var panel = usePanel();
+      var trade = ref([]);
+      var traffic = ref([]);
+      var tradeEl = ref(null);
+
+      function load() {
+        return panel.run(function () {
+          return Promise.all([api.trade(120), api.traffic(120)]).then(function (res) {
+            trade.value = res[0] || [];
+            traffic.value = res[1] || [];
+            return true;
+          });
+        }, function () { return null; });
+      }
+      panel.setReload(load);
+      onMounted(load);
+
+      // 新鲜度：最新窗口距"现在"多久。
+      // 判据说明：实时链路是 1 分钟窗口，正常情况下滞后应是**分钟级**；
+      // 这里只**如实显示**测得的滞后，不设通过阈值 ——
+      // 阈值属于告警策略（在 Prometheus 侧），前端不代替它下结论。
+      var freshness = computed(function () {
+        var rows = trade.value;
+        if (!rows.length) return null;
+        var last = rows[rows.length - 1];
+        var ts = last.window_start;
+        if (isMissing(ts)) return null;
+        var d = new Date(String(ts).replace(' ', 'T'));
+        if (isNaN(d.getTime())) return null;
+        var lagMin = Math.floor((Date.now() - d.getTime()) / 60000);
+        return { windowStart: ts, lagMin: lagMin };
+      });
+
+      var latest = computed(function () {
+        var rows = trade.value;
+        return rows.length ? rows[rows.length - 1] : null;
+      });
+
+      var latestTraffic = computed(function () {
+        var rows = traffic.value;
+        return rows.length ? rows[rows.length - 1] : null;
+      });
+
+      // 窗口密度：最近 N 个窗口里"有业务量"的比例。
+      // 为什么值得看：实时链路在数据稀疏时会出现大量 count=0 的窗口，
+      // 那不是故障，但会让人误判"链路没在写"。把比例显式写出来，
+      // 比让人从趋势图的锯齿里猜要好。
+      var density = computed(function () {
+        var rows = trade.value;
+        if (!rows.length) return null;
+        var active = rows.filter(function (r) {
+          return numberOrNull(r.order_cnt) > 0 || numberOrNull(r.gmv) > 0;
+        }).length;
+        return { active: active, total: rows.length, pct: rows.length ? (active / rows.length * 100) : 0 };
+      });
+
+      // 实时 KPI：最近一个窗口的真实取值（不是累计值 —— 累计值在交易页）
+      var windowKpi = computed(function () {
+        var t = latest.value || {};
+        var f = latestTraffic.value || {};
+        return [
+          { label: '本窗口 GMV', value: formatMoney(t.gmv), unit: '元', domain: 'trade', sub: '窗口 ' + formatTime(t.window_start), tip: definitionOf('gmv') },
+          { label: '本窗口订单量', value: formatInt(t.order_cnt), unit: '笔', domain: 'trade', sub: '下单用户 ' + formatInt(t.order_user_cnt) + ' 人', tip: definitionOf('order_cnt') },
+          { label: '本窗口支付笔数', value: formatInt(t.payment_cnt), unit: '笔', domain: 'trade', sub: '支付金额 ' + formatMoney(t.payment_amount) + ' 元', tip: definitionOf('payment_cnt') },
+          { label: '本窗口 PV', value: formatInt(f.pv), unit: '次', domain: 'traffic', sub: '窗口 ' + formatTime(f.window_start), tip: definitionOf('pv') }
+        ];
+      });
+
+      bindChart(function () { return tradeEl.value; }, function () {
+        var rows = trade.value.slice(-60);
+        if (!rows.length) return null;
+        var labels = rows.map(function (r) { return shortTime(r.window_start); });
+        return {
+          color: [C.trade, C.neutral],
+          tooltip: {
+            axisPointer: { type: 'cross', label: { backgroundColor: '#1b2739', color: C.text2, crossStyle: { color: C.grid } } }
+          },
+          legend: { data: ['GMV', '订单量'] },
+          xAxis: timeAxis(labels),
+          yAxis: [moneyAxis(), intAxis({ splitLine: { show: false } })],
+          series: [
+            makeLine('GMV', rows.map(function (r) { return numberOrNull(r.gmv); }), C.trade, 0),
+            makeBar('订单量', rows.map(function (r) { return numberOrNull(r.order_cnt); }), withAlpha(C.neutral, 0.75), { yAxisIndex: 1 })
+          ]
+        };
+      });
+
+      return {
+        loading: panel.loading,
+        error: panel.error,
+        trade: trade,
+        traffic: traffic,
+        freshness: freshness,
+        density: density,
+        windowKpi: windowKpi,
+        tradeEl: tradeEl,
+        fmtInt: formatInt,
+        fmtMoney: formatMoney,
+        fmtTime: formatTime,
+        fmtShort: shortTime
+      };
+    }
+  };
+
+  var MarkdownView = {
+    name: 'MarkdownView',
+    props: { source: { type: String, default: '' } },
+    render: function () {
+      return h('div', { class: 'md' }, renderMarkdown(this.source));
+    }
+  };
 
   var AskPanel = {
     name: 'AskPanel',
@@ -2283,6 +3147,69 @@
         submit();
       }
 
+      // SQL 复制。两级降级：
+      //   ① navigator.clipboard（需要 https 或 localhost 安全上下文）
+      //   ② 站点是**明文 HTTP + IP 访问**，不是安全上下文，navigator.clipboard
+      //      在多数浏览器里不可用 → 退回临时的 textarea + execCommand。
+      // 两级都失败时给出可操作的提示，而不是静默什么都不做。
+      var copied = ref(-1);
+      var copyNote = ref('');
+      function copySql(sql, index) {
+        var text = String(sql || '');
+        var done = function () {
+          copied.value = index;
+          copyNote.value = '';
+          window.setTimeout(function () { copied.value = -1; }, 1600);
+        };
+        var fallback = function () {
+          try {
+            var ta = document.createElement('textarea');
+            ta.value = text;
+            ta.setAttribute('readonly', 'readonly');
+            ta.style.position = 'fixed';
+            ta.style.top = '-1000px';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            var ok = document.execCommand('copy');
+            document.body.removeChild(ta);
+            if (ok) { done(); return; }
+          } catch (e) { /* 落到下面的提示 */ }
+          copyNote.value = '当前浏览器不允许自动复制（站点为明文 HTTP），请手动选中 SQL 文本复制。';
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(done, fallback);
+        } else {
+          fallback();
+        }
+      }
+
+      var rail = computed(function () { return buildRail(answer.value); });
+      var answerNodes = computed(function () {
+        var a = answer.value;
+        return a ? renderMarkdown(a.answer) : [];
+      });
+      var docCount = computed(function () {
+        var a = answer.value;
+        return a && a.docs ? a.docs.length : 0;
+      });
+      // 校验结论：validation.ok === false 时要在回答区顶部明确提示，
+      // 不能只把问题埋在折叠的"执行过程"里。
+      var validationNote = computed(function () {
+        var a = answer.value;
+        var v = a && a.validation;
+        if (!v) return '';
+        var blockers = v.blocking_issues || [];
+        if (blockers.length) return blockers.join('；');
+        var warnings = v.warnings || [];
+        if (warnings.length) return warnings.join('；');
+        return '';
+      });
+      var validationOk = computed(function () {
+        var a = answer.value;
+        return !!(a && a.validation && a.validation.ok);
+      });
+
       return {
         loading: panel.loading,
         error: panel.error,
@@ -2295,7 +3222,16 @@
         submit: submit,
         useExample: useExample,
         prettyArgs: prettyArgs,
-        formatMs: formatMs
+        formatMs: formatMs,
+        rail: rail,
+        answerNodes: answerNodes,
+        docCount: docCount,
+        validationNote: validationNote,
+        validationOk: validationOk,
+        stepSummary: stepSummary,
+        copied: copied,
+        copyNote: copyNote,
+        copySql: copySql
       };
     }
   };
@@ -2387,6 +3323,7 @@
 
       return {
         routes: ROUTES,
+        navGroups: navGroups,
         page: page,
         route: route,
         collapsed: collapsed,
@@ -2418,6 +3355,7 @@
   app.component('empty', EmptyState);
   app.component('kpi', KpiCard);
   app.component('select-box', SelectBox);
+  app.component('markdown-view', MarkdownView);
   app.component('overview-panel', OverviewPanel);
   app.component('trade-panel', TradePanel);
   app.component('traffic-panel', TrafficPanel);
@@ -2426,6 +3364,8 @@
   app.component('metrics-panel', MetricsPanel);
   app.component('batch-panel', BatchPanel);
   app.component('ask-panel', AskPanel);
+  app.component('quality-panel', QualityPanel);
+  app.component('realtime-panel', RealtimePanel);
   app.mount('#app');
 
   if (bootEl && bootEl.parentNode) bootEl.parentNode.removeChild(bootEl);
