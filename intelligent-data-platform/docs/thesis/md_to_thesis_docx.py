@@ -49,7 +49,10 @@ FONT_MONO = "Consolas"
 BODY_PT = 12.0          # 小四
 H1_PT, H2_PT, H3_PT = 16.0, 14.0, 12.0   # 三号 / 四号 / 小四
 TABLE_PT = 10.5         # 五号
-CODE_PT = 9.0           # 9~10 pt
+CODE_PT = 9.0           # 代码块西文（9~10 pt）
+CODE_CJK_PT = 10.0      # 代码块中文：Consolas 单元格宽 0.55 em，
+                        # 10 pt 汉字（1 em）≈ 2 × 9 pt Consolas 单元格，ASCII 图才对得齐
+CODE_LINE_PT = 14.0     # 代码块固定行距，避免中英混排把行高撑歪
 FOOTER_PT = 10.5
 
 PAGE_W_CM, PAGE_H_CM = 21.0, 29.7        # A4
@@ -65,6 +68,7 @@ NOTE_BORDER = "8FAADC"
 
 FIRST_LINE_CHARS = 200          # 首行缩进 2 字符
 HANGING_CM = 0.74               # 悬挂缩进
+CM_TO_PT = 72.0 / 2.54
 QUOTE_LEFT_CM = 0.6
 
 TOC_INSTR = r'TOC \o "1-3" \h \z \u'
@@ -581,8 +585,9 @@ def _list_paragraph(doc, marker: str, text: str, *, extra_left_cm: float = 0.0) 
     pf.line_spacing = 1.5
     pf.space_before = Pt(0)
     pf.space_after = Pt(0)
+    # 悬挂缩进：编号顶到左边距，折行与文字左对齐（参考文献条目同此处理）
     _set_indent(paragraph, left_cm=HANGING_CM + extra_left_cm, right_cm=0.0,
-                first_line_pt=-HANGING_CM, first_line_chars=0)
+                first_line_pt=-HANGING_CM * CM_TO_PT)
     _add_inline_runs(paragraph, f"{marker} {text}", size=BODY_PT)
     return paragraph
 
@@ -623,6 +628,24 @@ def _code_line_tokens(line: str) -> list[tuple[str, bool]]:
     return out
 
 
+def _split_by_width(text: str) -> list[tuple[str, bool]]:
+    """按显示宽度把文本切成（片段, 是否全角）——全角片段用中文字体与大一号字。"""
+    out: list[tuple[str, bool]] = []
+    buf = ""
+    cur: bool | None = None
+    for ch in text:
+        wide = unicodedata.east_asian_width(ch) in ("W", "F")
+        if cur is None or wide == cur:
+            buf += ch
+        else:
+            out.append((buf, bool(cur)))
+            buf = ch
+        cur = wide
+    if buf:
+        out.append((buf, bool(cur)))
+    return out
+
+
 def _code_block(doc, lines: list[str]) -> None:
     """代码/命令块：Consolas、9 pt、不缩进、浅灰底纹 + 左侧竖线。"""
     if not lines:
@@ -631,7 +654,7 @@ def _code_block(doc, lines: list[str]) -> None:
     for idx, raw in enumerate(lines):
         paragraph = doc.add_paragraph()
         pf = paragraph.paragraph_format
-        pf.line_spacing = 1.0
+        pf.line_spacing = Pt(CODE_LINE_PT)
         pf.space_before = Pt(3) if idx == 0 else Pt(0)
         pf.space_after = Pt(3) if idx == last else Pt(0)
         _set_indent(paragraph, left_cm=0.0, right_cm=0.0, first_line_pt=0.0, first_line_chars=0)
@@ -651,12 +674,19 @@ def _code_block(doc, lines: list[str]) -> None:
         snap.set(qn("w:val"), "0")
         pPr.insert_element_before(snap, "w:spacing", *_PPR_TAIL[11:])
 
+        if "**" in raw:
+            COMPAT_NOTES.append("代码块内混入 ** 强调标记，已转为加粗文本（不保留字面 **）")
         for text, bold in _code_line_tokens(raw):
-            if "**" in raw:
-                COMPAT_NOTES.append("代码块内混入 ** 强调标记，已转为加粗文本（不保留字面 **）")
-            run = paragraph.add_run(text)
-            apply_run_format(run, cn=FONT_BODY_CN, en=FONT_MONO, size=CODE_PT,
-                             bold=bold, hint="default")
+            for segment, wide in _split_by_width(text):
+                run = paragraph.add_run(segment)
+                apply_run_format(
+                    run,
+                    cn=FONT_BODY_CN,
+                    en=FONT_BODY_CN if wide else FONT_MONO,
+                    size=CODE_CJK_PT if wide else CODE_PT,
+                    bold=bold,
+                    hint=None if wide else "default",
+                )
 
 
 def _empty_paragraph(doc) -> None:
@@ -671,14 +701,16 @@ def _empty_paragraph(doc) -> None:
 
 
 def _column_widths(block: Block) -> list[float]:
-    """按内容宽度按比例分配列宽，并保证最小列宽。"""
+    """按内容宽度按比例分配列宽，并保证最小列宽（列多时最小列宽自动收窄）。"""
     rows: list[list[str]] = ([block.header] if block.header else []) + block.rows
     weights: list[float] = []
     for c in range(block.ncols):
         cells = [_display_cells(r[c]) for r in rows if c < len(r) and r[c]]
-        weights.append(min(max(max(cells, default=4), 6), 46))
+        weights.append(min(max(max(cells, default=4), 8), 46))
     total = sum(weights)
-    min_cm = 1.4
+    # 最小列宽：窄标签列不至于一个字一折行；同时保证所有最小列宽合计不超过版心 60%，
+    # 否则 6~7 列的表会把正文列挤成"每行两三个字"。
+    min_cm = min(2.0, TEXT_WIDTH_CM * 0.6 / block.ncols)
     widths = [TEXT_WIDTH_CM * w / total for w in weights]
     for _ in range(8):
         deficit = sum(max(0.0, min_cm - w) for w in widths)
@@ -764,17 +796,17 @@ def _cover(doc) -> None:
         for _ in range(count):
             _empty_paragraph(doc)
 
-    blank(3)
+    blank(5)
     _rich_paragraph(doc, "________大学", size=22, cn=FONT_HEADING, en=FONT_HEADING, bold=True,
                     align=WD_ALIGN_PARAGRAPH.CENTER, line_spacing=1.0)
     _rich_paragraph(doc, "本科毕业设计（论文）", size=18, cn=FONT_HEADING, en=FONT_HEADING,
                     bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, line_spacing=1.0)
-    blank(4)
+    blank(5)
     _rich_paragraph(doc, _COVER_MAIN, size=22, cn=FONT_HEADING, en=FONT_HEADING, bold=True,
                     align=WD_ALIGN_PARAGRAPH.CENTER, line_spacing=1.5)
     _rich_paragraph(doc, _COVER_SUB, size=16, cn=FONT_HEADING, en=FONT_HEADING, bold=True,
                     align=WD_ALIGN_PARAGRAPH.CENTER, line_spacing=1.5)
-    blank(5)
+    blank(9)
     for label in ("作者", "学号", "导师", "日期"):
         _rich_paragraph(doc, f"{label}：______", size=14, align=WD_ALIGN_PARAGRAPH.CENTER,
                         line_spacing=1.5)
@@ -1039,6 +1071,25 @@ def verify(path: Path, sample: int = 200) -> None:
     LOG.info("代码块段落      : %d", code_count)
     assert body_count > 0 and spacing_ok == body_count, "有正文段落不是 1.5 倍行距"
     assert indent_ok > 0, "没有任何段落设置首行缩进 2 字符"
+
+    # ---- 列表与参考文献：悬挂缩进 ----
+    hanging_count = 0
+    hanging_bad = 0
+    expected_hanging = int(round(Cm(HANGING_CM).twips))
+    for paragraph in paragraphs:
+        pPr = paragraph._p.find(qn("w:pPr"))
+        ind = pPr.find(qn("w:ind")) if pPr is not None else None
+        if ind is None:
+            continue
+        hanging = ind.get(qn("w:hanging"))
+        if hanging is None:
+            continue
+        hanging_count += 1
+        if abs(int(hanging) - expected_hanging) > 2:
+            hanging_bad += 1
+    LOG.info("悬挂缩进段落    : %d 段（hanging≈%d twips = %.2f cm），异常 %d",
+             hanging_count, expected_hanging, HANGING_CM, hanging_bad)
+    assert hanging_count > 0 and hanging_bad == 0, "列表/参考文献的悬挂缩进不正确"
 
     # ---- Markdown 残留：全篇扫描 ----
     # 代码块与行内代码里的 | ** 是内容本身（ASCII 图、正则、glob、SQL），不算残留。
