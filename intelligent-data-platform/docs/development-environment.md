@@ -1,8 +1,8 @@
 # 开发环境说明（Development Environment）
 
-> 文档版本：V1.2
-> 更新日期：2026-09-26
-> 适用 Sprint：Sprint 0
+> 文档版本：V1.3
+> 更新日期：2026-09-27
+> 适用 Sprint：Sprint 0 起（各 Sprint 增量补充）
 >
 > 本文档记录**实际使用的运行环境、镜像版本、端口分配与版本选型依据**。
 > 原则：**不使用 `latest`，不猜测版本**。所有版本均来自官方仓库实际查证，
@@ -189,6 +189,8 @@ Docker Desktop → Settings → Resources → Disk image location → D:\DockerD
 | Flink JobManager | 8081 | 8081 | `FLINK_REST_PORT` | Flink Web UI / REST API |
 | Flink JobManager | 6123 | — | — | 内部 RPC（Pekko/Akka，仅集群内） |
 | Flink SQL Gateway | 8083 | 8083 | `FLINK_SQL_GATEWAY_PORT` | SQL Gateway REST（作业提交入口） |
+| Prometheus | 9090 | **127.0.0.1:9090** | `PROMETHEUS_HOST_PORT` | 指标抓取与查询 API（**只绑回环**，公网走 Nginx 的 `/metrics/`） |
+| Grafana | 3000 | **127.0.0.1:3001** | `GRAFANA_HOST_PORT` | 可视化面板（**只绑回环**，公网走 Nginx 的 `/grafana/`） |
 
 Sprint 0 启动前已实测以上宿主端口**全部空闲**。
 
@@ -208,6 +210,8 @@ Sprint 0 启动前已实测以上宿主端口**全部空闲**。
 | Flink（基础镜像） | `flink` | `1.20.1-scala_2.12-java17` | 见构建产物 | amd64, arm64 |
 | Flink（本项目镜像） | `data-platform/flink` | `1.20.1`（由 `infrastructure/flink/Dockerfile` 构建） | 本地构建 | amd64 |
 | Flink Kafka SQL Connector | `flink-sql-connector-kafka` | `3.4.0-1.20` | Maven Central 官方 artifact | — |
+| Prometheus（Sprint 11） | `prom/prometheus` | `v3.13.3` | `sha256:6976aa8a60fec930796ce5772b8d12da7a318a5daa8d40d69c5c7819a05eeed7` | amd64, arm64 |
+| Grafana（Sprint 11） | `grafana/grafana` | `13.2.2` | `sha256:ac461fb352abc50da10a51c7d02462e9c05488f11f53f14b3ad79a8145f638a0` | amd64, arm64 |
 
 > Flink 镜像**不直接使用官方镜像**，而是在其之上加装 Kafka SQL connector
 > （`infrastructure/flink/Dockerfile`），这样 TaskManager / JobManager /
@@ -228,6 +232,82 @@ Sprint 0 启动前已实测以上宿主端口**全部空闲**。
 | `confluent-kafka` | `>=2,<3` | 生产 Kafka 事件 |
 | `python-dotenv` | `>=1,<2` | 读取 `.env` |
 | `pytest` | `>=8,<10` | 测试框架 |
+
+### 3.2 服务层 Python 依赖（宿主机 venv，**实测版本**）
+
+服务层不进 Docker，跑在宿主机的三个独立 venv 上（见 AGENTS §2.1 的部署分层原则）。
+下表是**服务器上 `pip show` 实测到的版本**，不是 `requirements.txt` 里写的约束 ——
+"钉了某个版本"与"装到的是那个版本"是两件事。
+
+| venv | 包 | 实测版本 | 引入 Sprint |
+| --- | --- | --- | --- |
+| `.venv`（数据服务） | `fastapi` / `uvicorn` | `0.141.1` / `0.54.0` | S6 |
+| `.venv-agent`（Agent） | `openai` | `2.54.0` | S7 |
+| `.venv-agent` | `fastapi` / `uvicorn` / `httpx` | `0.141.1` / `0.54.0` / `0.28.1` | S7 |
+| `.venv-agent` | **`langgraph`** | **`1.1.0`** | **S8** |
+| `.venv-agent` | **`mcp`**（服务器 + 客户端同一个包） | **`2.2.0`** | **S10** |
+| `.venv-agent` | `pytest` | `9.1.1` | S8 |
+| `.venv-airflow` | `apache-airflow` | `3.3.2` | S4 |
+| 容器 `data-generator` | Python | `3.13.14` | S0 |
+
+**Sprint 8 引入 `langgraph==1.1.0`**（图式编排）。版本依据：
+
+- PyPI 官方 JSON API 的 `releases` 与服务器实测 `pip index versions langgraph`
+  都确认存在 `1.1.0`；明确**不使用** `1.2.x`（含 `1.2.0a6` 等预览版）；
+- 装在 **Agent 独立 venv `.venv-agent`**，由 `services/agent/requirements.txt` 钉版本；
+- 它带来 6 个传递依赖：`langchain-core` / `langgraph-checkpoint` /
+  `langgraph-prebuilt` / `langgraph-sdk` / `pydantic` / `xxhash`。
+  该 venv 包总数因此从 5 个变为 **53 个** —— 这是引入图式编排的**实际代价**，
+  记在这里而不是含糊带过。
+
+> ⚠️ **验证依赖时必须用运行该服务的解释器**（Sprint 8 实测踩坑）：
+> 图单元测试要 `import langgraph`，而 pytest 原本只装在数据服务的 `.venv` 里，
+> 于是用 `.venv/bin/python` 跑图测试会得到 22 条"缺少 langgraph 依赖"，
+> 看起来像"图没实现"。`verify-sprint-8.sh` / `verify-sprint-9.sh` 现在统一优先用
+> `.venv-agent/bin/python`，并把选中的解释器路径打印出来。
+
+**Sprint 9 的检索层不引入任何新依赖**：BM25 + 同义词表 + 中文分词全部用标准库实现，
+**未引入 Milvus / FAISS / Elasticsearch / chromadb 等向量检索组件**
+（实测 Agent venv 里此类包数量为 0）。方案依据见
+[`DECISIONS.md` ⏳7](DECISIONS.md) 与 [`sprint/SPRINT_9.md`](sprint/SPRINT_9.md) 第 2 节。
+
+### 3.3 Sprint 10 引入 `mcp==2.2.0`（MCP 服务 + Agent 客户端）
+
+**同一个包承担两个角色**：`services/mcp` 用它的**服务器**侧
+（`MCPServer`），`services/agent` 用它的**客户端**侧（`Client`）。
+因此两处 `requirements.txt` 钉的版本**必须一致** ——
+版本不同会出现"协议版本对不上"这种握手期就失败的故障（比运行期失败更难定位）。
+`tests/test_mcp.py::test_agent_and_mcp_pin_the_same_mcp_version` 锁住这一点。
+
+**版本依据（查证，不是猜）**：
+
+| 证据 | 内容 |
+| --- | --- |
+| PyPI 官方 JSON API（`https://pypi.org/pypi/mcp/json`） | `info.version = 2.2.0`；官方 README 写明 2.x 是 *"the current stable release line"*，1.x 只收关键修复与安全补丁 |
+| 服务器实测 `pip index versions mcp` | `2.2.0, 2.1.1, 2.1.0, 2.0.1, 2.0.0, 1.30.0, 1.29.1, …` |
+| 实测安装（`.venv-agent`） | `Successfully installed … mcp-2.2.0 mcp-types-2.2.0 …`；`pip show mcp` → `Version: 2.2.0` |
+
+> ⚠️ **v1 → v2 是破坏性重构**：`FastMCP` → `MCPServer`、
+> `ClientSession` → `Client`、`httpx` → `httpx2`、`streamablehttp_client` → `streamable_http_client`。
+> 这正是必须**钉死 `==2.2.0`** 而不是给区间的原因：
+> 给区间等于允许在一次部署里换掉整套 API 形状。
+> 版本依据全文写在 [`services/mcp/requirements.txt`](../services/mcp/requirements.txt) 顶部。
+
+**传递依赖与"不新增技术栈"的核对**（`AGENTS.md` §2.3）：
+
+实测带入 13 个包：`mcp-types` / `pydantic` / `starlette` / `uvicorn` / `anyio` /
+`httpx2` / `jsonschema` / `pyjwt[crypto]` / `cryptography` / `cffi` / `pycparser` /
+`opentelemetry-api` / `sse-starlette` / `attrs` / `referencing` / `rpds-py` /
+`python-multipart`。
+
+其中 **`starlette` 与 `uvicorn` 项目里本来就有**（数据服务用的就是 FastAPI 那一套），
+所以**没有引入新的技术栈类型** —— 只是把同一门 HTTP/ASGI 技术多接了一个官方 SDK。
+
+**MCP 服务的部署形态**：独立 systemd 单元 `data-platform-mcp`
+（127.0.0.1:8200，专用用户 `dpmcp`，**不读 `.env`**）。
+单元文件在 [`services/mcp/deploy/`](../services/mcp/deploy/)。
+它**不进 `docker-compose.yml`**（服务层部署原则，`AGENTS.md` §2.1），
+也不改 Nginx。
 
 ---
 
@@ -431,6 +511,8 @@ cp .env.example .env
 | 重启 `flink-jobs` 后出现重复作业、指标翻倍 | SQL Gateway 为 session 模式，重启容器不取消作业；旧作业占 slot、旧窗口状态把重放事件重复累加 | 提交脚本启动时先取消所有非终态作业；新增 `scripts/cancel-flink-jobs.sh` |
 | 健康检查误报 Routine Load 全部缺失 | mysql 客户端 `-N` 会去掉 `Name:` / `State:` 字段标签，解析必然失败 | 去掉 `-N`；`SHOW ROUTINE LOAD` 还需带 `USE <db>` |
 | `SHOW ROUTINE LOAD` 报 `No database selected` | 该语句需要当前库上下文 | 一律写成 `USE ecommerce; SHOW ROUTINE LOAD;` |
+| Agent 重启后起不来：`PermissionError: '/opt/data-platform/.env'` | `.env` 的权限被改成 `600 root:dpapi`，而 `data-platform-agent` 以 `User=dpagent` 运行、靠**组读**拿配置（部署脚本刻意如此设计：可读不可写） | 恢复 `chown root:dpapi` + `chmod 640`（与 `install-web.sh` 一致）。注意 `scripts/deploy-monitoring.sh` 会把 `.env` 收紧到 600，跑过它之后需要复原 |
+| 图单元测试 22 条集体报"缺少 langgraph 依赖" | 验收脚本用数据服务的 `.venv` 跑图测试，而 `langgraph` 只装在 `.venv-agent` | 测试统一用 `.venv-agent/bin/python`，并把选中的解释器路径打印出来 |
 
 ### 8.2 仍需注意的风险
 
@@ -458,3 +540,114 @@ cp .env.example .env
 | 2026-09-26 | Flink | 新增 `1.20.1-scala_2.12-java17` + `flink-sql-connector-kafka 3.4.0-1.20` | Sprint 1 实时链路 |
 | 2026-09-26 | Doris FE | 限制 JVM 堆（`-Xmx1536m`） | FE 实测占用 5.93 GB，挤占 Flink/TM 内存 |
 | 2026-09-26 | Doris | 明确**不可启用 swap** | BE 的 `start_be.sh` 拒绝在有 swap 时启动 |
+| 2026-09-27 | **`langgraph`** | **新增 `langgraph==1.1.0`（`.venv-agent`，实测 Version: 1.1.0）** | **Sprint 8 图式编排（规划→取数→校验→反思→汇总）** |
+| 2026-09-27 | **检索层** | **零新增依赖**（BM25 + 显式同义词表，纯标准库） | **Sprint 9；明确不引入向量库，依据 DECISIONS ⏳7** |
+| 2026-09-27 | **`mcp`** | **新增 `mcp==2.2.0`（`.venv-agent`，实测 Version: 2.2.0；服务端与客户端同一个包、同一个版本）** | **Sprint 10 MCP：把只读数据能力用 MCP 暴露，Agent 多一条可枚举的取数路径** |
+
+---
+
+## 10. Sprint 11 监控组件（Prometheus + Grafana）
+
+### 10.1 实际装到的版本（实测，非计划值）
+
+在服务器上用 `docker inspect` / `prometheus --version` / `GET /api/health` 三种方式交叉核对：
+
+```text
+prom/prometheus:v3.13.3     →  自报 prometheus 3.13.3
+grafana/grafana:13.2.2      →  自报 {"database":"ok","version":"13.2.2","commit":"1bea008f7e4e..."}
+```
+
+| 组件 | 镜像 | Tag | digest | 容器内监听 | 宿主映射 | mem_limit |
+| --- | --- | --- | --- | --- | --- | --- |
+| Prometheus | `prom/prometheus` | `v3.13.3` | `sha256:6976aa8a60fec930796ce5772b8d12da7a318a5daa8d40d69c5c7819a05eeed7` | 9090 | `127.0.0.1:9090` | `256m` |
+| Grafana | `grafana/grafana` | `13.2.2` | `sha256:ac461fb352abc50da10a51c7d02462e9c05488f11f53f14b3ad79a8145f638a0` | 3000 | `127.0.0.1:3001` | `256m` |
+
+> **Tag 写法不同不是笔误**：Prometheus 的官方 tag 带 `v`（`v3.13.3`），
+> Grafana 的不带（`13.2.2`）。写成 `prom/prometheus:3.13.3` 会拉不到镜像。
+
+网络：两者都加入 `data-platform`；Grafana 使用**固定 IP `172.28.0.20`**（理由见 §10.4）。
+命名卷：`data-platform-prometheus-data`（TSDB）/ `data-platform-grafana-data`（sqlite + 面板状态）。
+healthcheck：Prometheus `wget -q -O /dev/null http://127.0.0.1:9090/-/healthy`；
+Grafana `wget -q -O /dev/null http://127.0.0.1:3000/api/health`；
+两者都含 `interval` / `timeout` / `retries` / `start_period`（AGENTS §4.4）。
+
+### 10.2 版本选型依据（查证过程，可复现）
+
+| 组件 | 候选 | 决策 | 理由 |
+| --- | --- | --- | --- |
+| Prometheus | `3.14.0`（最新） | ❌ | 2026-08-17 发布，**EOL 2026-09-30** —— 只剩 3 天，钉在毕设里等于一开始就过期 |
+| Prometheus | **`3.13.3`** | ✅ | **3.13 是 LTS 线**（3.13.0 于 2026-07-01 发布），LTS 支持到 **2027-07-31**。3.13.3 是该线最新补丁（2026-09-07） |
+| Grafana | **`13.2.2`** | ✅ | 13.2 是**当前开发生命周期内的最新 minor**（2026-08-18 发布），13.2.2 为其最新补丁（2026-09-15），支持到 2027-05-18 |
+| Grafana | `12.4.11` | ⚠️ 备选 | EOL 2027-05-24，比 13.2 更长；但 13.2 已是当前主线，无理由倒退 |
+
+**查证方式**：`endoflife.date` 的 `prometheus.md` / `grafana.md`（其 `releasePolicyLink`
+指向官方 release-cycle 文档），再用镜像仓库的 tag 列表核对目标 tag **确实存在**，
+最后以容器内程序**自报版本**为准（标签存在 ≠ 实际装到的是那个版本）。
+
+### 10.3 镜像拉取：本机直连 Docker Hub 不通
+
+```text
+实测: registry-1.docker.io       → 超时（TCP 443 被拒）
+      api.github.com             → 无输出（同样不通）
+用 的: /etc/docker/daemon.json 里配置的镜像加速站（docker.1panel.live 等）→ 200/401
+```
+
+因此 `deploy-monitoring.sh` 在拉取失败时会明确提示"本机直连 Docker Hub 不通，
+靠 daemon.json 的镜像加速"，而不是让人去怀疑网络正常与否。
+
+### 10.4 Grafana 固定 IP `172.28.0.20` 的由来
+
+Grafana 的子路径部署需要 `root_url`（含 `%(domain)s`），
+而 `%(domain)s` 在容器内解析为 `localhost`，于是它把 `/metrics`
+**301 到 `http://localhost:3000/grafana/metrics`**。
+Prometheus 会跟随重定向，而它容器里的 localhost 指它自己 →
+抓取目标永远 `down`。修法是让那个重定向能走通：
+
+```text
+Grafana  在 data-platform 网络里固定为 172.28.0.20（.env 的 GRAFANA_IP）
+Prometheus  extra_hosts: localhost:172.28.0.20
+```
+
+**为什么不是 `.12`**：一开始写成 `.12`（紧邻 Doris 的 `.10/.11`，看着很自然），
+但**本子网里除 Doris 外都是 Docker 动态分配**，`mysql` 恰好分到了 `.12`，
+Grafana 直接创建失败并报 `Address already in use`。
+最终取 `.20`，远离动态段。实测当前占用：
+
+```text
+spark-master .2  minio .3  spark-worker .4  flink-jobmanager .5  kafka .6
+flink-sql-gateway .7  flink-taskmanager .8  flink-jobs .9
+doris-fe .10（静态） doris-be .11（静态） mysql .12  hive-metastore .13
+prometheus .15（动态） grafana .20（静态）
+```
+
+### 10.5 Grafana 面板与数据源
+
+| 数据源 | uid | 类型 | 指向 | 账号 |
+| --- | --- | --- | --- | --- |
+| Prometheus | `prometheus` | prometheus | `http://prometheus:9090` | — |
+| Doris（只读） | `doris-mysql` | mysql | `172.28.0.10:9030` | **`agent_ro`（只读，非 root）** |
+
+仪表盘 `data-platform-overview`（uid 同名，23 个面板，5 个分区）：
+
+```text
+一、数据新鲜度      最新交易窗口 / 最新流量窗口 / 最新天分区
+二、交易域          每日 GMV、每日订单量、交易指标快照（含支付成功率与退款率）
+三、流量域          每日 PV/UV、行为漏斗（VIEW>CLICK>CART>FAVORITE>BUY）
+四、批流对账        交易域不一致窗口数、流量域不一致窗口数、对账窗口总数
+五、监控自身        抓取目标数、各目标 up、抓取耗时、Doris FE 查询错误、Grafana 存活
+```
+
+> `allowUiUpdates: false` 是刻意的：UI 里的改动不会写回仓库，
+> 打开它会造成"代码与运行态分叉"（改面板 → 重建容器后改动神秘消失）。
+> 唯一事实源是仓库里的 JSON。
+
+### 10.6 公网入口
+
+```text
+http://36.151.150.140/grafana/    面板（匿名只读 Viewer）
+http://36.151.150.140/metrics/    Prometheus 原始指标（Nginx 只放行 GET/HEAD/OPTIONS）
+```
+
+两个端口本身都只绑 `127.0.0.1`，公网唯一通道是 Nginx 的这两条 location。
+Nginx 配置的改动遵循 AGENTS §15.7 硬规范第 3 条：
+**先备份、`nginx -t` 失败自动还原**（由 `scripts/deploy-web.sh` 实现）。

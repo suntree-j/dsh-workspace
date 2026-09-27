@@ -863,41 +863,75 @@ Sprint 7  ✅ LLM + Tool Calling：**数据问答 Agent**
              Agent 进程无数据库凭据；回答附"用了哪些表 + 实际执行的 SQL"可核对
              验收 49/49；实测三问（日 GMV / 支付成功率与退款率 / 数据准不准）全部正确
    ↓
-Sprint 4  🔄 Airflow 调度（进行中）
+Sprint 4  ✅ Airflow 调度 + 流量域归档
              宿主机 + systemd 三单元（apiserver/scheduler/dagprocessor）
              元数据库用 MySQL（不引入 PostgreSQL）；UI 在 /airflow/
              DAG：暂停实时链路 → 逐层批处理 → 对账 → 装载 → 恢复（all_done）
+              归档 20000 行 == Kafka latest offset 合计（零丢失）；验收 40/0/0
    ↓
-Sprint 5     Iceberg Lakehouse
+Sprint 5  🔄 Iceberg Lakehouse（阶段 4~7 已完成，仅剩一处实时侧缺陷待决策）
+              18 张交易域表 → Iceberg（60/60 校验），随后扩容到 **23 张**
+              流量域离线分层：DWD 20000 行 / DWS 703 天 / ADS 19644 窗口
+              **流量域逐窗口对账：19643/19643 个窗口，不一致 0、单边窗口 0**
    ↓
-Sprint 8     LangGraph Data Agent
+Sprint 8  ✅ LangGraph Data Agent：**图式编排**
+              检索 → 规划 → 取数 → 校验 →（反思 → 重规划）→ 汇总
+              规划与校验是**显式产物**；重试次数可数；三重上界保证一定停得下来
+              仍然**只有一条取数通道**（POST /query + SQL 守卫 + 只读账号）
    ↓
-Sprint 9     RAG + Metadata
+Sprint 9  ✅ RAG + Metadata：**元数据/口径检索（词法后端）**
+              BM25 + 显式同义词表（"卖了多少钱"→GMV），语料 = 指标口径 + 表结构 + 分层说明
+              回答同时给出 docs（命中的口径来源，带文件与行号）/ tables / executed_sql
+              **不引入向量库**（无 embeddings 端点、本机放不下本地模型，见 DECISIONS ⏳7）
    ↓
-Sprint 10    MCP
+Sprint 10 🔄 MCP：**只读数据能力经 MCP 暴露（能力最小化）**
+              4 个只读工具（metrics_lookup / tables_lookup / sql_query / reconciliation）
+              = 只读接口的一对一映射；**MCP 进程里没有数据库凭据**（系统单元不读 .env）
+              两种传输：streamable-http（部署，127.0.0.1:8200）/ stdio（本地宿主）
+              Agent 侧新增取数路径 `AGENT_DATA_PATH=mcp`：与直连**终点相同**、**不自动回退**
+              `mcp==2.2.0`（钉死；PyPI + 服务器双重查证，见 development-environment §3.3）
+              ⏳ 服务器端验收（含"MCP ↔ 直接 HTTP 逐字段一致"实证）待配置事故恢复后补
    ↓
-Sprint 11    Data Quality + Monitoring
+Sprint 11 ✅ Data Quality + Monitoring
+              数据质量：25 条校验（行数/主键/非空/枚举/层间一致/金额/新鲜度），
+                        清单+引擎结构，**失败真的 exit 1**（有可复现的 --proof-fail 证明）
+              监控：Prometheus v3.13.3（LTS）+ Grafana 13.2.2，内存上限 256m+256m=512m
+                    Grafana 面板 23 个，数据源指向真实 Doris（只读账号 agent_ro）+ Prometheus
+                    公网：http://<ip>/grafana/  与  http://<ip>/metrics/
    ↓
-Sprint 12    测试 + 性能优化
+Sprint 12 🔄 测试 + 性能：**基线**
+              测试：补齐 MCP 单元测试（28 条）与 SQL 守卫**对抗**用例（60 条 + 3 条 strict xfail）
+              性能：四类基线采集脚本 `scripts/perf/measure-latency.sh`（只读，含内存闸门）
+              `docs/PERFORMANCE.md` 方法完整、**数字待补**（不写没测过的数）
+              结构债（两份阶段 `case`）：**未做**，原因与方案写在 SPRINT_12.md 第 4 节
    ↓
 Sprint 13    毕业论文 + 答辩
 ```
 
-**下一步：Sprint 4 —— Airflow 调度。**
-目前有两条链路可以跑通：实时（Flink 常驻）与离线（`scripts/batch-mode.sh` 手工触发）。
-Sprint 4 要做两件事：
-
-1. 把离线流水线变成按依赖编排的定时任务（现在靠手工触发，无法无人值守）；
-2. 顺带补齐**流量域的离线化** —— 这是 Sprint 3 就记录的设计缺口：
+**下一步：Sprint 10 与 Sprint 12 的服务器端收口。**
+两者的代码、测试与文档都已落地并在本地跑通
+（`pytest` **191 passed / 138 skipped / 3 xfailed**；138 skipped 全是"本机 Docker 未运行"
+的冒烟用例按 §8.3 优雅跳过）。缺的是**只在服务器上才能做**的两件事：
 
 ```text
-交易域  MySQL 有事实表           →  离线已可算、已对账  ✅
-流量域  仅 Kafka 有行为事件      →  需要"Kafka → 湖仓 ODS"归档作业后才能离线化  ⚠️
+Sprint 10  部署 MCP 单元 + 端到端实证：同一 SQL 经 MCP 与经直接 HTTP 的 rows 逐字段一致
+Sprint 12  python -m pytest 的实测通过数 + 四类性能基线的实测数字
 ```
 
-流量域是**设计缺口**而非实现失败：MySQL 里没有行为事实表，离线侧无源，
-因此**不伪造**离线流量指标。Sprint 7 的 Agent 在回答里已如实说明了这一点
-（见 [`docs/sprint/SPRINT_7.md`](docs/sprint/SPRINT_7.md) 第 8.1 节）。
+⚠️ 这两件都依赖服务器 `/opt/data-platform/.env` 与宿主 venv ——
+实施期间它们因一次同步事故被删除（复盘见
+[`docs/sprint/SPRINT_12.md`](docs/sprint/SPRINT_12.md) 第 8.2 节），
+恢复由主控独家安排。**在那之前不写任何未经测量的数字。**
+Sprint 8/9 已经把"问数"这条链路做成了**可审查的图**与**可追溯的来源**：
+每次提问都会返回规划、校验结论、重试次数、命中的口径文档与实际执行的 SQL。
+
+```text
+交易域  11458 个分钟窗口，不一致 0，GMV 两条链路均为 51,890,375.77
+流量域  19643 个分钟窗口，不一致 0，单边窗口 0
+        （唯一未归零项：实时侧 1 个窗口的 click_rate 与自身计数矛盾，
+          缺陷在实时链路，已落进对账表与 metrics.md 第 3.3 节，
+          修复方式待项目负责人决策，见 SPRINT_5.md 第 10 节）
+```
 
 一键验收：
 
@@ -905,9 +939,17 @@ Sprint 4 要做两件事：
 bash scripts/verify-sprint-1.sh     # 实时数仓（Kafka → Flink → Doris）
 bash scripts/verify-sprint-2.sh     # 离线链路（MySQL → Spark → 湖仓 → Hive）
 bash scripts/verify-sprint-3.sh     # 离线分层 + 批流交叉对账（8 步）
+bash scripts/verify-sprint-4.sh     # Airflow 调度 + 流量域归档（8 步）
+bash scripts/verify-sprint-5.sh     # Iceberg Lakehouse + 流量域分层与对账（8 步）
 bash scripts/verify-sprint-6.sh     # 数据服务与前端（Nginx + API + 对账 + 安全）
 bash scripts/verify-sprint-7.sh     # 数据问答 Agent（守卫 + 工具 + 端到端问答）
+bash scripts/verify-sprint-8.sh     # 图式编排（图结构 + 端到端 + **反思重试** + 安全回归）
+bash scripts/verify-sprint-9.sh     # 元数据/口径检索（语料 + **同义词生效** + 无向量库）
+bash scripts/verify-sprint-11.sh    # 数据质量 + 监控（8 步：容器/版本/内存/Prometheus/Grafana/质量/失败路径/Nginx）
 ```
+
+> 三个 Agent 验收脚本的关系：7 验"基础问答与安全边界"，8 验"编排与重试"，
+> 9 验"检索与来源"。**8 与 9 都必须以 7 的 49/49 不回退为前提**。
 
 离线链路重跑（内存受限，走错峰模式）：
 
@@ -921,6 +963,16 @@ Agent 部署与配置：
 bash scripts/deploy-agent.sh        # 部署（幂等；会一并重启数据服务）
 # 配置 LLM Key： 在 .env 设置 LLM_API_KEY 后 systemctl restart data-platform-agent
 # 详见 services/agent/README.md
+```
+
+Agent 自检与交互（Sprint 8/9 新增的接口）：
+
+```bash
+curl -s http://127.0.0.1:8100/graph   | python3 -m json.tool  # 图长什么样（节点/边/上界）
+curl -s http://127.0.0.1:8100/retrieval | python3 -m json.tool  # 语料与检索后端画像
+# 检索单独可测（同义词是否生效一眼可见）
+curl -s --get http://127.0.0.1:8100/api/retrieve \
+     --data-urlencode 'q=最近一周卖了多少钱' --data-urlencode 'k=3' | python3 -m json.tool
 ```
 
 站点启用 HTTPS（首次安装已自动完成；换机器或证书过期时手动执行）：
@@ -943,6 +995,60 @@ bash scripts/deploy-web.sh                            # 安装配置并 reload N
 
 ---
 
+## 数据质量校验与监控（Sprint 11）
+
+### 数据质量校验
+
+```bash
+bash scripts/run-quality-checks.sh              # 全部 Doris 侧校验（快，不启 Spark，可随时跑）
+bash scripts/run-quality-checks.sh --with-lake  # 追加湖仓 Iceberg 层间校验（需 ≈1 GB 空闲内存）
+bash scripts/run-quality-checks.sh --list       # 只看校验清单（不连数据库）
+bash scripts/run-quality-checks.sh --proof-fail # **失败路径演示**：证明失败真的 exit 1
+```
+
+退出码：`0` 通过 / `1` 有校验失败 / `2` 湖仓侧被闸门**拒绝**（内存不足或检测到批处理在跑）。
+
+校验清单在 [`infrastructure/quality/checks.conf`](infrastructure/quality/checks.conf)（25 条），
+覆盖 7 类：行数非空守卫、主键唯一、关键字段非空、枚举合法、层间一致、金额关系、新鲜度；
+**交易域与流量域都覆盖**。每条都会打印 `[OK]/[FAIL]` 与**实测值**。
+
+调度接法（**未改 `run-batch-pipeline.sh`**，理由见
+[`docs/sprint/SPRINT_11.md`](docs/sprint/SPRINT_11.md) 第 6 节）：
+
+```bash
+# 批处理之后接一步
+bash scripts/batch-mode.sh && bash scripts/run-quality-checks.sh --with-lake
+# 或每天巡检
+0 4 * * * cd /opt/data-platform && bash scripts/run-quality-checks.sh >> /var/log/dp-quality.log 2>&1
+```
+
+### 监控
+
+```bash
+bash scripts/deploy-monitoring.sh        # 部署（幂等；7 步，含 Nginx 反代）
+bash scripts/deploy-monitoring.sh --recreate   # 改了 provisioning 文件后强制重建
+bash scripts/verify-sprint-11.sh         # 验收（8 步）
+docker compose logs -f prometheus        # 抓取日志
+docker compose logs -f grafana           # 面板日志
+docker stats --no-stream prometheus grafana    # 实测内存占用（预算 512 MB）
+```
+
+| 入口 | 地址 | 说明 |
+| --- | --- | --- |
+| Grafana 面板 | http://36.151.150.140/grafana/ | 23 个面板；匿名只读浏览，改配置需登录 |
+| Prometheus 指标 | http://36.151.150.140/metrics/ | 原始指标（Nginx 只放行 GET/HEAD/OPTIONS） |
+| Prometheus（仅本机） | http://127.0.0.1:9090/ | 端口只绑回环，公网不可达 |
+| Grafana（仅本机） | http://127.0.0.1:3001/ | 同上 |
+
+镜像版本（**禁止 latest**）：`prom/prometheus:v3.13.3`（LTS 线，支持到 2027-07-31）、
+`grafana/grafana:13.2.2`。每个容器的 `mem_limit` 都是 `256m`，合计 512 MB ——
+本机实时链路常驻约 13.7 GB，**这个预算不要调大**。
+
+> ⚠️ 面板默认时间范围是 `now-90d`：本机数据是 `data-generator` **一次性生成**的历史数据，
+> 默认用 6h/24h 窗口会看到空面板（那是时间范围问题，不是面板坏了）。
+
+---
+
 ## 文档索引
 
 | 文档 | 内容 |
@@ -960,6 +1066,11 @@ bash scripts/deploy-web.sh                            # 安装配置并 reload N
 | [`docs/sprint/SPRINT_3.md`](docs/sprint/SPRINT_3.md) | Sprint 3 设计：离线分层建模 + 批流交叉对账（含 10 条踩坑与内存事故记录） |
 | [`docs/sprint/SPRINT_6.md`](docs/sprint/SPRINT_6.md) | Sprint 6 设计：数据后台 + 前后端（服务层） |
 | [`docs/sprint/SPRINT_7.md`](docs/sprint/SPRINT_7.md) | Sprint 7 设计：LLM + Tool Calling 数据问答 Agent（含 7 条踩坑） |
+| [`docs/sprint/SPRINT_8.md`](docs/sprint/SPRINT_8.md) | Sprint 8 设计：LangGraph 图式编排（节点/边/上界与端到端实证） |
+| [`docs/sprint/SPRINT_9.md`](docs/sprint/SPRINT_9.md) | Sprint 9 设计：元数据/口径检索（词法方案依据与同义词表） |
+| [`docs/sprint/SPRINT_11.md`](docs/sprint/SPRINT_11.md) | Sprint 11 设计：数据质量 + 监控（版本选型、内存预算、9 条踩坑） |
+| [`infrastructure/quality/checks.conf`](infrastructure/quality/checks.conf) | **数据质量校验清单（25 条，含阈值依据）** |
+| [`services/agent/knowledge/synonyms.json`](services/agent/knowledge/synonyms.json) | **检索同义词表（每条都带理由，可增删可测试）** |
 | [`services/api/README.md`](services/api/README.md) | 数据服务说明（接口、安全、部署） |
 | [`services/agent/README.md`](services/agent/README.md) | **Agent 配置说明（申请 Key、写入、验证、排查）** |
 | [`services/web/README.md`](services/web/README.md) | 前端看板说明（无构建步骤、部署、空值约定） |
