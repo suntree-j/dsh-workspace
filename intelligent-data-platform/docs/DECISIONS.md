@@ -100,14 +100,16 @@
 | 现状 | 属 `services/api`（Sprint 6 的产物），**未擅自改动**；Sprint 12 或你确认后我再修 |
 | 若你不同意 | 维持现状也可以，只是 Agent 的反思会多绕一圈 |
 
-### ⏳ 9. Doris 里有一张无 DDL 来源的 `ecommerce.test_connection`
+### ✅ 9. ~~Doris 里有一张无 DDL 来源的 `ecommerce.test_connection`~~ —— **本条作废（我记错了）**
 
 | 项 | 内容 |
 | --- | --- |
-| 现象 | `ecommerce` 库存在 `test_connection` 表，`sql/` 下没有对应 DDL，违反 AGENTS §5.3（"禁止手工改容器内数据库而不落盘 sql/"） |
-| 推断 | 早期（Sprint 0/1）连通性验证时手工建的 |
-| 我的推荐 | **删掉它**（并在 `SPRINT_12.md` 记一笔），而不是补一份 DDL —— 它没有业务含义，留着会让人以为它是平台的一部分 |
-| 若你不同意 | 告诉我，我改成给它补 DDL 并加注释说明用途 |
+| 原记录 | "`ecommerce` 库存在 `test_connection` 表，`sql/` 下没有对应 DDL，违反 AGENTS §5.3" |
+| **实际情况（2026-09-27 复核，证据充分）** | **它有 DDL**：`sql/doris/02_doris_init.sql:65` 的 `CREATE TABLE IF NOT EXISTS test_connection`；另有幂等 seed 脚本 `sql/doris/03_seed_test_connection.sh`；`docker-compose.yml:324` 把 `sql/doris` 挂进 `docker-entrypoint-initdb.d`，`infrastructure/doris/be-keepalive.sh` 还会在 BE 就绪后**补执行**该目录的全部 `.sql`/`.sh`。它是 **Sprint 0 按 `SPRINT_0.md` 第 11 节专门建的连通性测试表**，`README.md` 与 `SPRINT_0_VERIFICATION_STATUS.md` 都把它作为验收产物记录，`tests/smoke/test_infrastructure.py` 还有用例直接查它 |
+| **为什么会记错** | 我观察到"表存在但 `sql/` 里没有 DDL"的那一刻，真实状态是 **BE 处于重启循环、initdb 从未执行**（该表当时并不存在/不完整），后来 keepalive 补执行把这个缺口修掉了。**我把一个瞬时状态写成了长期事实。** |
+| 处置 | **不删表、不删用例**。删掉一个合规产物去迁就一条过期记录，方向是反的 —— 正确做法是改记录（本条目即为此而作废）。该判断由执行代理在动手前核对代码时发现并上报 |
+| 教训 | **"我在某个时刻观察到的"不等于"系统的事实"**。系统正在故障中时，观察到的往往只是故障态；把它写成结论前先问一句"这是稳定性质，还是此刻的中间状态？" |
+| 结论 | ✅ **无需任何动作**（既不用补 DDL，也不用删表） |
 
 ### ⏳ 10. 实时侧 1 个窗口的 `click_rate` 与它自己的计数矛盾（要不要修）
 
