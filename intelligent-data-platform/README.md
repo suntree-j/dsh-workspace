@@ -1121,14 +1121,23 @@ grep -E '^SITE_SCHEME=' .env                 # 当前值 http
 ```text
 docs/thesis/REPORT_DRAFT.md          论文正文草稿（含摘要 / 正文 / 不足）
 docs/thesis/REPORT_OUTLINE.md        章节大纲
-docs/thesis/DEFENSE_SLIDES.md        答辩 PPT 逐页大纲
-docs/thesis/DEFENSE_SCRIPT.md        答辩讲稿（带时间轴）
-docs/thesis/QA_PREP.md               答辩问答准备
+docs/thesis/md_to_thesis_docx.py     正文导出脚本（默认输出到交付目录）
+docs/thesis/build_appendix_docs.py   任务书 / 开题报告导出脚本
+docs/thesis/毕业论文材料_蒋树阳/        ★ 提交/打印用（正文 + 附件1 + 附件2 + 材料清单）
+docs/thesis/答辩材料/                   ★ 答辩用
+    README.md                        材料清单 + 准备顺序 + 现场口径
+    DEFENSE_SLIDES.md                答辩 PPT 逐页大纲（12 分钟 / 14 页）
+    DEFENSE_SCRIPT.md                答辩讲稿（带时间轴）
+    DEFENSE_QA.md                    答辩问答准备（按质疑类型，主力）
+    QA_PREP.md                       42 问通用问答（互补）
+    DEFENSE_DEMO.md                  现场演示脚本 + 应急预案 + 数字速查卡
+    FINAL_ACCEPTANCE_REPORT.md       最终验收报告（18 节，CONDITIONAL PASS）
+    FINAL_AUDIT_REPORT.md            审计台账（P0/P1/P2 编号与闭环）
+docs/thesis/求职材料/RESUME_PROJECT.md 简历项目条目（中英双语）
+docs/thesis/EVIDENCE_MATRIX.md        证据矩阵（主张 → 证据 → 结论分类）
 docs/thesis/DATA_AND_LIMITATIONS.md  数据来源与已知限制
 docs/thesis/外部审查包.md             外部审查包（主张 / 证据 / 边界对照）
-docs/thesis/EVIDENCE_MATRIX.md        证据矩阵（主张 → 证据 → 结论分类）
-docs/thesis/FINAL_AUDIT_REPORT.md     终审报告（P0/P1/P2 + 未决项）
-docs/thesis/毕业论文_*.docx            Word 终稿（由 md_to_thesis_docx.py 导出）
+docs/thesis/ui-audit-screenshots/    改造前后页面截图（作品集可用）
 docs/sprint/SPRINT_13.md             本 Sprint 的任务书与结算
 ```
 

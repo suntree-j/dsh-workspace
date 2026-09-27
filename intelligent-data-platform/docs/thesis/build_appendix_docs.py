@@ -22,7 +22,9 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from md_to_thesis_docx import COVER_FIELDS, FONT_BODY_CN, FONT_BODY_EN  # noqa: E402
 
 TEMPLATE_DIR = SCRIPT_DIR / "校内模板"
-OUT_DIR = SCRIPT_DIR
+# 输出直接落到**交付目录**，与 01_毕业论文正文.docx 并列，
+# 避免在 docs/thesis/ 根下再留一份会被误当作成稿的旧副本。
+OUT_DIR = SCRIPT_DIR / "毕业论文材料_蒋树阳"
 FIVE = 10.5   # 五号
 
 
@@ -136,7 +138,8 @@ def build_task_book() -> Path:
     for idx, col in enumerate([1, 3, 5, 7]):
         set_cell(t.cell(7, col), TASK_MILESTONE[idx])
     # r8 指导教师意见：留空待手写（模板明确要求手写）
-    out = OUT_DIR / "毕业论文(设计)任务书_蒋树阳.docx"
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    out = OUT_DIR / "02_附件1_任务书.docx"
     doc.save(str(out))
     return out
 
@@ -253,7 +256,8 @@ def build_proposal() -> Path:
     set_cell(t.cell(6, 1), "")
     set_cell(t.cell(7, 2), "")
     set_cell(t.cell(7, 6), "\n年      月      日")
-    out = OUT_DIR / "毕业论文(设计)开题报告_蒋树阳.docx"
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    out = OUT_DIR / "03_附件2_开题报告.docx"
     doc.save(str(out))
     return out
 

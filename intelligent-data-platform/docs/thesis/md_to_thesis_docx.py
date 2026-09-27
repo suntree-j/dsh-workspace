@@ -38,7 +38,10 @@ LOG = logging.getLogger("md_to_thesis_docx")
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_INPUT = SCRIPT_DIR / "REPORT_DRAFT.md"
-DEFAULT_OUTPUT = SCRIPT_DIR / "毕业论文_基于Lakehouse与AIAgent的批流一体智能数据分析平台.docx"
+# 默认直接输出到**交付目录**，避免在 docs/thesis/ 根下再留一份会被误当作成稿的旧副本。
+# （历史教训：根下曾有一份 2026-09-27 22:07 的旧导出，未含页眉页脚分节修复，
+#   与交付目录里的新版本并存，容易拿错。）
+DEFAULT_OUTPUT = SCRIPT_DIR / "毕业论文材料_蒋树阳" / "01_毕业论文正文.docx"
 
 # ---------------------------------------------------------------- 版式常量
 FONT_BODY_CN = "宋体"
@@ -1018,6 +1021,49 @@ def _rich_paragraph_into(paragraph: Paragraph, text: str, *, size: float,
     _add_inline_runs(paragraph, text, size=size, cn=cn, en=en, bold=bold)
 
 
+def _para_heading_level(p_el) -> int:
+    """从 `w:p` 元素读出标题级别；`w:pStyle` 形如 `Heading1` / `1` 时返回 1~5，否则 0。"""
+    pPr = p_el.find(qn("w:pPr"))
+    if pPr is None:
+        return 0
+    style = pPr.find(qn("w:pStyle"))
+    if style is None:
+        return 0
+    val = style.get(qn("w:val")) or ""
+    m = re.fullmatch(r"(?:Heading|heading)?\s*(\d)", val)
+    return int(m.group(1)) if m else 0
+
+
+def _body_section_index(doc) -> int:
+    """定位「正文节」在 `doc.sections` 中的下标。
+
+    **不要用 `doc.sections[-1]`**：`python-docx` 的 `sections` 顺序 =
+    `document.xml` 中 `w:sectPr` 的出现顺序；每个**段落级** `sectPr`
+    （挂在 `w:pPr` 下）就是它所在段落的终结分节符，最后一个（body 级）
+    才是文档末节。正文自「第一个一级标题」开始 —— 正文第一章的 H1 是
+    `page_break=False`，它的 `sectPr` 即"目录节 / 正文节"的分界。
+    因此判据是"**含第一个一级标题的那个 sectPr**"，与节数量无关。
+
+    历史坑：`_setup_sections` 原先把正文节硬编码为 `sections[-1]`，注释里
+    假设"封面节 / 摘要节 / 正文节"共 3 节。后来加了诚信声明节、英文摘要节、
+    目录节，变成 6 节，但**末节仍是正文节**，所以 `sections[-1]` 侥幸正确；
+    若再往正文之后追加任何分节（如独立的附录节），页眉页脚就会整体挂错位置。
+    这里改为结构化定位，避免再次依赖节数量的巧合。
+    """
+    body_p = doc.element.body
+    first_h1 = next((el for el in body_p.iter()
+                     if el.tag == qn("w:p")
+                     and _para_heading_level(el) == 1), None)
+    if first_h1 is not None:
+        pPr = first_h1.find(qn("w:pPr"))
+        if pPr is not None and pPr.find(qn("w:sectPr")) is not None:
+            target = pPr.find(qn("w:sectPr"))
+            for i, section in enumerate(doc.sections):
+                if section._sectPr is target:
+                    return i
+    return len(doc.sections) - 1
+
+
 def _setup_sections(doc) -> None:
     for section in doc.sections:
         section.page_width = Cm(PAGE_W_CM)
@@ -1035,11 +1081,15 @@ def _setup_sections(doc) -> None:
     #       所在页开始计算」
     #
     # !! "从正文所在页开始计算"要落到 section 上，而不是靠"某一页不写" !!
-    #   本文件的节划分是：封面节 / 摘要节 / 正文节。因此页眉页脚只在
-    #   **正文节**设置，前面两节显式 is_linked_to_previous = False 且留空 ——
+    #   节划分随版本演进（封面 / 诚信声明 / 中文摘要 / 英文摘要 / 目录 / 正文），
+    #   所以正文节**按结构定位**（第一个一级标题所在的节），不写死下标 ——
+    #   见 `_body_section_index` 文档串里的历史坑。
+    #   正文节之前的各节显式 is_linked_to_previous = False 且清空 ——
     #   否则 Word 会把正文节的页眉页脚**向前继承**，摘要页也会长出页眉。
     # ------------------------------------------------------------
-    body_section = doc.sections[-1]
+    body_idx = _body_section_index(doc)
+    LOG.info("正文节下标      : %d（共 %d 节）", body_idx, len(doc.sections))
+    body_section = doc.sections[body_idx]
     body_section.header.is_linked_to_previous = False
     header_para = body_section.header.paragraphs[0]
     header_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -1060,10 +1110,13 @@ def _setup_sections(doc) -> None:
     _add_field(footer_para, " NUMPAGES ", "1", size=FOOTER_PT, cn=FONT_BODY_CN, en=FONT_BODY_EN)
     _rich_paragraph_into(footer_para, " 页", size=FOOTER_PT, cn=FONT_BODY_CN, en=FONT_BODY_EN)
 
-    # 前置节（封面 / 摘要）不继承正文节的页眉页脚。
-    # 规范㈡ 说封面"按照学校统一规定的封面样式打印"，摘要页页码用罗马数字，
-    # 这里先做到"不出现正文页眉页脚"；罗马页码由 _roman_front_matter 处理。
-    for section in doc.sections[:-1]:
+    # 前置节（封面 / 诚信声明 / 摘要 / 目录）不继承正文节的页眉页脚。
+    # 规范㈦.10 只要求"页眉页脚从正文所在页开始"，**并未要求前置部分编页码**；
+    # 因此这里让前置节页眉页脚全空（含封面的"页脚不标页码"，见二㈢.2）。
+    # 注意：本文件没有实现前置部分的罗马数字页码，前置页就是无页码，这是有意为之。
+    for i, section in enumerate(doc.sections):
+        if i == body_idx:
+            continue
         section.header.is_linked_to_previous = False
         section.footer.is_linked_to_previous = False
         for p in list(section.header.paragraphs):
@@ -1267,18 +1320,21 @@ def verify(path: Path, sample: int = 200) -> None:
     toc_field = any(
         "instrText" in p._p.xml and re.search(r"TOC\s+\\o", p._p.xml or "") for p in paragraphs
     )
-    footer_xml = doc.sections[-1].footer.paragraphs[0]._p.xml
+    # !! 页眉页脚一律按 `_body_section_index` 定位，不用 sections[-1] !!
+    #    否则"末节不是正文节"时会把断言打在错误的节上。
+    body_idx_v = _body_section_index(doc)
+    footer_xml = doc.sections[body_idx_v].footer.paragraphs[0]._p.xml
     page_field = "instrText" in footer_xml and "PAGE" in footer_xml
     update_fields = doc.settings.element.find(qn("w:updateFields")) is not None
     LOG.info("目录 TOC 域     : %s（updateFields=%s）", toc_field, update_fields)
-    LOG.info("页脚 PAGE 域    : %s", page_field)
+    LOG.info("页脚 PAGE 域    : %s（正文节 = 第 %d 节）", page_field, body_idx_v + 1)
     assert toc_field, "没有插入 TOC 目录域"
-    assert page_field, "页脚没有 PAGE 页码域"
+    assert page_field, "正文节页脚没有 PAGE 页码域"
     assert len(tables) > 0, "文档里没有表格"
     assert headings[1] > 5, f"Heading 1 数量不足：{headings[1]}"
 
-    # ---- 页面：A4 + 页边距（四边不对称，按学校规范逐边断言）----
-    section = doc.sections[-1]
+    # ---- 页眉页脚：A4 + 页边距（四边不对称，按学校规范逐边断言）----
+    section = doc.sections[body_idx_v]
     LOG.info("页面 A4         : %.1f x %.1f cm", section.page_width.cm, section.page_height.cm)
     LOG.info("页边距          : 上 %.2f / 下 %.2f / 左 %.2f / 右 %.2f cm",
              section.top_margin.cm, section.bottom_margin.cm,
@@ -1301,11 +1357,19 @@ def verify(path: Path, sample: int = 200) -> None:
     assert "第" in footer_txt and "页" in footer_txt and "共" in footer_txt, \
         "页脚不符合「第 页 共 页」式样"
 
-    # ---- 前置部分不得带正文页眉（规范：页眉从正文页开始）----
-    front_sections = doc.sections[:-1]
-    leaked = [i for i, s in enumerate(front_sections)
-              if "湖南工商大学毕业论文（设计）" in "".join(p.text for p in s.header.paragraphs)]
-    assert not leaked, f"前置节 {leaked} 泄漏了正文页眉"
+    # ---- 前置部分不得带正文页眉页脚（规范：页眉页脚从正文所在页开始）----
+    #  判据要覆盖**所有非正文节**，并且页脚域也要查 —— 只查页眉会漏掉
+    #  "页码域挂到了封面/摘要节"这类错误。
+    leaked = []
+    for i, s in enumerate(doc.sections):
+        if i == body_idx_v:
+            continue
+        h = "".join(p.text for p in s.header.paragraphs)
+        f = "".join(p.text for p in s.footer.paragraphs)
+        fxml = "".join(p._p.xml for p in s.footer.paragraphs)
+        if "湖南工商大学毕业论文（设计）" in h or "PAGE" in fxml or f.strip():
+            leaked.append((i + 1, h.strip(), f.strip()))
+    assert not leaked, f"前置节泄漏了正文页眉/页脚：{leaked}"
 
     # ---- 表格：Table Grid / 表头重复 / 底纹 ----
     # !! 封面表与数据表是**两类**表，判据必须分开 !!

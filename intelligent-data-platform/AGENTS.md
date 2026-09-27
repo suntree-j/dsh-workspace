@@ -638,7 +638,7 @@ docker compose exec doris-be mysql -h 172.28.0.10 -P 9030 -uroot -e "SHOW BACKEN
                                 （**行数 = distinct `event_id` 基数 ≠ 链路处理量**：
                                   对应 topic latest 合计分别约 29 倍 —— 174000 / 156774 / 7366 / 580000，
                                   Doris 侧 UNIQUE KEY + merge-on-write 去重后才是上表行数，
-                                  完整取证见 15.12 与 docs/thesis/FINAL_AUDIT_REPORT.md §1.3）
+                                  完整取证见 15.12 与 docs/thesis/答辩材料/FINAL_AUDIT_REPORT.md §1.3）
 ✅ ADS 与 MySQL 精确对账         GMV 51,890,375.77 == 51,890,375.77（精确到分）
 ```
 
@@ -827,7 +827,7 @@ bash scripts/verify-sprint-2.sh`（详见
        因此写"本次验收窗口内未观察到丢失"，不要写无限定的"零丢失"。
        另：表内行数 = distinct `event_id` 基数 ≠ 链路处理量（该 topic latest 合计
        580000 = 29 × 20000，Doris 侧 UNIQUE KEY upsert 去重后仍是 20000，见 15.12 与
-       docs/thesis/FINAL_AUDIT_REPORT.md §1.3）
+       docs/thesis/答辩材料/FINAL_AUDIT_REPORT.md §1.3）
     漏斗 VIEW 10472 > CLICK 5759 > CART 2095 > BUY 628（FAVORITE 1046 旁支）
 ✅ 内存闸门                          暂停实时链路释放 1.65 GB（2282 → 3935 MB）
     曾主动拒绝一次批处理（可用 2258 MB）——**拒绝而非硬跑**

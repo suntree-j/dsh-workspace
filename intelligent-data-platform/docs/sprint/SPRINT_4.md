@@ -419,7 +419,7 @@ lakehouse.ods_behavior_event
        另：本表行数是"按主键去重后的行数"，不等于链路处理量 ——
        Kafka 侧该 topic 的 latest 合计为 580000 = 29 × 20000（Flink 重放 29 轮），
        Doris 侧 UNIQUE KEY + merge-on-write 把重复键 upsert 覆盖，故表内仍是 20000
-       （见 `docs/thesis/FINAL_AUDIT_REPORT.md` §1.3）。
+       （见 `docs/thesis/答辩材料/FINAL_AUDIT_REPORT.md` §1.3）。
 
 ✅ 漏斗逐级收窄（与 AGENTS.md 8.2 的断言一致）
      VIEW 10472 > CLICK 5759 > CART 2095 > BUY 628

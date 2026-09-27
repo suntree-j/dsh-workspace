@@ -178,7 +178,7 @@ Kafka 4.x 的 kafka.tools.GetOffsetShell 类名已变更
 - 证据矩阵（**论文与答辩的唯一事实源**）：
   [`docs/thesis/EVIDENCE_MATRIX.md`](../thesis/EVIDENCE_MATRIX.md)
 - 终审报告（P0/P1/P2、修复建议、论文章法风险）：
-  [`docs/thesis/FINAL_AUDIT_REPORT.md`](../thesis/FINAL_AUDIT_REPORT.md)
+  [`docs/thesis/答辩材料/FINAL_AUDIT_REPORT.md`](../thesis/FINAL_AUDIT_REPORT.md)
 - 数据来源与已知限制：
   [`docs/thesis/DATA_AND_LIMITATIONS.md`](../thesis/DATA_AND_LIMITATIONS.md)
 - 项目状态基准：[`AGENTS.md`](../../AGENTS.md) §15
