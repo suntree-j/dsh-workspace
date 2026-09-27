@@ -79,23 +79,130 @@ _MCP_TOOL_NAMES = frozenset({"metrics_lookup", "tables_lookup", "sql_query", "re
 #     - Agent 进程里引入守卫模块会给人"Agent 也持有权限判断"的错觉，
 #       而真实边界是"Agent 只发 HTTP"。
 #   代价是两处规则可能漂移。对策不是"记得同步"，而是**可发现**：
-#   `scripts/verify-sprint-10.sh` 会断言两条取数路径对同一条 SQL 报出
-#   完全相同的 tables，漂移会在验收时暴露。
+#   `tests/test_table_extraction_parity.py` 用同一批 SQL 同时喂给两份实现，
+#   断言逐条相等 —— 漂移会让测试变红，而不是悄悄漏报血缘。
+#
+# !! Sprint 13A 实测的漂移（已修，本段是修复说明）!!
+#   这里原本是**一条正则** `\b(?:from|join)\s+(表名)`。它只认 FROM/JOIN 关键字，
+#   于是逗号连接（隐式 CROSS JOIN）里**第二张及以后的表永远不会被提取**。
+#   守卫侧先修好了，于是出现"同一条 SQL，守卫报 2 张、Agent 只报 1 张"：
+#       SELECT 1 FROM dwd_trade_order_detail a, dim_user b WHERE ...
+#       → sqlguard ['dwd_trade_order_detail','dim_user']
+#       → Agent    ['dwd_trade_order_detail']            ← 少一张
+#   危害是**审计失真**（回答里的 tables 少报用了哪些表）。而当时的验收
+#   （`verify-sprint-10.sh`）只逐字段比对 `rows`、**不比 `tables`** —— 抓不到它。
+#   本次做两件事：① 提取算法与权威实现对齐；② 补上漂移检测测试。
+#   （`verify-sprint-10.sh` 的端到端比对负责"两条路径的**数据**是否相同"，
+#     血缘漂移由上述专项测试负责 —— 两者分工不同，不要互相代替。）
 _IDENT = r"(?:`[^`]+`|\"[^\"]+\"|\[[^\]]+\]|[A-Za-z_][\w$]*)"
-_TABLE_RE = re.compile(rf"\b(?:from|join)\s+({_IDENT}(?:\s*\.\s*{_IDENT})*)", re.I)
+_TABLE_RE = re.compile(rf"({_IDENT}(?:\s*\.\s*{_IDENT})*)")
+
+# FROM 子句的结束标志：出现这些关键字说明表清单已结束，逗号不再可能是表分隔符。
+# 有意只列"能跟在表清单后面"的子句与连接词 —— 靠正向识别边界，而不是
+# "排除所有可能"（后者永远列不全）。
+_CLAUSE_BOUNDARY = frozenset(
+    {
+        "where", "group", "order", "having", "limit", "union", "join", "inner",
+        "left", "right", "full", "outer", "cross", "natural", "straight_join",
+        "on", "using", "offset", "window", "qualify", "into", "for", "lateral",
+    }
+)
+
+
+def _normalize_table(raw: str) -> str:
+    """把 `ecommerce`.`ads_xxx` / ecommerce.ads_xxx / [ads_xxx] 统一成表名。"""
+    last = re.split(r"\s*\.\s*", raw.strip())[-1]
+    return last.strip().strip("`\"[]")
+
+
+def _paren_depth(sql: str) -> list[int]:
+    """每个字符位置上的括号嵌套深度（depth[i] = 第 i 个字符之前的深度）。
+
+    逗号在 SQL 里至少有三种含义 —— 列分隔、函数参数分隔、表分隔，
+    而"表分隔"只可能出现在**当前这一层**的 FROM 子句里。有了深度表，
+    才能回答"这个逗号与那个 FROM 是不是同一层"（子查询里的 FROM 要单独算）。
+    """
+    depths = [0] * (len(sql) + 1)
+    depth = 0
+    for index, char in enumerate(sql):
+        depths[index] = depth
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth = depth - 1 if depth > 0 else 0
+    depths[len(sql)] = depth
+    return depths
+
+
+def _skip_spaces(sql: str, index: int) -> int:
+    """跳过空白，返回下一个非空白字符的位置。"""
+    while index < len(sql) and sql[index].isspace():
+        index += 1
+    return index
+
+
+def _word_at(sql: str, index: int) -> str:
+    """取 `index` 处的**单词**（小写）；不是单词则返回空串。
+
+    用途：判断表项后面跟的是 `AS 别名` / 裸别名 / 子句关键字 / 逗号。
+    """
+    index = _skip_spaces(sql, index)
+    match = re.match(r"[A-Za-z_]\w*", sql[index:])
+    return match.group(0).lower() if match is not None else ""
 
 
 def extract_tables(sql: str) -> list[str]:
     """从 SQL 里提取目标表名（去重、保持出现顺序）。
 
-    与 `sqlguard.extract_tables` 规则一致：支持 `库.表`、反引号、方括号写法。
-    少识别一种写法就等于少一份血缘信息，因此标识符按"点分片段"来匹配。
+    与 `sqlguard.extract_tables` 规则一致：支持 `库.表`、反引号、方括号写法，
+    并且**覆盖同一个 FROM 子句里用逗号分隔的后续表**（隐式 CROSS JOIN）：
+        `FROM dwd_trade_order_detail a, dim_user b` → 两张表都要报。
+
+    ⚠️ 逗号**只在"前面已经是一个表项"时才算表分隔符**：
+        `SELECT a, b FROM t` 里的逗号前面是列，不产生表名。
+        见逗号就当表会让所有多列查询都被报成多表 —— 那是**血缘失真**，
+        与漏报是同一类问题的两个方向。
     """
     seen: list[str] = []
-    for match in _TABLE_RE.finditer(sql or ""):
-        name = re.split(r"\s*\.\s*", match.group(1).strip())[-1].strip().strip("`\"[]")
+    if not sql:
+        return seen
+
+    depths = _paren_depth(sql)
+
+    def _add(raw: str) -> None:
+        name = _normalize_table(raw)
         if name and name not in seen:
             seen.append(name)
+
+    for keyword in re.finditer(r"\b(?:from|join)\b", sql, re.I):
+        depth = depths[keyword.start()]
+        # 从关键字之后开始，按"表清单"的结构推进：表名 [别名] (, 表名 [别名])*
+        index = _skip_spaces(sql, keyword.end())
+        while True:
+            index = _skip_spaces(sql, index)
+            match = _TABLE_RE.match(sql, index)
+            if match is None:
+                # 子查询（`FROM (SELECT ...)`）或无法识别的写法 —— 停止推进，
+                # **绝不猜**：猜错要么把列名当表名（误杀），要么漏一张表（放行）。
+                break
+            _add(match.group(1))
+            index = match.end()
+
+            # 跳过表别名：`AS t` 或裸 `t`；`FROM t WHERE ...` 这类没有别名。
+            index = _skip_spaces(sql, index)
+            word = _word_at(sql, index)
+            if word == "as":
+                index = _skip_spaces(sql, index + 2)
+                word = _word_at(sql, index)
+            if word and word not in _CLAUSE_BOUNDARY:
+                index += len(word)
+
+            # 表项之间必须是逗号，且这个逗号与 FROM 在**同一层括号**内。
+            index = _skip_spaces(sql, index)
+            if index >= len(sql) or sql[index] != "," or depths[index] != depth:
+                break
+            index += 1
+
     return seen
 
 
