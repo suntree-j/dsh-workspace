@@ -26,7 +26,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from .config import ConfigError, Settings, load_settings
-from .doris import DorisClient, DorisUnavailable
+from .doris import DorisClient, DorisQueryError, DorisUnavailable
 from .envelope import envelope, error_body, now_iso
 from .metrics_doc import MetricsDoc, load_metrics_doc
 from .repository import Repository
@@ -105,6 +105,27 @@ async def _handle_doris_unavailable(_: Request, exc: DorisUnavailable) -> JSONRe
     return JSONResponse(
         status_code=503,
         content=error_body("DORIS_UNAVAILABLE", "数据仓库暂时不可用，请稍后重试", str(exc)),
+    )
+
+
+@app.exception_handler(DorisQueryError)
+async def _handle_doris_query_error(_: Request, exc: DorisQueryError) -> JSONResponse:
+    """语句本身有错 → **400，不是 503**。
+
+    为什么这条与上面那条必须分开（本 Sprint 修的缺陷）：
+
+        改之前，Doris 返回的 `Unknown column 'xxx'` 会被包成
+        `503 DORIS_UNAVAILABLE` —— 于是 LLM Agent 把"我 SQL 写错了"
+        读成"仓库不可用"，按可重试故障**多跑一轮**重试。
+        两边语义完全不同：503 该退避重试，400 该改写语句。
+
+    保留 `detail` 里的**错误原文**（含 Doris 错误码）是刻意的：
+    Agent 的下一步动作正是拿这句话去纠正表名/列名，
+    把它删掉等于让模型盲改。
+    """
+    return JSONResponse(
+        status_code=400,
+        content=error_body(exc.code, exc.message, exc.detail),
     )
 
 

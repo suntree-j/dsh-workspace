@@ -47,5 +47,17 @@ Faker>=30,<40
 # data-generator 读取 .env 用（同样是测试收集期就会 import 的依赖）
 python-dotenv>=1,<2
 
+# tests/test_doris_error_classification.py：直接构造 mysql.connector 的异常对象
+# 来验"Doris 语句错误 → 400 / 连接类故障 → 503"的分类判据。
+#
+# !! 为什么必须写在这里（第二次踩同一个坑）!!
+#   这个测试文件是 `-m unit` 全量收集的一部分，而 Sprint 9/12 的验收用
+#   `.venv-agent` 跑全量 —— 那个 venv 里没有 mysql，于是**整个文件的收集都会失败**
+#   （ModuleNotFoundError），同时打挂 verify-sprint-9 与 verify-sprint-12。
+#   处置时确实又在服务器上手工装了一次（9.7.0）。
+#   这与 pytest / Faker 当初"只在重建 venv 时暴露"是同一类问题：
+#   **凡是测试真的会 import 的包，都必须能从仓库重放出来。**
+mysql-connector-python>=9.0,<10.0
+
 # 注意：**不在这里**放 services/api、services/agent 的运行时依赖。
 #       那两份清单由部署脚本消费，混进来会让"服务需要什么"变得不清晰。
