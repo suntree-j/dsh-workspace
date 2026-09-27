@@ -13,6 +13,18 @@
     若 meta 缺失，app.js 会退回相对路径 ./api。
   -->
   <meta name="api-base" content="/data/api" />
+  <!--
+    内联 SVG favicon（data URI，不引入任何外部文件）。
+    为什么用 data URI 而不是放一个 favicon.ico：
+      ① 部署零成本 —— 不需要往服务器多发一个二进制文件，也不会因为
+         部署脚本只同步三个文件而漏掉它（本项目前端只发 index.html /
+         app.js / styles.css 三件）；
+      ② 不产生额外请求，也不依赖 nginx 的静态类型配置。
+    为什么现在才加：浏览器对缺失 favicon 的默认行为是请求 /favicon.ico，
+    在部署到 /data/ 子路径后拿到 404 —— 控制台里会留下一条 error，
+    而验收要求"无 console error"。图标本身是「批」字（与侧栏 logo 同字）。
+  -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%234c8dff'/%3E%3Ctext x='16' y='23' font-size='20' font-family='sans-serif' font-weight='700' fill='%23fff' text-anchor='middle'%3E%E6%89%B9%3C/text%3E%3C/svg%3E" />
   <title>批流一体智能数据分析平台 · 实时数据看板</title>
   <link rel="stylesheet" href="./styles.css" />
 </head>
