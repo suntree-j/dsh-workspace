@@ -61,6 +61,12 @@ _AGENT_KEYS = {
     "AGENT_PORT",
     "AGENT_TITLE",
     "AGENT_VERSION",
+    # Sprint 8（LangGraph 图式编排）
+    "AGENT_MAX_RETRIES",
+    "AGENT_GRAPH_ENABLED",
+    # Sprint 9（元数据/口径检索）
+    "AGENT_RETRIEVAL_ENABLED",
+    "AGENT_RETRIEVAL_TOP_K",
 }
 
 # 允许通过环境变量覆盖的已知键（含 API_ 前缀，便于与数据服务共用 .env）
@@ -123,6 +129,19 @@ class Settings:
     max_tool_rounds: int
     query_limit: int
     total_timeout: float
+
+    # Sprint 8：图式编排
+    max_retries: int
+    graph_enabled: bool
+
+    # Sprint 9：元数据/口径检索
+    retrieval_enabled: bool
+    retrieval_top_k: int
+
+    # 仓库根目录：RAG 语料（sql/metadata/*.md）与同义词表都在仓库内，
+    # 随代码分发。放进来是为了让"语料从哪读"可配置、可测试，
+    # 而不是在 corpus.py 里再算一次相对路径。
+    repo_root: Path = REPO_ROOT
 
     @property
     def llm_configured(self) -> bool:
@@ -193,4 +212,12 @@ def load_settings(env_file: Path | None = None) -> Settings:
         max_tool_rounds=_env_int(env, "AGENT_MAX_TOOL_ROUNDS", 6),
         query_limit=_env_int(env, "AGENT_QUERY_LIMIT", 200),
         total_timeout=_env_float(env, "AGENT_TOTAL_TIMEOUT", 120.0),
+        # Sprint 8：反思重试额度。取 2 —— 第一次重试通常能改正"选错表"，
+        # 再多就是在这个问题上反复烧 token，收益远低于成本。
+        max_retries=_env_int(env, "AGENT_MAX_RETRIES", 2),
+        graph_enabled=_env_bool(env, "AGENT_GRAPH_ENABLED", True),
+        # Sprint 9：检索开关与条数。top_k 取 5 —— 口径 + 表结构 + 分层合计通常
+        # 只需 2~3 条就能覆盖一个问题的全部依据，5 条留出余量且不挤占上下文。
+        retrieval_enabled=_env_bool(env, "AGENT_RETRIEVAL_ENABLED", True),
+        retrieval_top_k=_env_int(env, "AGENT_RETRIEVAL_TOP_K", 5),
     )

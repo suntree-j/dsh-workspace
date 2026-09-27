@@ -1,7 +1,7 @@
-"""数据问答 Agent（Sprint 7）：LLM + Tool Calling。
+"""数据问答 Agent（Sprint 7 → Sprint 8 图式编排 → Sprint 9 检索增强）。
 
 定位：
-    这是「智能层」的第一个可运行形态 —— 自然语言问题进，带来源说明的回答出。
+    这是「智能层」的可运行形态 —— 自然语言问题进，带来源说明的回答出。
     它**不直连数据库**：所有取数都经 `services/api` 的只读接口，
     因此 Agent 的能力边界与一个只读用户完全一致（进程边界即权限边界）。
 
@@ -12,18 +12,29 @@
 与数据服务的关系：
     Nginx 把 /data/agent/ 反代到本服务，/data/api/ 反代到数据服务。
     对外只有一个入口，看板通过同源路径调用，不需要额外开端口。
+
+## `/ask` 走哪条路（Sprint 8 起）
+
+默认走 **LangGraph 图式 Agent**（`app/graph.py`）：
+`retrieve → plan → execute → validate →（reflect → plan）→ summarize`。
+
+`AGENT_GRAPH_ENABLED=false` 时回退到 Sprint 7 的单轮工具调用循环（`app/agent.py`）。
+保留这条回退路径的原因很实际：**排障与回归要有基线** ——
+图出问题时，能立刻判断"是图的问题还是数据/模型的问题"。
+它不是长期的双实现，`/ask` 的响应里 `engine` 字段会如实说明用了哪条。
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from .agent import SYSTEM_PROMPT, Agent, describe_tools
 from .config import ConfigError, Settings, load_settings
+from .retrieval import build_retriever
 from .timeutil import now_iso
 
 SETTINGS: Settings
@@ -38,11 +49,17 @@ app = FastAPI(
     version=SETTINGS.version,
     description=(
         "批流一体智能数据分析平台的数据问答 Agent。\n\n"
-        "自然语言 → 指标口径检索 → SQL 生成 → 安全检查 → 只读执行 → 带来源的回答。\n"
+        "自然语言 → 元数据/口径检索 → 规划 → SQL 生成 → 安全检查 → 只读执行 "
+        "→ 结果校验 → 反思重试 → 带来源的回答。\n"
+        "编排为 LangGraph 图（Sprint 8），检索为词法后端（Sprint 9，无向量库）。\n"
         "所有取数都经只读数据服务，Agent 自身没有数据库凭据。"
     ),
     root_path="/data/agent",  # 经 Nginx 反代后的对外路径（保证 /docs 链接正确）
 )
+
+# 检索器（进程内单例）：语料按文件 mtime 与表结构 TTL 缓存，
+# 改了口径文档不必重启服务。
+_RETRIEVER = build_retriever(SETTINGS)
 
 
 # ------------------------------------------------------------
@@ -77,7 +94,11 @@ def index() -> dict[str, Any]:
         "data": {
             "service": "数据问答 Agent",
             "version": SETTINGS.version,
-            "endpoints": ["/health", "/tools", "POST /ask", "/prompt"],
+            "engine": _engine_name(),
+            "endpoints": [
+                "/health", "/tools", "POST /ask", "/prompt",
+                "/graph", "/retrieval", "/api/retrieve",
+            ],
             "docs": "/docs",
         },
         "source": {
@@ -90,9 +111,13 @@ def index() -> dict[str, Any]:
     }
 
 
+def _engine_name() -> str:
+    return "langgraph" if SETTINGS.graph_enabled else "single-loop（Sprint 7 回退）"
+
+
 @app.get("/health", summary="健康检查")
 def health() -> dict[str, Any]:
-    """报告 Agent 与数据服务、LLM 的可用性。
+    """报告 Agent、数据服务、LLM 与检索层的可用性。
 
     `llm.configured=false` 不是故障：服务可以正常启动与自检，
     只是 `/ask` 会明确拒绝并给出配置步骤 —— 这比"启动就失败"
@@ -116,10 +141,27 @@ def health() -> dict[str, Any]:
     except (urllib.error.URLError, OSError) as exc:
         api_detail = f"{type(exc).__name__}: {exc}"
 
+    # 检索层状态：语料是否真的装载了。装不上时 /ask 仍可用，
+    # 但必须在这里可见 —— 否则"回答里不再引用口径"会被误认为模型变笨。
+    retrieval_detail: dict[str, Any] = {"ok": False, "detail": "未装载"}
+    try:
+        profile = _RETRIEVER.describe()
+        retrieval_detail = {
+            "ok": profile["docs_total"] > 0,
+            "enabled": SETTINGS.retrieval_enabled,
+            "backend": profile["backend"],
+            "docs_total": profile["docs_total"],
+            "counts_by_kind": profile["counts_by_kind"],
+            "channels": profile["channels"],
+        }
+    except Exception as exc:  # noqa: BLE001 - 检索层故障必须可见
+        retrieval_detail = {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
+
     status = "ok" if (api_ok and SETTINGS.llm_configured) else "degraded"
     return {
         "data": {
             "status": status,
+            "engine": _engine_name(),
             "data_api": {"ok": api_ok, "base": SETTINGS.data_api_base, "detail": api_detail},
             "llm": {
                 "configured": SETTINGS.llm_configured,
@@ -128,10 +170,13 @@ def health() -> dict[str, Any]:
                 "base_url": SETTINGS.llm_base_url,
                 "thinking_mode": SETTINGS.llm_thinking,
             },
+            "retrieval": retrieval_detail,
             "limits": {
                 "max_tool_rounds": SETTINGS.max_tool_rounds,
+                "max_retries": SETTINGS.max_retries,
                 "query_limit": SETTINGS.query_limit,
                 "total_timeout": SETTINGS.total_timeout,
+                "retrieval_top_k": SETTINGS.retrieval_top_k,
             },
         },
         "source": {
@@ -149,7 +194,7 @@ def tools() -> dict[str, Any]:
     """Agent 能做什么 —— 用工具声明回答，而不是用自然语言描述。
 
     这样"Agent 的能力"是**可枚举、可审查**的：
-    安全审查只需要看这四个工具的声明与实现，不需要读提示词去猜。
+    安全审查只需要看这几个工具的声明与实现，不需要读提示词去猜。
     """
     return {
         "data": {
@@ -191,16 +236,98 @@ def prompt() -> dict[str, Any]:
     }
 
 
+@app.get("/graph", summary="图式编排（节点与边）")
+def graph_description() -> dict[str, Any]:
+    """返回 LangGraph 图的节点、边与上界。
+
+    为什么要把"编排长什么样"做成接口：
+        Sprint 8 的全部价值就是"Agent 的流程是**声明式、可审查**的"。
+        若只能靠读源码才知道它经过哪几步、什么时候会重试，
+        那和 Sprint 7 的隐式循环没有本质区别。
+    """
+    from .graph import GraphAgent
+
+    data = GraphAgent(SETTINGS).describe()
+    return {
+        "data": data,
+        "source": {
+            "tables": [],
+            "metric_definitions": [],
+            "time_range": {"start": None, "end": None},
+            "note": "编排为声明式图；节点/边/上界均在此列出，便于审查与论文引用",
+        },
+        "generated_at": now_iso(),
+    }
+
+
+@app.get("/retrieval", summary="检索层画像（语料与后端）")
+def retrieval_profile() -> dict[str, Any]:
+    """报告检索后端、语料条数与**每一路语料的真实装载状态**。
+
+    `channels` 是刻意暴露的：若表结构那一路取不到（接口不可达），
+    检索仍可用但召回会变差。把它如实显示出来，
+    比让人从"回答质量下降"去反推要可靠得多。
+    """
+    profile = _RETRIEVER.describe()
+    return {
+        "data": profile,
+        "source": {
+            "tables": [],
+            "metric_definitions": [],
+            "time_range": {"start": None, "end": None},
+            "note": (
+                "检索为词法后端（BM25 + 显式同义词表），**未引入向量库**；"
+                "依据 docs/DECISIONS.md ⏳7。口径唯一权威是 sql/metadata/metrics.md。"
+            ),
+        },
+        "generated_at": now_iso(),
+    }
+
+
+@app.get("/api/retrieve", summary="检索口径与元数据（可解释）")
+def retrieve(
+    q: str = Query(..., min_length=1, max_length=200, description="检索词（可用用户原话）"),
+    k: int = Query(5, ge=1, le=20, description="返回条数"),
+) -> dict[str, Any]:
+    """对外暴露检索本身，返回命中条目、来源与**生效的同义词**。
+
+    为什么单独开这个接口（而不是只让 `/ask` 内部用）：
+        检索质量是本 Sprint 的核心可验收项，而"从回答里反推检索好不好"
+        既慢又不可靠。把它开成接口后：
+
+        - 同义词是否生效**可断言**（`expanded_terms`）；
+        - 命中来源与行号**可核对**（`source` / `line`）；
+        - 语料是否缺了一路**可见**（`channels` / `degraded`）。
+    """
+    result = _RETRIEVER.retrieve(q, top_k=k)
+    return {
+        "data": result.as_dict(include_text=True),
+        "source": {
+            "tables": [],
+            "metric_definitions": [hit.doc.doc_id for hit in result.hits if hit.doc.kind == "metric"],
+            "time_range": {"start": None, "end": None},
+            "note": (
+                f"词法检索（{result.backend}）：BM25 + 同义词扩展；"
+                "命中的 source/line 可点回原文核对。"
+            ),
+        },
+        "generated_at": now_iso(),
+    }
+
+
 @app.post("/ask", summary="提问（自然语言 → 带来源的回答）")
 def ask(payload: AskRequest) -> dict[str, Any]:
-    """回答一个自然语言问题。
+    """回答一个自然语言问题（默认走 LangGraph 图）。
 
     响应里除了 `answer`，还带上：
-      - `tables`       用了哪些表（来源可追溯）
-      - `executed_sql` 实际执行的 SQL（服务端返回的改写后语句，可核对）
-      - `steps`        每一步调了什么工具、成功与否（过程可审计）
+      - `docs`          命中的口径/表结构文档（含来源文件与行号）
+      - `tables`        用了哪些表（来源可追溯）
+      - `executed_sql`  实际执行的 SQL（服务端返回的改写后语句，可核对）
+      - `steps`         每一步调了什么工具、成功与否（过程可审计）
+      - `plan`          显式规划（Sprint 8）
+      - `validation`    结果校验结论与 `retries` 重试次数（Sprint 8）
 
-    这三项就是 `AGENTS.md` 第 10.1 节「最终回答必须能够说明数据来源」
+    这些就是 `AGENTS.md` 第 10.1 节「最终回答必须能够说明数据来源」
     与「不得伪造查询结果」的落地形态：不是靠 Agent 自称，
     而是把可核对的东西一并返回。
     """
@@ -220,15 +347,33 @@ def ask(payload: AskRequest) -> dict[str, Any]:
             },
         )
 
-    result = Agent(SETTINGS).ask(payload.question)
+    if SETTINGS.graph_enabled:
+        from .graph import GraphAgent
+
+        result = GraphAgent(SETTINGS).ask(payload.question)
+        data = result.as_dict()
+        data["engine"] = "langgraph"
+        docs = result.docs
+        tables = result.tables
+    else:
+        # 回退路径：Sprint 7 的单轮工具调用循环（排障与回归用）
+        legacy = Agent(SETTINGS).ask(payload.question)
+        data = legacy.as_dict()
+        data["engine"] = "single-loop"
+        data["docs"] = []
+        docs = []
+        tables = legacy.tables
+
     return {
-        "data": result.as_dict(),
+        "data": data,
         "source": {
-            "tables": result.tables,
-            "metric_definitions": [],
+            "tables": tables,
+            "metric_definitions": [doc["doc_id"] for doc in docs if doc.get("kind") == "metric"],
+            "documents": docs,
             "time_range": {"start": None, "end": None},
             "note": (
                 "本回答由 LLM 基于只读查询结果生成；"
+                "docs 为命中的口径/元数据来源（含文件与行号），"
                 "tables 与 executed_sql 为可核对的实际执行痕迹。"
                 "指标口径的唯一权威是 sql/metadata/metrics.md。"
             ),

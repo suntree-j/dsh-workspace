@@ -15,9 +15,15 @@
     tables_lookup      查表结构        —— 让 LLM 知道有哪些列可写
     sql_query          执行只读 SQL    —— 唯一的取数通道
     reconciliation     查批流对账结论  —— 回答"这个数可不可信"
+    retrieve_docs      词法检索口径与元数据（Sprint 9）—— 让说法与术语对齐
+    propose_sql        规划协议（Sprint 8）—— 规划器的输出格式，不执行 IO
 
     没有"列出所有表"这类工具：表清单是固定的白名单，
     直接写进系统提示词比让模型多绕一轮更省 token 也更稳定。
+
+    `propose_sql` 与其余五个不同：它是**图（Sprint 8）内部的规划协议**，
+    不是取数能力。列在工具表里是为了让 `/tools` 能把这个协议也暴露成
+    可审查的接口声明 —— "Agent 能做什么"应当一眼看全，包括它和编排层怎么对话。
 
 ## 每个工具都返回 ToolResult，而不是裸字符串
 
@@ -38,7 +44,13 @@ from typing import Any
 from .config import Settings
 from .llm import ToolSpec
 
-__all__ = ["TOOL_SPECS", "ToolResult", "ToolBox"]
+__all__ = [
+    "TOOL_SPECS",
+    "RETRIEVE_SPEC",
+    "REASONING_SPEC",
+    "ToolResult",
+    "ToolBox",
+]
 
 # 单次数据服务调用的超时。取 30s：数据服务侧 Doris 查询超时是 15s，
 # 这里必须比它大，否则会出现"数据服务还在正常查、Agent 已经超时报错"的假失败。
@@ -251,6 +263,50 @@ class ToolBox:
         )
 
     # --------------------------------------------------------
+    # 工具 5：元数据/口径检索（Sprint 9）
+    # --------------------------------------------------------
+    def retrieve_docs(self, query: str = "") -> ToolResult:
+        """词法检索口径/表结构/分层文档（BM25 + 同义词扩展）。"""
+        arguments = {"query": query}
+        try:
+            # 惰性导入：检索层依赖语料文件，让"没有语料"不至于影响其它工具可用
+            from .retrieval import build_retriever
+
+            result = build_retriever(self.settings).retrieve(query)
+        except Exception as exc:  # noqa: BLE001 - 检索失败必须可见，不能假装没查到
+            return ToolResult(
+                False,
+                f"检索失败：{type(exc).__name__}: {exc}",
+                tool="retrieve_docs",
+                arguments=arguments,
+            )
+
+        payload = {
+            "query": result.query,
+            "backend": result.backend,
+            "docs_total": result.docs_total,
+            "hits": [hit.as_dict() for hit in result.hits],
+            "expanded_terms": result.expanded_terms,
+            "channels": result.channels,
+            "degraded": result.degraded,
+        }
+        if not result.hits:
+            return ToolResult(
+                True,
+                "检索没有命中任何口径/表结构文档。请如实说明语料没有覆盖该问题，"
+                "不要凭常识给出公式。",
+                tool="retrieve_docs",
+                arguments=arguments,
+            )
+        return ToolResult(
+            True,
+            _dump(payload),
+            tables=[],
+            tool="retrieve_docs",
+            arguments=arguments,
+        )
+
+    # --------------------------------------------------------
     # 分发
     # --------------------------------------------------------
     def call(self, name: str, arguments: dict[str, Any]) -> ToolResult:
@@ -260,6 +316,16 @@ class ToolBox:
             "tables_lookup": lambda a: self.tables_lookup(str(a.get("table", ""))),
             "sql_query": lambda a: self.sql_query(str(a.get("sql", ""))),
             "reconciliation": lambda a: self.reconciliation(),
+            "retrieve_docs": lambda a: self.retrieve_docs(str(a.get("query", ""))),
+            # `propose_sql` 不是可执行的工具，而是**规划器的输出协议**：
+            # 它由图的 plan 节点消费，不在这里执行任何 IO。
+            # 放在这个分发表里只是为了给出可读的提示，避免模型误调。
+            "propose_sql": lambda a: ToolResult(
+                False,
+                "propose_sql 是规划协议，由规划器在 plan 阶段调用，不在此处执行。",
+                tool="propose_sql",
+                arguments=a,
+            ),
         }
         handler = handlers.get(name)
         if handler is None:
@@ -354,7 +420,69 @@ TOOL_SPECS: list[ToolSpec] = [
         ),
         parameters={"type": "object", "properties": {}, "required": []},
     ),
+    ToolSpec(
+        name="retrieve_docs",
+        description=(
+            "在指标口径、表结构、数仓分层说明里做**词法检索**（BM25 + 同义词扩展），"
+            "返回命中的条目及其来源文件与行号。"
+            "当问题里的说法与项目术语不一致时特别有用"
+            "（例如用户说「卖了多少钱」「客单价」「口径」，检索层有显式同义词映射）。"
+            "注意：图中已自动做了一次检索并把结果附在问题后，"
+            "只有需要**换关键词再查一次**时才调用本工具。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "检索关键词，可用用户原话（会自动做同义词扩展）",
+                }
+            },
+            "required": ["query"],
+        },
+    ),
+    ToolSpec(
+        name="propose_sql",
+        description=(
+            "**规划协议**：提交本次的查询计划（思路 + 1~3 条 SQL 步骤）。"
+            "规划阶段必须调用它；它本身不执行查询，执行由后续步骤完成。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "reasoning": {
+                    "type": "string",
+                    "description": "给用户看的思路：为什么查这些指标、为什么选这些表",
+                },
+                "steps": {
+                    "type": "array",
+                    "description": "1~3 条 SQL 步骤；信息不足时传空数组并说明缺什么",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "purpose": {"type": "string", "description": "这一步要回答什么"},
+                            "target_table": {
+                                "type": "string",
+                                "description": "目标表，写「库名.表名」",
+                            },
+                            "sql": {"type": "string", "description": "一条完整 SELECT，不带分号"},
+                        },
+                        "required": ["purpose", "sql"],
+                    },
+                },
+                "notes": {
+                    "type": "string",
+                    "description": "要点或不确定之处（例如语料未覆盖该口径）",
+                },
+            },
+            "required": ["reasoning", "steps"],
+        },
+    ),
 ]
+
+# 单独暴露，便于图（Sprint 8）与接口按名引用，避免靠下标取列表
+RETRIEVE_SPEC: ToolSpec = next(spec for spec in TOOL_SPECS if spec.name == "retrieve_docs")
+REASONING_SPEC: ToolSpec = next(spec for spec in TOOL_SPECS if spec.name == "propose_sql")
 
 
 def _dump(payload: Any, max_chars: int = 12000) -> str:

@@ -1,5 +1,5 @@
 # ============================================================
-# systemd 单元：数据问答 Agent（LLM + Tool Calling）
+# systemd 单元：数据问答 Agent（LangGraph 图式编排 + 词法检索）
 # ============================================================
 #
 # 安装位置： /etc/systemd/system/data-platform-agent.service
@@ -10,6 +10,7 @@
 #   systemctl restart data-platform-agent
 #   journalctl -u data-platform-agent -n 100 --no-pager
 #   curl -s http://127.0.0.1:8100/health | python3 -m json.tool
+#   curl -s http://127.0.0.1:8100/graph  | python3 -m json.tool   # 看图长什么样
 #
 # 为什么与数据服务分成两个单元（而不是塞进同一个进程）：
 #   1) **故障隔离**：LLM 调用慢/被限流/欠费时，只影响问答，
@@ -24,11 +25,15 @@
 #      这样它只能**读**配置、不能改（见 scripts/deploy-agent.sh 的说明）；
 #   2) 只监听 127.0.0.1:8100，对外必须经 Nginx（/data/agent/）；
 #   3) 基础加固与数据服务保持一致。
+#
+# Sprint 9 的检索语料（sql/metadata/*.md 与 knowledge/*.md）随代码分发，
+# 由 Agent **读自己的仓库文件**获得。这不需要也不授予任何数据库权限：
+# 语料是知识、不是凭据；取数仍然只经 POST /data/api/query。
 # ============================================================
 
 [Unit]
-Description=Data Platform Q&A Agent (FastAPI + DeepSeek Tool Calling)
-Documentation=file:/opt/data-platform/docs/sprint/SPRINT_7.md
+Description=Data Platform Q&A Agent (FastAPI + LangGraph + DeepSeek Tool Calling)
+Documentation=file:/opt/data-platform/docs/sprint/SPRINT_8.md
 After=network-online.target data-platform-api.service
 Wants=network-online.target
 # 依赖数据服务（Agent 的所有取数都经它）：

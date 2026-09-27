@@ -1,0 +1,116 @@
+{
+  "_comment": [
+    "Sprint 9 词法检索的**同义词表**：把用户口语映射到项目里的权威术语。",
+    "",
+    "为什么把它做成独立的 JSON 配置，而不是写在代码里的 if-else：",
+    "  1. 它是**知识**而不是逻辑 —— 口径说法会变，改配置不该改代码；",
+    "  2. 它必须**可审查**：这个文件就是'Agent 为什么把这句话理解成 GMV'的完整答案；",
+    "  3. 它必须**可测试**：tests/test_retrieval.py 直接读它做正例与负例断言。",
+    "",
+    "为什么本项目的检索需要它（而不是纯 BM25 就够）：",
+    "  用户问的是'最近一周卖了多少钱'，而语料里的词是'GMV / 成交金额'。",
+    "  BM25 是词项匹配，没有这层映射就必然漏召回 —— 这是词法检索的**已知代价**，",
+    "  对策就是显式列出映射，而不是假装语义检索能解决。",
+    "",
+    "字段说明：",
+    "  phrase  用户可能说的短语（中文/英文/口语）",
+    "  terms   映射到的检索术语，必须**真实存在于语料**中才有效",
+    "  reason  为什么这么映射（这一条不是装饰：没有理由的映射会让检索退化成'总能命中点什么'）"
+  ],
+
+  "synonyms": [
+    { "phrase": "卖了多少钱", "terms": ["gmv", "payment_amount"], "reason": "口语问成交金额；本项目 GMV 是订单创建口径、payment_amount 是实收口径，两条都召回供模型辨别" },
+    { "phrase": "卖了多少", "terms": ["gmv"], "reason": "同上，省略宾语的口语形式" },
+
+    { "phrase": "成交额", "terms": ["gmv"], "reason": "电商常用说法" },
+    { "phrase": "成交金额", "terms": ["gmv"], "reason": "metrics.md 中 GMV 的口径原文用词" },
+    { "phrase": "销售额", "terms": ["gmv"], "reason": "业务口语与 GMV 同义" },
+    { "phrase": "流水", "terms": ["gmv"], "reason": "口语说法" },
+    { "phrase": "营收", "terms": ["gmv"], "reason": "口语说法" },
+
+    { "phrase": "客单价", "terms": ["avg_order_amount"], "reason": "metrics.md 第 2 节的正式名称" },
+    { "phrase": "平均每单", "terms": ["avg_order_amount"], "reason": "客单价的口径描述" },
+    { "phrase": "平均订单金额", "terms": ["avg_order_amount"], "reason": "同上" },
+
+    { "phrase": "复购", "terms": ["repurchase", "order_user_cnt"], "reason": "复购相关口径；语料中未必有独立指标，需检索后如实判断" },
+    { "phrase": "复购率", "terms": ["repurchase", "order_user_cnt", "user_id"], "reason": "复购率通常用去重下单用户推导" },
+    { "phrase": "回头客", "terms": ["repurchase", "order_user_cnt"], "reason": "复购的口语说法" },
+
+    { "phrase": "转化率", "terms": ["buy_rate"], "reason": "本项目转化率口径为购买占加购比例" },
+    { "phrase": "购买转化率", "terms": ["buy_rate"], "reason": "metrics.md 正式名称" },
+    { "phrase": "下单转化", "terms": ["buy_rate", "cart_rate"], "reason": "语气含糊，两条都召回" },
+    { "phrase": "点击率", "terms": ["click_rate"], "reason": "metrics.md 正式名称" },
+    { "phrase": "加购率", "terms": ["cart_rate"], "reason": "metrics.md 正式名称" },
+
+    { "phrase": "支付成功率", "terms": ["payment_success_rate"], "reason": "metrics.md 正式名称" },
+    { "phrase": "支付成功率", "terms": ["payment_fail_cnt", "payment_cnt"], "reason": "口径依赖分子分母，一并召回" },
+    { "phrase": "支付失败率", "terms": ["payment_success_rate", "payment_fail_cnt"], "reason": "同一组分母的另一侧口径" },
+    { "phrase": "退款率", "terms": ["refund_rate"], "reason": "metrics.md 正式名称" },
+    { "phrase": "退货率", "terms": ["refund_rate"], "reason": "口语常把退款说成退货" },
+    { "phrase": "支付金额", "terms": ["payment_amount"], "reason": "metrics.md 正式名称" },
+    { "phrase": "实收", "terms": ["payment_amount"], "reason": "财务口语，对应支付成功金额" },
+
+    { "phrase": "有多少人", "terms": ["uv", "order_user_cnt"], "reason": "人数类问题，去重指标" },
+    { "phrase": "多少个人", "terms": ["uv", "order_user_cnt"], "reason": "同上，语序差异" },
+    { "phrase": "访问人数", "terms": ["uv"], "reason": "UV 的业务含义（窗口内去重用户数）" },
+    { "phrase": "访客数", "terms": ["uv"], "reason": "同上" },
+    { "phrase": "独立访客", "terms": ["uv"], "reason": "UV 的全称 Unique Visitor" },
+    { "phrase": "浏览了多少次", "terms": ["pv", "view_cnt"], "reason": "次数类口径，PV 与浏览次数需区分" },
+    { "phrase": "多少人下单", "terms": ["order_user_cnt"], "reason": "下单用户数（去重）" },
+    { "phrase": "下单人数", "terms": ["order_user_cnt"], "reason": "同上" },
+    { "phrase": "订单量", "terms": ["order_cnt"], "reason": "metrics.md 正式名称" },
+    { "phrase": "几单", "terms": ["order_cnt"], "reason": "口语问订单数" },
+
+    { "phrase": "漏斗", "terms": ["behavior_event", "buy_rate"], "reason": "行为漏斗（VIEW→CLICK→CART→BUY）" },
+    { "phrase": "浏览 点击 加购 购买", "terms": ["behavior_event"], "reason": "漏斗四步的行为事件" },
+
+    { "phrase": "准不准", "terms": ["batch_reconcile", "reconcile"], "reason": "数据可信性问题走批流对账结论" },
+    { "phrase": "数据可信吗", "terms": ["reconcile"], "reason": "同上" },
+    { "phrase": "实时和离线一致吗", "terms": ["reconcile"], "reason": "同上" },
+    { "phrase": "对账", "terms": ["reconcile"], "reason": "批流对账" },
+
+    { "phrase": "口径", "terms": ["metric_definitions"], "reason": "用户问定义时优先给口径文档" },
+    { "phrase": "怎么算", "terms": ["metric_definitions"], "reason": "计算方法类提问" },
+    { "phrase": "计算公式", "terms": ["metric_definitions"], "reason": "同上" },
+    { "phrase": "定义", "terms": ["metric_definitions"], "reason": "同上" },
+
+    { "phrase": "表结构", "terms": ["table"], "reason": "问字段与类型" },
+    { "phrase": "有哪些字段", "terms": ["table"], "reason": "同上" },
+    { "phrase": "字段名", "terms": ["table"], "reason": "同上" },
+    { "phrase": "哪个表", "terms": ["table"], "reason": "选表问题" },
+
+    { "phrase": "分钟", "terms": ["_1m"], "reason": "实时链路是 1 分钟窗口" },
+    { "phrase": "按天", "terms": ["_1d"], "reason": "离线链路按天" },
+    { "phrase": "每天", "terms": ["_1d"], "reason": "同上" },
+    { "phrase": "实时", "terms": ["ecommerce"], "reason": "实时链路库名" },
+    { "phrase": "离线", "terms": ["lakehouse_ads"], "reason": "离线链路库名" },
+    { "phrase": "分层", "terms": ["ods", "dwd", "dws", "ads"], "reason": "数仓分层说明" }
+  ],
+
+  "stopwords": [
+    "的", "了", "是", "吗", "呢", "吧", "啊", "我", "你", "他",
+    "多少", "什么", "怎么", "如何", "哪些", "哪个", "请问", "帮我",
+    "一下", "现在", "目前", "最近", "一下", "这个", "那个", "可以",
+    "以及", "还有", "并且", "而且", "的话", "给我", "看下", "看看",
+    "the", "a", "an", "of", "is", "are", "to", "for", "and", "in", "on", "what", "how"
+  ],
+
+  "term_weight": {
+    "gmv": 3.0,
+    "uv": 3.0,
+    "pv": 3.0,
+    "payment_success_rate": 3.0,
+    "refund_rate": 3.0,
+    "avg_order_amount": 3.0,
+    "buy_rate": 3.0,
+    "click_rate": 3.0,
+    "cart_rate": 3.0,
+    "order_user_cnt": 2.5,
+    "order_cnt": 2.5,
+    "payment_amount": 2.5,
+    "refund_amount": 2.5,
+    "metric_definitions": 2.0,
+    "table": 2.0,
+    "reconcile": 2.0
+  }
+}

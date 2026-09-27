@@ -1,4 +1,8 @@
-# Agent 配置说明（Sprint 7）
+# Agent 配置说明（Sprint 7 → 8 → 9）
+
+> Sprint 8 起 Agent 由 **LangGraph 图**编排（检索 → 规划 → 取数 → 校验 → 反思 → 汇总），
+> Sprint 9 起回答会附带**命中的口径来源**。
+> 配置方式没有变（仍然只认 `.env` 里的 `LLM_API_KEY`），本文件补充新增接口与排障项。
 
 > 面向**运维/演示者**。代码实现见 [`services/agent/`](../../services/agent)，
 > 设计文档见 [`docs/sprint/SPRINT_7.md`](../../docs/sprint/SPRINT_7.md)。
@@ -71,7 +75,24 @@ curl -s http://127.0.0.1:8100/health | python3 -m json.tool
 curl -s http://127.0.0.1:8100/tools  | python3 -m json.tool | head -30
 curl -s http://127.0.0.1:8100/prompt | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["system_prompt"][:400])'
 
-# 2) 真正提问（需要 Key）
+# 2) 图长什么样（Sprint 8：节点 / 边 / 三重上界，编排可审查）
+curl -s http://127.0.0.1:8100/graph | python3 -m json.tool
+
+# 3) 检索层画像（Sprint 9：后端、语料条数、**每一路语料的真实状态**）
+curl -s http://127.0.0.1:8100/retrieval | python3 -m json.tool
+
+# 4) 单独试检索（同义词是否生效一眼可见）
+curl -s --get http://127.0.0.1:8100/api/retrieve \
+  --data-urlencode 'q=最近一周卖了多少钱' --data-urlencode 'k=3' \
+  | python3 -c '
+import json, sys
+d = json.load(sys.stdin)["data"]
+print("同义词扩展：", [(x["phrase"], x["terms"]) for x in d["expanded_terms"]])
+for h in d["hits"]:
+    print("  命中：", h["citation"], "|", h["title"])
+'
+
+# 5) 真正提问（需要 Key）
 curl -s -X POST http://127.0.0.1:8100/ask \
   -H 'Content-Type: application/json' \
   -d '{"question":"最近一周每天的 GMV 是多少？"}' \
@@ -81,17 +102,24 @@ d = json.load(sys.stdin)["data"]
 print("回答：", d["answer"][:600])
 print("用到的表：", d["tables"])
 print("实际执行的 SQL：", d["executed_sql"])
+print("命中的口径来源：", [(x["citation"], x["title"]) for x in d.get("docs", [])])
+print("图路径：", " -> ".join(d.get("graph", {}).get("path") or []))
+print("重试次数：", d.get("retries"), " 校验通过：", d.get("validation", {}).get("ok"))
 print("工具调用轮次：", d["rounds"], " 耗时：", d["elapsed_ms"], "ms")
 '
 ```
 
-回答里必须能看到三样东西，缺一说明链路有问题：
+回答里必须能看到这些字段，缺一说明链路有问题：
 
 | 字段 | 含义 | 为什么必须有 |
 | --- | --- | --- |
 | `tables` | 这次读了哪些表 | 「回答必须能说明数据来源」 |
 | `executed_sql` | 服务端**实际执行**的语句（守卫改写后的） | 「不得伪造查询结果」要可核对 |
 | `steps` | 每一步调了什么工具、成败 | 回答不对时用来定位是哪一步错了 |
+| `docs`（S8/S9） | 命中的口径/表结构/分层文档，带 `source` 与 `line` | 引用口径必须能**翻回原文**核对 |
+| `plan`（S8） | 显式规划（目标表 + SQL 草稿 + 理由） | 让"它想怎么查"成为可审查的产物 |
+| `validation` / `retries`（S8） | 校验结论与**已用反思重试次数** | 失败与重试都要可数，而不是黑箱 |
+| `graph.path`（S8） | 这一次实际走过了哪些节点 | 一眼看出有没有触发重规划 |
 
 浏览 `https://<服务器IP>/data/#/ask` 同样可以提问，
 页面上会把上面三项直接展示出来。
@@ -108,9 +136,14 @@ print("工具调用轮次：", d["rounds"], " 耗时：", d["elapsed_ms"], "ms")
 | `/ask` 返回 503 `LLM_NOT_CONFIGURED` | Key 没配或仍是占位符 | 按第 3 节写入并重启 |
 | `/ask` 返回 401 / 402 | Key 无效 / 余额不足 | 到 DeepSeek 平台核对 |
 | `/ask` 返回 400 且提到 `reasoning_content` | 开了思考模式但历史轮次没回传 | 本仓库的实现已统一负责回传；若自行改过 `llm.py` 请对照官方文档 |
+| `/ask` 返回 400 且提到 `must be followed by tool messages` | 规划用的 `propose_sql` 工具调用没有被回应 | Sprint 8 已修为自动补一条"计划已受理"的 tool 消息；若改过 `graph.py` 的 `node_plan` 请保持该行为 |
 | 提问很慢最后 504 | `AGENT_TOTAL_TIMEOUT` 大于 Nginx 超时 | 保持 `AGENT_TOTAL_TIMEOUT < 180` |
-| 回答正确但总说"查不到" | 表名没写库名 | 提示词已要求写 `库.表`；若是新表，需同时加进 `sqlguard.BUSINESS_TABLES` |
+| 回答正确但总说"查不到" | 表名没写库名，或该表根本不在白名单 | 提示词已要求写 `库.表`；若是新表，需同时加进 `sqlguard.BUSINESS_TABLES`（注意：**表存在 ≠ 已授权**，`ads_traffic_1d` 就是典型） |
+| 回答里不再引用口径（没有 `docs`） | 检索层没装载（语料路径不对 / 接口不通） | `curl -s http://127.0.0.1:8100/retrieval` 看 `channels`，哪一路失败会写明原因 |
+| 同一个错反复重试、回答像"重放" | 规划器上下文里混进了上一轮的查询结果 | Sprint 8 已把规划上下文收窄为"问题 + 检索结果 + 上一版计划 + 真实失败"；不要改回复用全局消息流 |
 | Agent 报无法连接数据服务 | `data-platform-api` 未启动 | `systemctl status data-platform-api` |
+| **Agent 起不来，日志是 `PermissionError: '/opt/data-platform/.env'`** | `.env` 权限被收紧成 `600`，而服务以 `dpagent` 运行、需要**组读** | `chown root:dpapi /opt/data-platform/.env && chmod 640 /opt/data-platform/.env && systemctl restart data-platform-agent`（注意 `scripts/deploy-monitoring.sh` 会把它改回 600） |
+| 图单元测试报"缺少 langgraph 依赖" | 用了数据服务的 `.venv`（langgraph 只装在 `.venv-agent`） | 用 `/opt/data-platform/.venv-agent/bin/python -m pytest …` |
 
 ```bash
 # 看日志（Agent 的所有 LLM 调用与工具调用都会留下痕迹）
@@ -138,3 +171,19 @@ Agent 进程里没有数据库凭据 —— 它只能通过 HTTP 调只读数据
 `services/api/app/sqlguard.py` 的 `BUSINESS_TABLES`，并在
 `services/agent/app/agent.py` 的系统提示词「数据地图」里补上表名与字段 ——
 两处都要改，否则模型知道有这张表却不知道有哪些列。
+
+> **Sprint 9 起还有第三处（自动的）**：表结构语料经 `GET /meta/tables` 装载，
+> 而该接口就是按 `BUSINESS_TABLES` 取数的，所以**加了白名单，检索侧会自动跟上**
+> （最多 10 分钟 TTL，或重启 Agent 立即生效）。
+> 这也意味着"表存在但不在白名单"时，Agent 查得到它的元数据却查不到数据 ——
+> 此时它会如实说明"未授权"，而不是假装没有这张表（实测行为）。
+
+Agent 侧新增能力（Sprint 8/9，都不扩大取数权限）：
+
+```text
+propose_sql    图的规划协议：产出结构化计划，**不执行任何查询**
+retrieve_docs  在口径/表结构/分层文档里做词法检索（读仓库内文档，不碰数据库）
+```
+
+因此**能取业务数据的工具仍然只有 `sql_query` 一个**
+（`verify-sprint-8.sh` 第 4 步会断言这一点）。

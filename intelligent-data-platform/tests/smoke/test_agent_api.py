@@ -210,12 +210,29 @@ def test_agent_health_envelope(agent_available: None) -> None:
     assert "configured" in body["data"]["llm"]
 
 
-def test_agent_exposes_exactly_four_tools(agent_available: None) -> None:
-    """工具集合就是权限边界，增删都必须是有意为之。"""
+def test_agent_tool_surface_is_minimal_and_has_single_data_channel(agent_available: None) -> None:
+    """工具集合就是权限边界，增删都必须是有意为之。
+
+    Sprint 8 / 9 各加了一个（`propose_sql` 是图的规划协议、`retrieve_docs`
+    是仓库内文档的词法检索），两者都**不扩大取数能力**。
+    因此这里的断言从"恰好四个"改成两件更要紧的事：
+
+      1. 能力面**恰好**是这六个（多一个都要有人来解释它为什么存在）；
+      2. 能取业务数据的通道**仍然只有 `sql_query` 一个** ——
+         多一个取数工具就等于多一条可能绕过 `sqlguard` 的路。
+    """
     status, body = _request("GET", f"{AGENT_BASE}/tools")
     assert status == 200
     names = [t["name"] for t in body["data"]["tools"]]
-    assert names == ["metrics_lookup", "tables_lookup", "sql_query", "reconciliation"], names
+    assert names == [
+        "metrics_lookup",
+        "tables_lookup",
+        "sql_query",
+        "reconciliation",
+        "retrieve_docs",
+        "propose_sql",
+    ], names
+    assert names.count("sql_query") == 1, "取数通道必须唯一"
 
 
 def test_agent_prompt_states_hard_rules(agent_available: None) -> None:

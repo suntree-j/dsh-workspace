@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-# scripts/deploy-agent.sh — 部署数据问答 Agent（Sprint 7）
+# scripts/deploy-agent.sh — 部署数据问答 Agent（Sprint 7 → Sprint 8/9）
 # ============================================================
 #
 # 用法（服务器上，仓库根目录，需要 root）：
@@ -13,10 +13,11 @@
 #      （与数据服务的 .venv 分开 —— 两边的依赖集合不同，
 #        共用会让"升 Agent 依赖"意外影响看板接口）
 #   3. 安装 services/agent/requirements.txt
+#      （Sprint 8 起含 langgraph==1.1.0；装完**打印实际装到的版本**）
 #   4. 校验 .env 里的 LLM 配置（缺 Key 只告警不中断，见下方说明）
 #   5. 安装 systemd 单元并启动
 #   6. 校验 Nginx 配置并 reload（/data/agent/ 的反代在其中）
-#   7. 自检：/health 必须返回 200
+#   7. 自检：/health 必须返回 200，并报告**图与检索层**是否就绪
 #
 # !! 为什么缺 LLM_API_KEY 不中断部署 !!
 #   申请 Key 需要人工操作（平台注册 + 实名）。若强制要求先有 Key 才能装服务，
@@ -24,6 +25,11 @@
 #   这里改为：先装好服务，/health 明确报告 llm.configured=false，
 #   /ask 会返回 503 并给出配置步骤。这样"基础设施就绪"与"凭据就绪"
 #   两件事可以分开推进，且状态始终可见。
+#
+# !! 为什么必须打印 langgraph 的**实际**版本 !!
+#   "查证过 PyPI 上有 1.1.0" 与 "服务器上真的装到了 1.1.0" 是两件事。
+#   requirements.txt 里钉的是 ==1.1.0，但只有 `pip show` 的输出能证明它生效。
+#   本脚本把版本打进部署输出，并由 verify-sprint-8.sh 独立复核一次。
 #
 # 权限设计：
 #   .env 是 root:dpapi 0640（见 install-web.sh），里面同时有数据库口令与 LLM Key。
@@ -97,6 +103,29 @@ ensure_venv() {
     "${VENV_DIR}/bin/pip" install -q --disable-pip-version-check \
         -r "${REPO_ROOT}/services/agent/requirements.txt"
     log_ok "依赖就绪：$("${VENV_DIR}/bin/python" -V)"
+
+    # !! 打印**实际装到**的版本，而不是 requirements.txt 里写的版本 !!
+    #   "钉了 1.1.0" 与 "装上的是 1.1.0" 是两件事：镜像源、缓存、
+    #   依赖冲突都可能让实际结果不同，而这一切在 install 的输出里
+    #   只表现为一行 "Successfully installed"。
+    local pkg ver
+    for pkg in langgraph openai fastapi; do
+        ver="$("${VENV_DIR}/bin/pip" show "${pkg}" 2>/dev/null | awk '/^Version:/{print $2}')"
+        if [ -n "${ver}" ]; then
+            printf '  %-10s %s\n' "${pkg}" "${ver}"
+        else
+            log_warn "${pkg} 未安装成功"
+        fi
+    done
+
+    # Sprint 8 的核心依赖：缺它 /ask 会整体不可用（图构造失败）
+    local lg_ver
+    lg_ver="$("${VENV_DIR}/bin/pip" show langgraph 2>/dev/null | awk '/^Version:/{print $2}')"
+    if [ -z "${lg_ver}" ]; then
+        log_error "langgraph 未安装（Sprint 8 图式编排依赖它）"
+        return 1
+    fi
+    log_ok "langgraph 实际版本： ${lg_ver}"
 }
 
 # ------------------------------------------------------------
@@ -123,7 +152,9 @@ check_env() {
         printf '    配置方法： 在 %s 中设置 LLM_API_KEY，然后\n' "${ENV_FILE}"
         printf '               systemctl restart %s\n' "${UNIT_NAME}"
     else
-        log_ok "LLM_API_KEY 已配置（%s...，长度 %s）" "${key:0:6}" "${#key}"
+        # 只打印前缀与长度，绝不回显完整 Key（AGENTS.md 第 7 节）
+        printf '  %b LLM_API_KEY 已配置（%s...，长度 %s）\n' \
+            "${C_GREEN}[ OK ]${C_RESET}" "${key:0:6}" "${#key}"
     fi
 }
 
@@ -199,18 +230,25 @@ import json, sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     data = json.load(handle)
 print(f"  状态： {data.get('status')}")
+print(f"  编排： {data.get('engine')}")
 print(f"  数据服务： {'可达' if data.get('data_api', {}).get('ok') else '不可达'}"
       f" ({data.get('data_api', {}).get('detail', '')})")
 llm = data.get("llm", {})
 print(f"  LLM： {'已配置' if llm.get('configured') else '未配置'} "
       f"model={llm.get('model')} thinking={llm.get('thinking_mode')}")
+# Sprint 9：检索语料是否真的装上了（少一路语料会让回答不再引用口径）
+r = data.get("retrieval") or {}
+print(f"  检索： {'就绪' if r.get('ok') else '未就绪'} "
+      f"backend={r.get('backend')} docs={r.get('docs_total')}")
+for name, status in (r.get("channels") or {}).items():
+    print(f"      - {name}: {status}")
 PY
     fi
 }
 
 main() {
     printf '%b\n' "${C_BOLD}=====================================${C_RESET}"
-    printf '%b\n' "${C_BOLD} 部署数据问答 Agent（Sprint 7）${C_RESET}"
+    printf '%b\n' "${C_BOLD} 部署数据问答 Agent（Sprint 7/8/9）${C_RESET}"
     printf '%b\n' "${C_BOLD}=====================================${C_RESET}"
 
     parse_args "$@"
@@ -257,7 +295,9 @@ main() {
     printf '    curl -s -X POST http://127.0.0.1:%s/ask \\\n' "$(grep -E '^AGENT_PORT=' "${ENV_FILE}" | head -1 | cut -d= -f2- || echo 8100)"
     printf '      -H "Content-Type: application/json" \\\n'
     printf '      -d "{\\"question\\":\\"最近一周每天的 GMV 是多少？\\"}" | python3 -m json.tool\n'
-    printf '  验收： bash scripts/verify-sprint-7.sh\n'
+    printf '  验收： bash scripts/verify-sprint-7.sh   （Sprint 7 回归，必须仍 49/49）\n'
+    printf '        bash scripts/verify-sprint-8.sh   （Sprint 8 图式编排）\n'
+    printf '        bash scripts/verify-sprint-9.sh   （Sprint 9 检索增强）\n'
 }
 
 main "$@" < /dev/null

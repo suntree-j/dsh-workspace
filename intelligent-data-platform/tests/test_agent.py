@@ -146,10 +146,31 @@ def test_missing_api_key_is_not_a_startup_failure() -> None:
 # 2. 工具声明
 # ============================================================
 def test_tool_specs_are_minimal_and_well_formed() -> None:
+    """工具集合是权限边界的一部分，增删都必须是有意为之。
+
+    Sprint 8/9 各加了一个，两个都是**有意的**，且都不扩大取数能力：
+
+    - `propose_sql`（Sprint 8）：图的**规划协议**，只产出一份计划，
+      不执行任何 IO；它的作用是把"计划"从散文变成结构化数据。
+    - `retrieve_docs`（Sprint 9）：在口径/表结构/分层文档里做词法检索，
+      读的是**仓库内的文档**，不碰数据库，也不返回任何业务数据。
+
+    真正能取到业务数据的能力仍然只有 `sql_query` 一个，
+    且它必须经数据服务的 SQL 守卫与只读账号 —— 这条边界没有变。
+    """
     names = [spec.name for spec in TOOL_SPECS]
-    assert names == ["metrics_lookup", "tables_lookup", "sql_query", "reconciliation"], (
-        "工具集合是权限边界的一部分，增删都必须是有意为之"
-    )
+    assert names == [
+        "metrics_lookup",
+        "tables_lookup",
+        "sql_query",
+        "reconciliation",
+        "retrieve_docs",
+        "propose_sql",
+    ], "工具集合是权限边界的一部分，增删都必须是有意为之"
+
+    # 取数通道必须唯一：多一个能"取业务数据"的工具就等于多一条绕过守卫的路
+    data_tools = [name for name in names if name == "sql_query"]
+    assert data_tools == ["sql_query"], "唯一取数通道必须仍然只有 sql_query"
 
     for spec in TOOL_SPECS:
         schema = spec.as_openai_tool()
