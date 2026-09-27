@@ -544,3 +544,68 @@ docker compose config --quiet            → required variable MINIO_ROOT_PASSWO
    （MinIO 的 health 端点对**正确**凭据也返回 400，差点得出反向结论）；
 2. **`.env` 缺失时 `docker compose` 不可用，但 `docker exec` 可用** ——
    恢复期间的排查应走 `docker exec` 而不是 `compose exec`。
+
+### 10.3 ⚠️ 一个**破坏性操作顺序**问题：装载脚本会先清空、后装载
+
+`.env` 恢复之后复跑 `verify-sprint-3.sh`，第 6 步（服务装载）5 项全红：
+
+```text
+[FAIL] Doris ads_batch_trade_1m 行数 == 湖仓        (期望 11459)
+[FAIL] Doris ads_batch_trade_1d 行数 == 湖仓        (期望 626)
+[FAIL] Doris ads_batch_category_1m 行数 == 湖仓      (期望 5998)
+[FAIL] Doris ads_batch_category_1d 行数 == 湖仓      (期望 2834)
+[FAIL] Doris ads_reconcile_trade_1m 行数 == 湖仓     (期望 11458)
+```
+
+**关键线索**：08:45 时这些表**还有数据**（Sprint 11 的质量校验实测
+`ads_trade_1m 11459`、`ads_traffic_1m 19644` 全绿），而湖仓侧（期望值的来源）
+一直完好（11459 / 626 / 5998 / 2834 全部对得上）。
+→ 也就是说，**Doris 侧的数据是被"清掉"的，不是湖仓那边坏的**。
+
+**根因（脚本自己就写明了）** —— `scripts/load-batch-to-doris.sh`：
+
+```text
+第 25 行注释： 事实表先 TRUNCATE 再 INSERT（两步各自原子）；对账汇总表只追加不清空
+第 189 行：     if ! doris_q -e "TRUNCATE TABLE ${DORIS_DB}.${table};"; then ... fi
+第 197 行：     INSERT INTO ${DORIS_DB}.${table} (...) SELECT ... FROM S3(...)
+第 210 行：     log_error "${table} 装载失败（表可能已被清空，请重跑本脚本恢复）"
+```
+
+即：**先 `TRUNCATE`，再从湖仓（`S3()` TVF）装载**。
+在 `hive-metastore` 崩溃/不健康的那段时间里执行它，就会
+**先把 Doris 清空、再由一个读不到湖仓的 `INSERT` 失败** ——
+留下一个**"被清空但没有装载"的服务层**。这与"08:45 有数据、之后变空"完全吻合。
+
+**为什么这个顺序危险（值得记进文档的教训）**：
+
+> `TRUNCATE` 与随后的 `INSERT` 虽然"各自原子"，但**两者之间不是原子的**。
+> 一旦第二步失败，系统就停在一个**比失败前更差的状态**：
+> 不是"装载没更新"，而是"数据没了"。
+> 对**服务层**（看板/接口直接读这里）尤其致命 ——
+> 它会让"一次失败的批处理"升级成"对外服务没有数据"。
+
+**正确的顺序**（两种任选其一）：
+
+1. **先验证数据可读，再清空**：把 `TRUNCATE` 推迟到"`INSERT ... SELECT` 已经
+   成功产出、或至少源端 `SELECT COUNT(*)` 确认可读"之后；
+   更稳的做法是 `INSERT OVERWRITE`（Doris 的 UNIQUE KEY 表天然支持按 key 覆盖），
+   根本不需要 `TRUNCATE`；
+2. **失败即恢复**：`TRUNCATE` 失败或 `INSERT` 失败时，不要只报错退出，
+   要么回滚（Doris 不支持跨语句事务时用"临时表 + 原子换名"），
+   要么把"服务层已空"作为一个**显式的健康指标**暴露出去，
+   而不是让人事后比对行数才发现。
+
+**本次处置（只恢复，不改别人的脚本）**：
+
+```text
+1. 确认 hive-metastore healthy（三个 JAR 已恢复）
+2. 确认湖仓行数完好（11459 / 626 / 5998 / 2834）
+3. 重跑装载阶段： bash scripts/batch-mode.sh --stage load
+   → 逐表复对： Doris == 湖仓（11459 / 626 / 5998 / 2834 全部 OK）
+4. 复跑 verify-sprint-3.sh 确认第 6 步转绿
+```
+
+> **这条比"修好这次"更重要**：`load-batch-to-doris.sh` 属于 Sprint 3 的范围，
+> 本 Sprint 不擅自改它（AGENTS §11.1：涉及行为的改动先说明再动）。
+> 但**该脚本在湖仓不可用时会留下一个"被清空但没装载"的服务层**，
+> 这是一条应当由它的负责人修掉的**破坏性操作顺序**问题。

@@ -202,32 +202,39 @@ section_realtime_offline() {
 }
 
 # ============================================================
-# 3. 批量作业耗时（**取自既有日志**，不重跑流水线）
+# 3. 批量作业耗时（**取自既有记录**，不重跑流水线）
 # ============================================================
 section_batch() {
     echo
-    echo "### 3. 批量作业耗时（取自既有 Airflow 任务日志；**未为此重跑流水线**）"
+    echo "### 3. 批量作业耗时（取自既有 Airflow 运行记录；**未为此重跑流水线**）"
     echo
-    echo "内存铁律（AGENTS.md §15.5）：本机 16 GB、实时链路常驻约 13.7 GB，"
-    echo "因此批量耗时**从既有日志取**，不新跑整条流水线。"
+    echo "内存铁律（AGENTS.md §15.5）：本机 16 GB、实时链路常驻约 12~13.7 GB，"
+    echo "因此批量耗时**从既有记录取**，不新跑整条流水线。"
     echo
 
+    # !! 为什么改从**元数据库**取，而不是读任务日志 !!
+    #   第一版读 `/opt/data-platform/airflow/logs/dag_id=...` 下的任务日志首尾时间戳。
+    #   该目录是 `.gitignore` 覆盖的**机器状态**，在本轮 `.env` 事故中随旧树一起丢失，
+    #   全量同步并不会恢复它（仓库里只有 `airflow/dags`）。
+    #   于是这一节会 `[SKIP] 找不到 Airflow 任务日志目录` —— 而"跳过"会被误读成
+    #   "没有批量作业可测"，掩盖掉"其实只是日志没了"。
+    #
+    #   `task_instance` 表里的 `duration` 是**更权威**的来源（Airflow 自己算的），
+    #   而且不受日志清理策略影响。日志可以用来查"为什么慢"，
+    #   但"慢了多少"应当问元数据库。
     local dagdir=/opt/data-platform/airflow/logs/dag_id=offline_lakehouse_pipeline
-    if [ ! -d "${dagdir}" ]; then
-        printf '  [SKIP] 找不到 Airflow 任务日志目录：%s\n' "${dagdir}"
-        return 0
-    fi
-
-    local run
-    for run in $(ls -1 "${dagdir}" | sort | tail -2); do
-        printf '  运行 %s\n' "${run}"
-        local task f start end dur
-        for task in $(ls -1 "${dagdir}/${run}" | sort); do
-            f="$(ls -1t "${dagdir}/${run}/${task}"/attempt=*.log 2>/dev/null | head -1 || true)"
-            [ -z "${f}" ] && continue
-            start="$(sed -n '1s/^\[*//p' "${f}" | cut -c1-19)"
-            end="$(grep -oE '^\[?[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}' "${f}" | tail -1 | tr -d '[')"
-            dur="$("${PY}" -c '
+    if [ -d "${dagdir}" ]; then
+        echo "（检测到任务日志目录，按其首尾时间戳列出；权威耗时仍以元数据库为准）"
+        local run
+        for run in $(ls -1 "${dagdir}" | sort | tail -2); do
+            printf '  运行 %s\n' "${run}"
+            local task f start end dur
+            for task in $(ls -1 "${dagdir}/${run}" | sort); do
+                f="$(ls -1t "${dagdir}/${run}/${task}"/attempt=*.log 2>/dev/null | head -1 || true)"
+                [ -z "${f}" ] && continue
+                start="$(sed -n '1s/^\[*//p' "${f}" | cut -c1-19)"
+                end="$(grep -oE '^\[?[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}' "${f}" | tail -1 | tr -d '[')"
+                dur="$("${PY}" -c '
 import sys
 from datetime import datetime
 def parse(s):
@@ -241,9 +248,68 @@ def parse(s):
 a, b = parse(sys.argv[1]), parse(sys.argv[2])
 print("%.1f" % ((b - a).total_seconds()) if a and b else "?")
 ' "${start}" "${end}")"
-            printf '    %-20s %-20s → %-20s  %ss\n' "${task}" "${start}" "${end}" "${dur}"
+                printf '    %-20s %-20s → %-20s  %ss\n' "${task}" "${start}" "${end}" "${dur}"
+            done
         done
-    done
+        echo
+    else
+        printf '  %b 任务日志目录不存在（%s）—— 改从 Airflow 元数据库读取\n' \
+            "${C_YELLOW}[注意]${C_RESET}" "${dagdir}"
+        printf '        该目录属机器状态，不在仓库里；元数据库中的 duration 才是权威来源。\n'
+    fi
+
+    echo
+    echo "  --- 元数据库 task_instance（权威耗时）---"
+    "${PY}" - <<'PYEOF' 2>&1 || echo "  （元数据库查询失败，请检查 airflow 库是否可达）"
+from __future__ import annotations
+
+import subprocess
+
+
+def query(sql: str) -> list[list[str]]:
+    """在 mysql 容器内执行只读查询；口令由容器环境提供，不落盘、不回显。"""
+    proc = subprocess.run(
+        ["docker", "exec", "-i", "mysql", "sh", "-c",
+         'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -N -B airflow -e "$0"', sql],
+        capture_output=True, text=True, check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip()[:300])
+    return [line.split("\t") for line in proc.stdout.splitlines() if line.strip()]
+
+
+DAG = "offline_lakehouse_pipeline"
+
+cols = {row[0] for row in query("SHOW COLUMNS FROM task_instance;")}
+run_col = "run_id" if "run_id" in cols else "dag_run_id"  # Airflow 3 用 run_id
+
+runs = query(
+    f"SELECT DISTINCT {run_col} FROM task_instance WHERE dag_id='{DAG}' "
+    f"ORDER BY {run_col} DESC LIMIT 2;"
+)
+if not runs:
+    print("  元数据库里没有该 DAG 的运行记录。")
+    raise SystemExit(0)
+
+for (run_id,) in runs:
+    print(f"\n  运行 {run_id}")
+    rows = query(
+        "SELECT task_id, state, "
+        "DATE_FORMAT(start_date,'%Y-%m-%d %H:%i:%s'), "
+        "DATE_FORMAT(end_date,'%Y-%m-%d %H:%i:%s'), ROUND(duration,1) "
+        f"FROM task_instance WHERE dag_id='{DAG}' AND {run_col}='{run_id}' "
+        "ORDER BY start_date;"
+    )
+    total = 0.0
+    for task_id, state, start, end, duration in rows:
+        try:
+            seconds = float(duration)
+        except ValueError:
+            seconds = 0.0
+        total += seconds
+        print(f"    {task_id:<20} {state:<12} {start} → {end}  {seconds:>8.1f}s")
+    print(f"    {'耗时合计':<20} {'':<12} {'':<21} {total:>8.1f}s")
+PYEOF
 }
 
 # ============================================================

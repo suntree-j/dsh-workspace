@@ -275,21 +275,133 @@ UNION ALL SELECT gmv FROM ecommerce.ads_realtime_trade_1m
    - **`.env` 与 `.venv*` 是不可重建的机器状态**。凡会触碰它们的操作，
      必须先备份到仓库之外的路径（例如 `/root/`），且备份步骤写在脚本里而不是靠人记得。
 
-### 8.3 未完成的事项（如实列出）
+### 8.3 未完成 / 有偏差的事项（如实列出）
 
-| 事项 | 状态 | 原因 |
+| 事项 | 状态 | 原因 / 说明 |
 | --- | --- | --- |
-| `python -m pytest` 的**实测通过数** | ⏳ 待补 | 服务器被冻结（配置事故恢复中），全量测试需要能 import 全部依赖的解释器与可用服务 |
-| `docs/PERFORMANCE.md` 的**实测数字** | ⏳ 待补 | 同上：性能测量必须在一台**配置可用**的机器上做，否则数字不可比 |
-| `scripts/verify-sprint-12.sh` 的服务器端执行 | ⏳ 待补 | 同上 |
+| 全量 `python -m pytest` | ✅ **331 passed / 22 skipped / 3 xfailed，exit 0**（80.46 s） | 采用依赖最全的 `.venv-agent` 解释器。中途曾出现 7 条 `test_offline.py` 失败，定性为 `hive-metastore` 容器不可用（见 §8.4），容器恢复后消失 |
+| 单元测试 `-m unit` | ✅ **215 passed / 138 deselected / 3 xfailed** | 纯单元、零外部依赖（AGENTS §8.2） |
+| 本次新增的两个测试文件 | ✅ 全绿 | `tests/test_mcp.py` 28 passed；`tests/test_sql_guard_adversarial.py` **63 条**（60 passed + 3 xfailed） |
+| 四类性能基线 | ✅ **已采齐并写入 `docs/PERFORMANCE.md`** | 采集于 2026-09-27 09:11~09:15，n=7 中位数；现场：load 1.46 / 可用内存 3921 MB / 无 Spark 作业 |
+| 批量作业耗时 | ✅ 有数字（**改自 Airflow 元数据库**） | 原计划读任务日志，但该目录在 `.env` 事故中随机器状态丢失；改读 `task_instance` 表（更权威） |
+| `scripts/verify-sprint-12.sh` | ✅ **通过 32 / 失败 0 / 跳过 0** | 5 步全绿 |
 | 结构债重构（方案 A） | ❌ 未做（有意） | 见第 4.2 节：文件所有权 + 时序风险 + `load` 阶段缺失属行为变更 |
+| `measure-latency.sh batch` 的日志路径分支 | ✅ **已修正** | 现在"日志在就读日志、不存在则读元数据库"，并说明为什么元数据库更权威 |
+| 采集时发现的维表空数据缺陷 | ⚠️ **只记录，未修** | `dim_product` / `dim_user` 在 Doris 里 0 行（MySQL 里 600 / 1200 行），导致维表 JOIN 静默返回 0 行。属离线链路文件（禁止碰），详见 `PERFORMANCE.md` §5 |
+| `requirements-dev.txt` | ✅ 已新建 | 见 §8.5 |
 
-> **本 Sprint 的一部分验收（测试通过数、性能基线、验收脚本执行）依赖服务器可用性，
-> 而服务器状态在实施期间被本 Sprint 的实施动作破坏。**
-> 这部分**不会**用估算值或旧数字顶上 —— 文档里宁可留"待补"，
-> 也不写一个没测过的数（`AGENTS.md` §15.8：「成功信号」不可信）。
+### 8.4 那 7 条失败为什么**不是**本次改动引起的（定性过程）
+
+失败清单（全部在同一个文件）：
+
+```text
+tests/smoke/test_offline.py::test_row_count_matches_mysql[ods_refund-refund]
+tests/smoke/test_offline.py::test_money_columns_are_decimal
+tests/smoke/test_offline.py::test_no_float_columns_in_ods[ods_user-user]
+tests/smoke/test_offline.py::test_no_float_columns_in_ods[ods_product-product]
+tests/smoke/test_offline.py::test_no_float_columns_in_ods[ods_orders-orders]
+tests/smoke/test_offline.py::test_no_float_columns_in_ods[ods_payment-payment]
+tests/smoke/test_offline.py::test_no_float_columns_in_ods[ods_refund-refund]
+```
+
+它们的断言看起来是"ODS 里出现了 float 列"（这会是**真缺陷**），
+所以**不能只看测试名就下结论**。看实际报错：
+
+```text
+AssertionError: Spark SQL 执行失败（exit 1）
+Caused by: java.net.ConnectException: Connection refused (Connection refused)
+    at org.apache.thrift.transport.TSocket.open(TSocket.java:221)
+    at org.apache.hadoop.hive.metastore.HiveMetaStoreClient.open(...)
+```
+
+**根因**：`spark-sql` 连不上 `hive-metastore:9083` ——
+测试**根本没跑到断言那一步**，它在"取元数据"阶段就失败了。
+
+**佐证**（只读探测）：
+
+```text
+hive-metastore | Up 21 seconds (health: starting)   ← 容器刚被重启
+9083 是否有监听 → NO-LISTENER
+spark-master → hive-metastore/9083 → UNREACHABLE
+后续再跑一次 spark-sql -e 'SHOW DATABASES;' → 仍然 Connection refused
+```
+
+即：**容器起来了但 metastore 服务还没监听**（Hive Metastore 启动要几十秒到数分钟），
+而当时的 pytest 正好落在这个窗口里。
+
+**为什么与本 Sprint 无关**：这三个失败文件属 Sprint 2/5 的离线链路，
+本次改动只涉及 `services/mcp/`、`services/agent/app/`（取数路径）、`tests/`（新增文件）
+与 `scripts/`（新增脚本）；**没有一处触碰离线链路、Hive 或 ODS 表**。
+
+**处置**：**不修测试、不改断言**（它们没有错），等 metastore 就绪后重跑即可。
+
+**最终结果**：容器由另一路恢复后，全量测试变成
+**331 passed / 22 skipped / 3 xfailed，exit 0** —— 7 条失败全部消失。
+这反过来印证了定性是对的：它与本次改动无关，是纯粹的基础设施状态。
+
+> **这条记录的价值**：7 个失败的**测试名字**（`test_no_float_columns_in_ods`、
+> `test_money_columns_are_decimal`）看起来都像"ODS 里出现了 float 列"这种**真缺陷**。
+> 如果只看测试名就下结论，会得出一个完全错误的判断，然后去改根本没错的代码。
+> **必须看实际报错**——报错说的是 `ConnectException`，测试连断言都没跑到。
+
+### 8.5 `requirements-dev.txt`（本次新增，来自实测教训）
+
+事故后重建 venv 时，全量测试跑不起来，原因是**测试依赖从来没进过任何 requirements**：
+
+| 包 | 谁需要 | 之前的状态 |
+| --- | --- | --- |
+| `pytest` | 所有测试 | **任何 requirements 里都没有**，一直手工装 |
+| `Faker` | `tests/test_data_generator.py` | 同上 |
+| `python-dotenv` | `data-generator` 读 `.env`（测试收集期 import） | 同上 |
+
+已新建 [`requirements-dev.txt`](../../requirements-dev.txt) 收录三者，并写清用法：
+
+```bash
+.venv/bin/pip install -r requirements-dev.txt          # 数据服务侧
+.venv-agent/bin/pip install -r requirements-dev.txt    # Agent 侧（跑图/检索/MCP 单测必须用它）
+```
+
+> **教训**：缺失的依赖只在**低频操作**（重建 venv、灾难恢复）上暴露，
+> 平时谁也发现不了，等需要它的时候才炸，而症状是"测试大面积失败"——
+> 很容易被误判成代码问题。**任何一次真实用到的安装，都必须能从仓库里的某个文件重放出来。**
+
+### 8.6 四类基线的关键数字（摘要）
+
+完整表格与结论见 [`docs/PERFORMANCE.md`](../PERFORMANCE.md)。
+
+```text
+① 只读接口        点查 8.5 / 聚合 8.3 / 两表关联 11.7 ms（n=7 中位数）
+                 契约接口：/meta/metrics 1.7 ms ～ /overview 53.8 ms
+                 服务端 elapsed_ms 仅 4~6 ms → 约 3~6 ms 是 HTTP+JSON 常数开销
+② 实时 vs 离线    同口径聚合两侧都是 7.1 ms；类目排行 7.6 vs 8.0 ms
+                 → **无可测量差异**（数据量 10³~10⁴ 行，未到读放大的量级）
+③ 批量作业        scheduled run：9 任务耗时合计 1992.3 s，端到端约 81 分钟
+                 大头是三个分层作业 1514 s（76%）；错峰暂停+恢复固定成本 149.8 s
+④ Agent 端到端    POST /ask 中位数 19187.5 ms
+                 检索 2.9 ms + 取数 15.4 ms = 18.3 ms（**占 0.1%**）
+                 → 规划+汇总（两次 LLM）≈ 19169 ms，占 **99.9%**
+                 结论：优化 Agent 延迟只能从 LLM 往返次数/模型入手，优化 SQL 无意义
+```
+
+### 8.7 已知限制（同步更新）
+
+| 限制 | 状态 | 说明 |
+| --- | --- | --- |
+| 服务器端执行 | ✅ 已完成 | `verify-sprint-12.sh` **通过 32 / 失败 0 / 跳过 0** |
+| 全量 pytest | ✅ 通过 | `331 passed / 22 skipped / 3 xfailed`，exit 0（见 §8.4 关于中途 7 条瞬时失败的定性） |
+| `measure-latency.sh` 的 batch 分支 | ✅ 已修正 | 现在读 Airflow 元数据库（日志目录属机器状态、已丢失） |
+| 维表空数据 | ⚠️ 已记录未修 | `dim_product` / `dim_user` 在 Doris 里 0 行；属离线链路，需主控决策 |
+| 结构债 | ❌ 未做（有意） | 见第 4 节 |
+| 并发/压测、Iceberg 对比、公网延迟 | ❌ 未做（有意） | 内存不允许 / 属独立任务，见 `PERFORMANCE.md` §7 |
+
+> **本 Sprint 不写任何未经测量的数字。** 第一次交付时 `PERFORMANCE.md` 的四张表
+> 全部标注"⏳待补"，而不是填上估算值或旧数字 —— 那是 §15.8「成功信号不可信」的直接要求。
+> 最终交付时，`verify-sprint-12.sh` 里有一条**硬判据**专门守这件事：
+> 文档里**不得遗留任何"⏳待补"占位符**。
 
 | 日期 | 版本 | 变更 |
 | --- | --- | --- |
 | — | V1.0 | 建立 Sprint 12 任务书（实现前先行） |
 | 2026-09-27 | V1.1 | 补两个测试文件、性能采集脚本与验收脚本；记录结构债（未做及原因）；记录一次由实施动作引入的配置事故 |
+| 2026-09-27 | V1.2 | 回填四类性能基线实测数字；新增 §8.4（瞬时失败的定性）、§8.5（`requirements-dev.txt`）、§8.6（数字摘要） |
+| 2026-09-27 | **V1.3** | **收口**：`verify-sprint-12.sh` **32/0/0**；全量 pytest **331 passed / 22 skipped / 3 xfailed（exit 0）**；修正"测量条件"判据的用词过窄问题并新增"不得遗留待补占位符"判据；`measure-latency.sh` 的 batch 分支改读 Airflow 元数据库 |

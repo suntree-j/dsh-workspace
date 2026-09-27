@@ -1,0 +1,51 @@
+# ============================================================
+# 开发/测试依赖（requirements-dev.txt）
+# ============================================================
+#
+# ## 这个文件为什么现在才出现（Sprint 12 实测教训）
+#
+#   在 2026-09-27 的 `.env` 事故中，宿主机的三个 venv 被删除后按
+#   `services/*/requirements.txt` 重建。重建后**测试跑不起来**，因为：
+#
+#     - `pytest` 不在**任何** requirements 文件里 —— 一直是"手工装的"；
+#     - `tests/test_data_generator.py` 依赖 `Faker` 与 `python-dotenv`，
+#       这两个包同样不在任何 requirements 里。
+#
+#   即：**依赖清单不完整，而缺失只在"重建 venv"这种低频操作上才暴露** ——
+#   平时谁也发现不了，等需要它的时候（灾难恢复）才炸，而且症状是
+#   "测试大面积失败"，很容易被误判成代码问题。
+#
+#   这正是本项目"可复现"纪律要覆盖的东西：**任何一次真实用到的安装，
+#   都应当能从仓库里的某个文件重放出来。**
+#
+# ## 怎么用
+#
+#   # 数据服务（pytest 的默认宿主）
+#   .venv/bin/pip install -r requirements-dev.txt
+#
+#   # Agent（跑图/检索/MCP 的单元测试**必须**用这个解释器，
+#   #        因为 langgraph 与 mcp 只装在它里面）
+#   .venv-agent/bin/pip install -r requirements-dev.txt
+#
+#   注意：本文件**只装测试用的包**，不含服务运行时依赖 ——
+#   服务依赖仍以 `services/api/requirements.txt` 与
+#   `services/agent/requirements.txt` 为准（部署脚本读的是那两个）。
+#
+# ## 版本口径
+#
+#   与项目既有做法一致：测试工具用**区间**约束（不锁死小版本），
+#   安装后把实际版本记进 `docs/development-environment.md`。
+#   实测装到的是 `pytest 9.1.1`（本次记录于 §3.2 的表格）。
+# ============================================================
+
+# 测试框架（AGENTS.md §8.1 的运行方式依赖它）
+pytest>=8,<10
+
+# tests/test_data_generator.py：生成"仿真数据"的库
+Faker>=30,<40
+
+# data-generator 读取 .env 用（同样是测试收集期就会 import 的依赖）
+python-dotenv>=1,<2
+
+# 注意：**不在这里**放 services/api、services/agent 的运行时依赖。
+#       那两份清单由部署脚本消费，混进来会让"服务需要什么"变得不清晰。

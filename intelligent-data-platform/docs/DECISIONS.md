@@ -120,6 +120,17 @@
 | 已做的处置 | 判据**改严**（从"两侧比率相等"改为"每侧比率 == 按该侧自身计数按公式重算"），矛盾窗口数落盘为 `ads_reconcile_traffic_summary.realtime_rate_anomaly_windows = 1`，逐窗口标记 `ads_reconcile_traffic_1m.realtime_rate_anomaly`。**没有加容差、没有删证据** |
 | 若你要修 | 告诉我，我按 `SPRINT_5.md` §10 的 A/B/C 三方案执行（A：重放实时链路；B：只回补该窗口；C：改 Flink 作业后重放）——**这是架构级操作，必须你点头** |
 
+### ⏳ 11. Doris 里两张维表是 0 行，导致维表 JOIN **静默返回 0 行**
+
+| 项 | 内容 |
+| --- | --- |
+| 现象 | `dim_product` / `dim_user` 在 **Doris 里 0 行**（MySQL 里分别是 600 / 1200 行）。任何 `JOIN dim_product` / `JOIN dim_user` 的查询**不报错**，返回 HTTP 200 + `row_count=0` |
+| 危害 | **静默错误比报错更危险**：Agent 会拿着"0 行"当"真的没有数据"来回答（例如类目维度问题必然查不到），而调用方看到的是成功响应。Sprint 8/9 的系统提示词里写了 `dim_product`，所以这条路径是**会被走到的** |
+| 性质 | 不是"数据丢了"——湖仓与 MySQL 都有；是**装载阶段没有把维表放进 Doris**（`load-batch-to-doris.sh` / `sql/doris/**` 的覆盖范围问题） |
+| 我的推荐 | **二者选一，不要维持现状**：<br>**推荐 A**：把两张维表也装进 Doris（扩 `load-batch-to-doris.sh` 的装载清单 + 补 `sql/doris/` DDL），这样 Agent 的类目/用户维度问题能真正答出来；<br>**B（更省事但功能缩水）**：把 `dim_*` 从 Agent 的数据地图与查询白名单里移除，让模型**不再宣称**能查维表 —— 宁可查不到，也不要"看起来成功却是 0 行" |
+| 现状 | **未修**（跨 `scripts/` + `sql/doris/` + Agent 提示词三处，属 Sprint 6/7 的边界）；证据与说明见 `docs/PERFORMANCE.md` §5 |
+| 若你不同意 | 告诉我保持现状，我会在论文里把"维表未装载 + 静默 0 行"作为**已知限制**写明 |
+
 ---
 
 ## 二、我已经决定并实施的事项（供你复核）

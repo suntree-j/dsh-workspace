@@ -966,6 +966,40 @@ bash scripts/verify-sprint-2.sh`（详见
 > 记住三条判据：**这个文件还有谁在读？这个目录里还有什么我没看见的状态？
 > 我现在做的动作，别人会不会依赖它的旧值？**
 
+**事故的连带损失（机器状态，`*.jar` 被 `.gitignore` 排除）**：
+
+> 除 `.env` / 三个 venv / `airflow/airflow.env` 之外，事故还删掉了
+> **三个由 compose 挂载的第三方 JAR**（同样是机器状态、同样不在仓库里）：
+> `infrastructure/spark/lib/mysql-connector-j-8.4.0.jar`、
+> `infrastructure/hive/client-lib/hadoop-aws-3.1.0.jar`、
+> `infrastructure/hive/client-lib/aws-java-sdk-bundle-1.11.271.jar`。
+> 它们恢复后的**症状极其误导**，值得记两条：
+>
+> 1. **Docker 会在目标文件不存在时把挂载点创建成空目录。**
+>    于是"文件丢失"在磁盘上表现为"一个空目录"，而
+>    `ls -la` 看上去像是**有东西**（有那一行），
+>    `[ -f ]` 与 `[ -s ]` 才会揭穿它。**判断挂载型文件是否存在，用 `-f` + `-s`，不要只看 `ls`。**
+> 2. **报错指向的不是根因。** Metastore 起不来时报的是
+>    `DatastoreDriverNotFoundException: com.mysql.cj.jdbc.Driver was not found in the CLASSPATH`
+>    —— 它说的是"CLASSPATH 配错了"，而真相是"那个 JAR 文件被删了"。
+>    顺着错误信息去查 `hive-site.xml` / `--auxpath` 会一无所获。
+>
+> **恢复方式（已验证）**：
+> ```bash
+> # 1) Spark 侧：仓库自带下载脚本
+> bash infrastructure/spark/lib/download-jars.sh
+> # 2) Hive 侧：从镜像里提取（注意实际路径在 /opt/hadoop/share/hadoop/tools/lib/）
+> docker compose stop hive-metastore          # 必须先停！运行中的容器会把挂载点重建成目录
+> rm -rf infrastructure/hive/client-lib/xxx.jar   # 必须先 rm -rf（不论它是目录还是文件）
+> cid=$(docker create apache/hive:3.1.3)
+> docker cp "$cid:/opt/hadoop/share/hadoop/tools/lib/hadoop-aws-3.1.0.jar" infrastructure/hive/client-lib/
+> docker rm "$cid"
+> ```
+> **两个易踩的细节**：① `docker cp` 的目标若**已存在且是目录**，它会把源**放进该目录里**
+> （变成 `xxx.jar/xxx.jar`），校验时只看到一个空目录；② 提取后必须
+> **与镜像内原件做 md5 比对**（本次三个 JAR 全部 MATCH），
+> 否则"大小看起来对"也可能是不完整的文件。
+
 ### 15.12 Sprint 5 / 8 / 9 / 10 / 12 实测数字汇总
 
 本节只汇总**有书面或日志证据**的数字；取不到证据的一律写"进行中（待补证据）"，
