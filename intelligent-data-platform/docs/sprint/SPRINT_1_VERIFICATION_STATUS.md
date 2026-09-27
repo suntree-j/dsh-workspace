@@ -80,11 +80,11 @@ bash scripts/verify-sprint-1.sh --replay     # 重建链路并重放数据后再
 | 源 | Kafka `order_event` | 6,000 条 | = MySQL `orders` 行数 |
 | 源 | Kafka `payment_event` | 5,406 条 | = MySQL `payment` 行数 |
 | 源 | Kafka `refund_event` | 254 条 | = MySQL `refund` 行数 |
-| 源 | Kafka `behavior_event` | 20,000 条 | 生成器上报条数 |
+| 源 | Kafka `behavior_event` | 20,000 条 | 生成器上报条数；Kafka 累计位点合计亦为 20,000（0:6506 + 1:6592 + 2:6902，earliest 全 0） |
 | DWD | `dwd_trade_order_detail` | 6,000 行 | ✅ 与源 topic 一致 |
 | DWD | `dwd_trade_payment_detail` | 5,406 行 | ✅ |
 | DWD | `dwd_trade_refund_detail` | 254 行 | ✅ |
-| DWD | `dwd_traffic_behavior_detail` | 20,000 行 | ✅ |
+| DWD | `dwd_traffic_behavior_detail` | 20,000 行 | ✅ **行数 = distinct `event_id` 基数**（`COUNT(DISTINCT event_id)` 同为 20000），**≠ 链路处理量** —— 见下方"29 倍重放"注 |
 | DWS | `dws_traffic_overview_1m` | 19,644 行（窗口） | PV 合计 20,000 ✅ |
 | ADS | `ads_realtime_trade_1m` | 11,459 行（窗口） | 见第 3 节 |
 | ADS | `ads_realtime_traffic_1m` | 19,644 行（窗口） | PV 合计 20,000 ✅ |
@@ -102,6 +102,17 @@ Routine Load 全部 RUNNING 且无错误行：
   rl_ads_realtime_traffic_1m       loadedRows≈20000   errorRows=0
   rl_ads_realtime_category_1m      loadedRows≈6000    errorRows=0
 ```
+
+> **⚠️ "行数 = distinct `event_id` 基数"，不是"链路处理量"（Sprint 13 收口审计补充）。**
+> 本节的实时 DWD 行数是 **Doris 表内按主键去重后的行数**。链路实际处理量大得多：
+> Kafka 侧 `dwd_traffic_behavior_detail` topic 的 `latest` 位点合计 = **580000 = 29 × 20000**
+> （Flink 作业被重放 29 轮）；交易域同理约 29 倍（`174000 / 6000`、`156774 / 5406`、`7366 / 254`）。
+> `SHOW ROUTINE LOAD` 的 `loadedRows` 与上述逐项吻合，而表内 `COUNT(*)` 仍是 20000/6000/5406/254 ——
+> 机制是 Doris 侧 `UNIQUE KEY(...)` + `enable_unique_key_merge_on_write = true`，**重复主键被 upsert 覆盖**。
+> 因此：**可以**说"实时 DWD 与源端在**去重后的行数**上一致"；
+> **不可以**说"实时链路只处理了 20000 条事件"，也**不可以**把 `event_id` 当作全局唯一键
+> （实测存在两代编号 `40001–49999` 与 `410000–420000`；`evt_420000` 是生成器**进程内序号**，
+> **不等于** 42 万条消息）。完整只读取证见 `docs/thesis/FINAL_AUDIT_REPORT.md` §1.3。
 
 > 说明：ADS/DWS 的 `loadedRows` 大于窗口数属于正常现象 ——
 > upsert-kafka 对同一窗口会写多条更新消息（窗口未最终触发前的中间态），

@@ -189,10 +189,13 @@ FAVORITE 1046（旁支，少于 VIEW）
 
 ### 8.2 尚未处理的事项
 
+> ⚠️ 本节是 **Sprint 0 时点**的快照；下面两行在后续 Sprint 中已有进展，
+> 逐行已标注。保留原始措辞是为沿革可追溯，**不要当成当前状态引用**。
+
 | 事项 | 说明 |
 | --- | --- |
 | Doris BE 中的遗留 backend | 排查期间用临时容器注册过 `172.28.0.12`，BE 列表中仍可见。不影响功能；如需清理：`ALTER SYSTEM DROP BACKEND "172.28.0.12:9050"` |
-| 服务器无 SWAP | Sprint 0 的 16 GB 足够；后续同时运行 Flink/Spark 时建议增加 |
+| 服务器 SWAP | ✅ **已处理（本行已过期，见右侧说明）**：Sprint 3 内存事故后引入 `scripts/setup-swap.sh` 作兜底（见 `AGENTS.md` §13 命令参考与内存硬规范），服务器实测 `Swap: total 4095 MiB`（已在使用中）。原文"服务器无 SWAP / 后续建议增加"是 Sprint 0 时点的状态 |
 | Doris BE 保活包装 | 属上游问题规避手段，上游修复后应移除 `entrypoint` 覆盖 |
 
 ---

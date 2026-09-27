@@ -1,13 +1,16 @@
 # 基于 Lakehouse 与 AI Agent 的批流一体智能数据分析平台
 
 > 面向电商场景的**批流一体**数据平台，最终包含实时链路（Kafka → Flink → Doris）、
-> 离线链路（Spark → Iceberg on HDFS/S3 → Hive）、以及基于 **LangGraph + LLM + MCP**
+> 离线链路（Spark → Iceberg on MinIO/S3A → Hive）、以及基于 **LangGraph + LLM + MCP**
 > 的智能数据分析 Agent。
 >
-> **当前进度：Sprint 0（基础环境）、Sprint 1（实时数仓）、Sprint 2（离线链路）、
-> Sprint 3（离线分层 + 批流交叉对账）、Sprint 6（数据后台 + 前后端）、
-> Sprint 7（LLM + Tool Calling 数据问答 Agent）
-> 均已在腾讯云服务器上验收通过。**
+> **当前进度：Sprint 0 ~ 12 已在腾讯云服务器上完成并验收通过**（逐项见 §16 Roadmap
+> 与 [`AGENTS.md`](AGENTS.md) §15 状态表）。其中 Sprint 4 Airflow 调度与流量域归档、
+> Sprint 5 Iceberg 湖仓 + 流量域分层、Sprint 8/9/10 图式 Agent / 词法检索 / MCP、
+> Sprint 11 数据质量与监控、Sprint 12 测试与性能基线均已落地（Sprint 5 尚留
+> **1 项未归零**的实时侧缺陷，见 §16 后的说明，不隐藏）。
+> **Sprint 13（毕业论文 + 答辩）的性质是 Prove + Audit + Close**，材料已成稿，
+> 见 [`docs/sprint/SPRINT_13.md`](docs/sprint/SPRINT_13.md) 与 [`docs/thesis/`](docs/thesis/)。
 >
 > 核心原则：**先工程，再智能。**
 > 数据可靠 → 数据准确 → 数据可查询 → 数据可治理 → Agent 使用数据。
@@ -20,7 +23,8 @@
 >
 > 架构：`浏览器 → Nginx(:80) → /data/ 静态看板 + /data/api/ 只读数据服务 + /data/agent/ 问答 Agent + /airflow/ 调度 UI → Doris`
 > 数据服务使用**专用只读账号**（`agent_ro`）+ SQL 安全守卫（仅 SELECT、强制 LIMIT），
-> 指标与 MySQL 事实源精确对账（GMV 51,890,375.77 元，精确到分）。
+> 指标与 MySQL 事实源精确对账（GMV 51,890,375.77 元，精确到分；
+> 注意口径边界：可加指标的逐窗口求和才是全量口径，**去重指标不可跨窗口相加**，见 §17.2）。
 > 看板含**实时链路**与**离线链路**两套视角，并展示两者的逐窗口对账结论
 > （11458 个分钟窗口，不一致 0）。
 > **Agent 进程里没有数据库凭据** —— 它只能经只读数据服务取数，
@@ -37,10 +41,12 @@
 > 定位到中间设备改写明文响应后一度启用过 HTTPS 规避。
 > 但后续实测发现：**关掉客户端 VPN 代理之后，明文 HTTP 30/30 全部正常** ——
 > 改写发生在 VPN 的出口路径上，不在这条 IP 直连路径上。
-> 所以当前走明文是安全的，**前提是演示时不要挂 VPN / 代理**。
+> 所以当前**按实测**走明文，**前提是演示时不要挂 VPN / 代理**
+> （这是那次实测的结论，不是对任意网络环境的保证）。
 > 完整排查过程见 [`docs/sprint/SPRINT_6.md`](docs/sprint/SPRINT_6.md) 第 8 节。
 
-> ✅ **Sprint 0 / 1 / 2 / 3 / 6 / 7 验收结果**（腾讯云 36.151.150.140 / Ubuntu 24.04.2 LTS）
+> ✅ **Sprint 0 ~ 12 验收结果（摘要）**（腾讯云 36.151.150.140 / Ubuntu 24.04.2 LTS；
+> 逐项见 §16 Roadmap 与 [`AGENTS.md`](AGENTS.md) §15 状态表）
 >
 > ```text
 > ✅ Sprint 0  docker compose up -d 5 个核心服务 healthy；health-check 5/5；pytest 51 passed
@@ -53,7 +59,19 @@
 > ✅ Sprint 6  Nginx + systemd 直装上线；/data/ 看板可访问；API GMV == MySQL GMV；
 >              只读账号写操作被 Doris 拒绝；pytest 74 单元 + 21 接口冒烟
 > ✅ Sprint 7  数据问答 Agent；verify-sprint-7.sh 49/49 通过；
->              四类攻击全拒、强制 LIMIT、端到端三问正确；公网 HTTPS 64/64 返回 200
+>              四类攻击全拒、强制 LIMIT、端到端三问正确；公网明文 HTTP 30/30 正常
+>              （关掉 VPN/代理后实测；当前站点不监听 443，见 §7.3 与 §16 后的"站点协议"）
+> ✅ Sprint 4  Airflow 3.3.2 调度 + 流量域归档；verify-sprint-4.sh 40/0/0；
+>              归档 20000 行 == Kafka latest offset 合计
+> ✅ Sprint 5  Iceberg 23 张表 70/70；流量域 DWD 21/21、DWS 20/20、ADS 36/36、对账 10/10
+>              （19643 个窗口不一致 0；**1 项未归零**：实时侧 1 个窗口 click_rate 自相矛盾）
+> ✅ Sprint 8  LangGraph 图式编排；verify-sprint-8.sh 71/0/0
+> ✅ Sprint 9  元数据/口径检索（BM25 + 显式同义词表，未引入向量库）；verify-sprint-9.sh 59/0/0
+> ✅ Sprint 10 MCP；verify-sprint-10.sh 84/0/0；MCP 与直接 HTTP 路径逐字段 IDENTICAL
+> ✅ Sprint 11 数据质量 + 监控；verify-sprint-11.sh 61/0/0
+> ✅ Sprint 12 测试 + 性能基线；verify-sprint-12.sh 32/0/0；全量 pytest 353 passed / 0 failed
+>              （性能口径与边界见 [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md)：单机、
+>               单请求、回环、热缓存，**未做任何并发/压力测试**）
 > ```
 >
 > 逐项证据见
@@ -84,6 +102,9 @@
 - [14. 测试](#14-测试)
 - [15. 常见问题](#15-常见问题)
 - [16. 后续 Roadmap](#16-后续-roadmap)
+- [17. 收口状态与站点协议](#17-收口状态与站点协议)
+- [数据质量校验与监控（Sprint 11）](#数据质量校验与监控sprint-11)
+- [文档索引](#文档索引)
 
 ---
 
@@ -102,7 +123,8 @@
 
 - **Kafka** 作为统一事件入口；
 - **Flink** 做实时计算，写入 **Doris** 提供亚秒级查询；
-- **Spark + Iceberg on HDFS/MinIO** 做离线计算与湖仓存储；
+- **Spark + Iceberg on MinIO/S3A** 做离线计算与湖仓存储
+  （原计划的 **HDFS 因内存不足改用 S3A**，见 Sprint 2 与 `AGENTS.md` §15 状态表）；
 - **Airflow** 编排批处理；
 - 用 **LLM + LangGraph + Tool Calling + MCP** 构建数据分析 Agent，让业务人员用自然语言问数。
 
@@ -129,8 +151,13 @@ Sprint 0 只建立**基础数据环境**，为后续 Sprint 提供稳定基线�
 ✅ 已实测   Bash 脚本语法检查通过
 ✅ 已实测   24 个单元测试通过（生成器业务逻辑）
 ✅ 已实测   .env 未被追踪、脚本为 LF 行尾
-⏳ 待执行   docker compose up -d / health-check.sh / 27 个冒烟测试
+✅ 已实测   docker compose up -d（5 个核心服务 healthy）/ health-check.sh（5/5）/
+            27 个冒烟测试 —— Sprint 0 已验收，逐项证据见
+            docs/sprint/SPRINT_0_VERIFICATION_STATUS.md
 ```
+
+> 上表是 **Sprint 0 时点的验证快照**（24 单元 / 27 冒烟）。当前全量测试
+> 已是 **353 passed / 0 failed / 3 xfailed**（Sprint 12 服务器实测，见 §14）。
 
 > Sprint 0 **不包含** Flink / Spark / Hive / HDFS / Airflow / Iceberg /
 > LangGraph / RAG / MCP / Vue / Spring Boot / FastAPI / Prometheus / Grafana。
@@ -163,7 +190,7 @@ Sprint 0 只建立**基础数据环境**，为后续 Sprint 提供稳定基线�
            │                                   │
 ┌──────────┴───────────────────────────────────┴───────────────────┐
 │                        存储层 (Storage)                           │
-│         HDFS (Hive 元数据/明细)   MinIO (S3 兼容湖仓存储)           │
+│   MinIO/S3A (湖仓存储 + Hive Metastore 元数据)   Doris (服务层指标)     │
 └─────────────────────────────────▲────────────────────────────────┘
                                   │
 ┌─────────────────────────────────┴────────────────────────────────┐
@@ -207,18 +234,24 @@ Sprint 0 只建立**基础数据环境**，为后续 Sprint 提供稳定基线�
 | 消息 | Apache Kafka | `4.2.1` (KRaft) | 事件总线，无需 ZooKeeper |
 | 对象存储 | MinIO | `RELEASE.2025-10-15T17-29-55Z` | S3 兼容湖仓存储 |
 | OLAP | Apache Doris | `4.1.4` (FE + BE) | 统一查询与指标服务 |
-| 语言 | Python | 3.13 | 数据生成器 |
+| 语言（宿主机） | Python | **3.12.3** | 数据服务 / Agent / Airflow（宿主 venv） |
+| 语言（容器） | Python | **3.13.14** | 仅 data-generator 容器（`python:3.13.14-slim-bookworm`） |
 | 库 | Faker / mysql-connector-python / confluent-kafka | 见 `requirements.txt` | 数据生成与写入 |
 | 测试 | pytest | 9.x | 单元 + 冒烟测试 |
 | 脚本 | Bash | — | 启停、状态、健康检查 |
 
 > 版本选型依据与 digest 记录见 [`docs/development-environment.md`](docs/development-environment.md)。
 
-### 3.2 后续 Sprint 引入
+### 3.2 Sprint 1 ~ 11 引入的组件（**均已落地并验收**，不再是"后续计划"）
 
-Apache Flink（S1）、Apache Spark + Hive + HDFS（S2）、Iceberg（S5）、
-Airflow（S4）、FastAPI / Spring Boot / Vue（S6）、LLM + Tool Calling（S7）、
-LangGraph（S8）、RAG（S9）、MCP（S10）、Prometheus + Grafana（S11）。
+Apache Flink（S1）、Apache Spark + Hive（S2，湖仓存储用 **MinIO/S3A**；
+原计划的 HDFS 因内存不足改用 S3A）、Airflow（S4）、Iceberg（S5）、
+FastAPI + Vue（S6）、LLM + Tool Calling（S7）、LangGraph（S8）、
+词法检索 RAG（S9，**未引入向量库**）、MCP（S10）、Prometheus + Grafana（S11）。
+
+> 原本节写作"后续 Sprint 引入"，是 Sprint 0 时期的计划表 ——
+> 现在这些组件已全部落地，保留本节是为了给出**引入顺序**，
+> 当前版本与用途见 [`AGENTS.md`](AGENTS.md) §2.1。
 
 ---
 
@@ -448,10 +481,13 @@ Sprint 6 起，**服务层**（Nginx + FastAPI + 前端静态文件 + 问答 Age
 
 | 服务 | 监听地址 | 对外 | 用途 |
 | --- | --- | --- | --- |
-| Nginx (HTTP) | `0.0.0.0:80` | ✅ 公网 | 仅 `/data/healthz` 健康探针；其余 **302 跳转到 HTTPS** |
-| Nginx (HTTPS) | `0.0.0.0:443` | ✅ 公网 | **唯一业务入口**：`https://<ip>/data/` |
+| Nginx (HTTP) | `0.0.0.0:80` | ✅ 公网 | **唯一业务入口**：`http://<ip>/data/`（当前**未启用 TLS**，见文首说明与 §16 后的"站点协议"） |
+| Nginx (HTTPS) | `0.0.0.0:443` | ❌ **未监听** | 已按实测停用；443 配置与 `scripts/setup-tls.sh` 保留在仓库，等注册域名并备案后按 commit `347dfdd` 恢复 |
 | 数据服务 | `127.0.0.1:8000` | ❌ 仅回环 | FastAPI 只读数据服务（`systemd: data-platform-api`） |
 | 问答 Agent | `127.0.0.1:8100` | ❌ 仅回环 | FastAPI + LLM 工具调用（`systemd: data-platform-agent`） |
+| MCP 服务 | `127.0.0.1:8200` | ❌ 仅回环 | MCP streamable-http 传输（`systemd: data-platform-mcp`，Sprint 10） |
+| Prometheus | `127.0.0.1:9090` | ❌ 仅回环 | 指标采集，公网经 `/metrics/` 反代（Sprint 11） |
+| Grafana | `127.0.0.1:3001` | ❌ 仅回环 | 监控面板，公网经 `/grafana/` 反代（Sprint 11） |
 
 > **为什么 8000 / 8100 只绑回环**：它们只应由 Nginx 反代访问。
 > 直接暴露到公网既绕过了 Nginx 的方法限制（`limit_except`），
@@ -621,7 +657,7 @@ user.register_time ≤ orders.create_time ≤ orders.pay_time ≤ refund.refund_
 refund.refund_amount ≤ orders.amount
 ```
 
-此外，`generate_events` 从 `state/dataset_snapshot.json` 读取**真实写入 MySQL 的数据**，
+此外，`generate_events` 从 `state/dataset_snapshot.json` 读取**由生成器实际写入 MySQL 的那批数据**，
 保证 Kafka 事件与 MySQL 记录一一对应，而不是另生成一套不一致的数据。
 
 ---
@@ -693,12 +729,12 @@ python -m pytest -m unit
 python -m pytest -m smoke -v
 ```
 
-### 14.1 单元测试（24 个，无需容器）
+### 14.1 单元测试（Sprint 0 时点：24 个，无需容器）
 
 覆盖生成器的业务正确性：外键关系、金额逻辑、时间因果、
 行为漏斗单调性、确定性（同种子同结果）。
 
-### 14.2 冒烟测试（27 个，需要容器）
+### 14.2 冒烟测试（Sprint 0 时点：27 个，需要容器）
 
 对应 SPRINT_0.md 第 19 节的 10 项要求，**真实执行**而非检查文件存在：
 
@@ -719,6 +755,22 @@ python -m pytest -m smoke -v
 业务账号 `app` 可访问 `ecommerce`。
 
 > 未启动容器时，冒烟测试会**跳过**（不会误报失败）。
+
+### 14.3 当前全量测试（Sprint 12 服务器实测）
+
+```text
+python -m pytest  →  **353 passed / 0 failed / 0 skipped / 3 xfailed**
+```
+
+- 本节 §14.1 / §14.2 的 24 / 27 是 **Sprint 0 时点的快照**，不是当前数量；
+  Sprint 1~12 各自都加了用例（实时链路、离线分层与对账、API 守卫、Agent、
+  MCP、SQL 守卫对抗用例等）。
+- 早期文档里出现过的 `191 passed / 138 skipped` 是**本机未启动 Docker 时**的历史值
+  （138 skipped 全是"本机 Docker 未运行"的冒烟用例按 §8.3 优雅跳过），
+  与 353 不是同一环境下的同一个数，引用时**必须带环境**。
+- "353 全绿"是**环境恢复后**的结果：同一天同一份测试曾依次出现
+  `306/47 skipped`、`331/22 skipped`、`346/7 failed`，全部是环境中间态所致
+  —— 完整序列与解释见 [`AGENTS.md`](AGENTS.md) §15.12。
 
 ---
 
@@ -867,16 +919,23 @@ Sprint 4  ✅ Airflow 调度 + 流量域归档
              宿主机 + systemd 三单元（apiserver/scheduler/dagprocessor）
              元数据库用 MySQL（不引入 PostgreSQL）；UI 在 /airflow/
              DAG：暂停实时链路 → 逐层批处理 → 对账 → 装载 → 恢复（all_done）
-              归档 20000 行 == Kafka latest offset 合计（零丢失）；验收 40/0/0
+              归档 20000 行 == Kafka latest offset 合计（**本次验收窗口内未观察到丢失**：20000 == 20000，703 个 dt 分区；该判据不覆盖验收之后的增量事件）；验收 40/0/0
    ↓
-Sprint 5  🔄 Iceberg Lakehouse（阶段 4~7 已完成，仅剩一处实时侧缺陷待决策）
-              18 张交易域表 → Iceberg（60/60 校验），随后扩容到 **23 张**
+Sprint 5  ✅ Iceberg Lakehouse + 流量域分层（验收通过；剩一处实时侧缺陷**已登记未修**）
+              18 张交易域表 → Iceberg（**阶段 4 首次迁移的校验为 60/60**），随后扩容到 **23 张**
+             （23 张表那次复跑校验为 **70/70**；两次范围不同，不要混读成一个判据的两次结果）
               流量域离线分层：DWD 20000 行 / DWS 703 天 / ADS 19644 窗口
               **流量域逐窗口对账：19643/19643 个窗口，不一致 0、单边窗口 0**
+             ⚠️ 未归零项（**不隐藏**）：实时侧 1 个窗口的 click_rate 与自身计数矛盾
+                （view_cnt=2 / click_cnt=1 / click_rate 记 0.0000，按口径应为 0.5000；
+                 离线侧同窗口为 0.5000）。它**不阻断对账作业退出码**（实时侧 anomaly
+                 只登记、不参与 is_pass），修复需重部署 Flink 作业并重放，待决策 ——
+                 见 metrics.md 第 3.3 节与 SPRINT_5.md 第 10 节
    ↓
 Sprint 8  ✅ LangGraph Data Agent：**图式编排**
               检索 → 规划 → 取数 → 校验 →（反思 → 重规划）→ 汇总
-              规划与校验是**显式产物**；重试次数可数；三重上界保证一定停得下来
+              规划与校验是**显式产物**；重试次数可数；三重上界（规划/反思/步数）
+              使图在代码上**必然终止**（上界取自 `GET /graph`，可逐项核对）
               仍然**只有一条取数通道**（POST /query + SQL 守卫 + 只读账号）
    ↓
 Sprint 9  ✅ RAG + Metadata：**元数据/口径检索（词法后端）**
@@ -884,13 +943,15 @@ Sprint 9  ✅ RAG + Metadata：**元数据/口径检索（词法后端）**
               回答同时给出 docs（命中的口径来源，带文件与行号）/ tables / executed_sql
               **不引入向量库**（无 embeddings 端点、本机放不下本地模型，见 DECISIONS ⏳7）
    ↓
-Sprint 10 🔄 MCP：**只读数据能力经 MCP 暴露（能力最小化）**
+Sprint 10 ✅ MCP：**只读数据能力经 MCP 暴露（能力最小化）**
               4 个只读工具（metrics_lookup / tables_lookup / sql_query / reconciliation）
               = 只读接口的一对一映射；**MCP 进程里没有数据库凭据**（系统单元不读 .env）
               两种传输：streamable-http（部署，127.0.0.1:8200）/ stdio（本地宿主）
               Agent 侧新增取数路径 `AGENT_DATA_PATH=mcp`：与直连**终点相同**、**不自动回退**
               `mcp==2.2.0`（钉死；PyPI + 服务器双重查证，见 development-environment §3.3）
-              ⏳ 服务器端验收（含"MCP ↔ 直接 HTTP 逐字段一致"实证）待配置事故恢复后补
+              ✅ 服务器端验收 **84/0/0**（含"MCP ↔ 直接 HTTP 逐字段一致"实证：
+                 同一 SQL 两条路径的 rows 逐字段 IDENTICAL、executed_sql 相同，
+                 证据见 AGENTS.md §15.12）
    ↓
 Sprint 11 ✅ Data Quality + Monitoring
               数据质量：25 条校验（行数/主键/非空/枚举/层间一致/金额/新鲜度），
@@ -899,43 +960,85 @@ Sprint 11 ✅ Data Quality + Monitoring
                     Grafana 面板 23 个，数据源指向真实 Doris（只读账号 agent_ro）+ Prometheus
                     公网：http://<ip>/grafana/  与  http://<ip>/metrics/
    ↓
-Sprint 12 🔄 测试 + 性能：**基线**
+Sprint 12 ✅ 测试 + 性能：**基线**（已实测，数字已补）
               测试：补齐 MCP 单元测试（28 条）与 SQL 守卫**对抗**用例（60 条 + 3 条 strict xfail）
               性能：四类基线采集脚本 `scripts/perf/measure-latency.sh`（只读，含内存闸门）
-              `docs/PERFORMANCE.md` 方法完整、**数字待补**（不写没测过的数）
-              结构债（两份阶段 `case`）：**未做**，原因与方案写在 SPRINT_12.md 第 4 节
+              `docs/PERFORMANCE.md` 四类基线**已实测**：只读接口点查 8.5 ms / 聚合 8.3 ms /
+                 关联 11.7 ms（采集时维表为空、关联未真的发生，同口径重跑约 7.4 ms）/ overview 53.8 ms；
+                 实时 vs 离线"无可测量差异"；批量 9 任务 1992.3 s（端到端约 81 分钟，含 48 分钟重试等待）；
+                 `/ask` 中位数 19187.5 ms，其中 LLM 占 99.9%（**n=2**）
+              ⚠️ 口径边界：单机 4 核/16 GB、回环、单请求串行、热缓存，**未做任何并发/压力测试**，
+                 不构成生产高并发证明；`/ask` 不构成数据平台的查询性能
+              结构债（两份阶段 `case`）：**未做**，原因与方案写在 SPRINT_12.md 第 4 节（不阻塞验收）
    ↓
-Sprint 13    毕业论文 + 答辩
+Sprint 13    🔄 毕业论文 + 答辩（性质：**Prove + Audit + Close**，禁止新增组件）
+             材料已成稿：报告正文 / 大纲 / PPT 逐页大纲 / 讲稿 / 问答准备 /
+             外部审查包 / 证据矩阵 / 终审报告 / Word 终稿（见 docs/thesis/）
+             逐项见 [`docs/sprint/SPRINT_13.md`](docs/sprint/SPRINT_13.md)
 ```
 
-**下一步：Sprint 10 与 Sprint 12 的服务器端收口。**
-两者的代码、测试与文档都已落地并在本地跑通
-（`pytest` **191 passed / 138 skipped / 3 xfailed**；138 skipped 全是"本机 Docker 未运行"
-的冒烟用例按 §8.3 优雅跳过）。缺的是**只在服务器上才能做**的两件事：
+---
 
-```text
-Sprint 10  部署 MCP 单元 + 端到端实证：同一 SQL 经 MCP 与经直接 HTTP 的 rows 逐字段一致
-Sprint 12  python -m pytest 的实测通过数 + 四类性能基线的实测数字
-```
+## 17. 收口状态与站点协议
 
-⚠️ 这两件都依赖服务器 `/opt/data-platform/.env` 与宿主 venv ——
-实施期间它们因一次同步事故被删除（复盘见
-[`docs/sprint/SPRINT_12.md`](docs/sprint/SPRINT_12.md) 第 8.2 节），
-恢复由主控独家安排。**在那之前不写任何未经测量的数字。**
+> 本节收编原先散在 §16 code fence 之后、**没有归属章节**的几段（下一步与历史时点值、
+> 批流对账口径、一键验收、离线重跑与 Agent 运维、站点协议）。
+> 它们过去因为**没有章节锚点**而长期停留在旧状态 ——
+> 这正是"过期内容能留在文件里、且改别处时想不起来顺手更新"的机制性原因。
+
+### 17.1 下一步与历史时点值（**不要当当前值引用**）
+
+**下一步：Sprint 13 论文与答辩材料定稿**（材料已在
+[`docs/thesis/`](docs/thesis/)，终稿待答辩前定稿）。
+Sprint 10 与 Sprint 12 的服务器端收口**均已完成**：
+MCP 端到端实证 84/0/0（MCP ↔ 直接 HTTP 逐字段 IDENTICAL），
+全量 pytest 与四类性能基线均已实测（见 §14.3 与 §16 的 Sprint 12 段）。
+
+> **历史时点值，不要当当前值引用**：本节早期版本写过
+> "下一步：Sprint 10 与 Sprint 12 的服务器端收口"与
+> `pytest` **191 passed / 138 skipped / 3 xfailed** —— 那是**本机未启动 Docker** 时
+> 的历史值（138 skipped 全是冒烟用例按 §8.3 优雅跳过），
+> 与服务器实测的 **353 passed / 0 failed / 3 xfailed** 不是同一环境下的同一个数。
+### 17.2 批流对账口径（当前值，可当场核对）
+
 Sprint 8/9 已经把"问数"这条链路做成了**可审查的图**与**可追溯的来源**：
 每次提问都会返回规划、校验结论、重试次数、命中的口径文档与实际执行的 SQL。
 
 ```text
 交易域  11458 个分钟窗口，不一致 0，GMV 两条链路均为 51,890,375.77
+        （口径：两侧数据范围求交并尾部留 3 分钟安全边界后的对账区间内；
+          逐窗口比对 7 个可加指标 + 1 个去重指标 order_user_cnt（两侧同为近似去重），
+          缺失侧补 0 后比较）
 流量域  19643 个分钟窗口，不一致 0，单边窗口 0
-        （唯一未归零项：实时侧 1 个窗口的 click_rate 与自身计数矛盾，
-          缺陷在实时链路，已落进对账表与 metrics.md 第 3.3 节，
-          修复方式待项目负责人决策，见 SPRINT_5.md 第 10 节）
+        （判据：uv / pv / 5 个行为计数，共 7 列；比率列只留证、不参与 is_match）
+        ⚠️ 未归零项（不隐藏）：实时侧 1 个窗口的 click_rate 与自身计数矛盾
+           （view_cnt=2 / click_cnt=1 / click_rate 记 0.0000，按口径应为 0.5000；
+            离线侧同窗口 0.5000）。该 anomaly **不阻断对账作业退出码**
+            （实时侧只登记、不参与 is_pass），修复需重部署 Flink 作业并重放，
+            待项目负责人决策，见 metrics.md 第 3.3 节与 SPRINT_5.md 第 10 节
 ```
 
-一键验收：
+> **结论边界（引用时必须一起写）**：证据只覆盖**对账区间之内**（尾部安全边界**明确未比**）；
+> 交易域**没有**"仅实时/仅离线窗口 = 0"的断言（只有"实时侧 ≥ 离线侧 × 90%"），
+> 因此**不能**写成"两侧窗口集合完全相同"；`is_match` 是**补零后数值相等**，
+> `NULL` 与真实 `0` 不可区分，故该结论的强度部分来自数据分布
+> （交易域 11458 个窗口中 **5504 个两侧 GMV 均为 0（48.03%，平凡一致）**，
+> 承载判别力的是其余 **5954 个有非零业务量的窗口**）；
+> 交易域的派生比率列**完全没有进对账**，流量域的比率列**不进 `is_match`**
+> （实时侧 anomaly 只登记、不参与 `is_pass`，故"不一致 0"与"实时侧仍有 1 个已知缺陷"同时成立）；
+> 去重指标仅支持逐窗口比较、**不支持跨窗口上卷**；全部结论建立在**合成数据集**上。
+>
+> **行数口径（防误读）**：实时 DWD 的"行为 20000 行"是 **distinct `event_id` 的基数**，
+> **不等于链路处理量** —— 该 topic 的 `latest` 合计为 **580000 = 29 × 20000**
+> （Flink 作业被重放 29 轮），交易域三表同理约 29 倍（174000 / 156774 / 7366），
+> Doris 侧 `UNIQUE KEY` + merge-on-write 把重复主键 upsert 覆盖后才等于表内行数。
+> 因此**不能**说"实时链路只处理了 20000 条事件"，也**不能**把 `event_id` 当全局唯一键
+> （`evt_420000` 是生成器**进程内序号**，不等于 42 万条消息）。
+
+### 17.3 一键验收
 
 ```bash
+bash scripts/verify-sprint-0.sh     # Sprint 0 全链路（config+up+ps+health+pytest）
 bash scripts/verify-sprint-1.sh     # 实时数仓（Kafka → Flink → Doris）
 bash scripts/verify-sprint-2.sh     # 离线链路（MySQL → Spark → 湖仓 → Hive）
 bash scripts/verify-sprint-3.sh     # 离线分层 + 批流交叉对账（8 步）
@@ -945,11 +1048,17 @@ bash scripts/verify-sprint-6.sh     # 数据服务与前端（Nginx + API + 对�
 bash scripts/verify-sprint-7.sh     # 数据问答 Agent（守卫 + 工具 + 端到端问答）
 bash scripts/verify-sprint-8.sh     # 图式编排（图结构 + 端到端 + **反思重试** + 安全回归）
 bash scripts/verify-sprint-9.sh     # 元数据/口径检索（语料 + **同义词生效** + 无向量库）
+bash scripts/verify-sprint-10.sh    # MCP（4 个只读工具 + 两路径逐字段一致 + 不回退）
 bash scripts/verify-sprint-11.sh    # 数据质量 + 监控（8 步：容器/版本/内存/Prometheus/Grafana/质量/失败路径/Nginx）
+bash scripts/verify-sprint-12.sh    # 测试 + 性能基线（32/0/0）
 ```
 
+> 共 **13 个** `verify-sprint-*.sh`（与 13 个 Sprint 编号对应：0~12；
+> 每个脚本的步骤数不同，不要用"8 步"去概括全部）。
 > 三个 Agent 验收脚本的关系：7 验"基础问答与安全边界"，8 验"编排与重试"，
 > 9 验"检索与来源"。**8 与 9 都必须以 7 的 49/49 不回退为前提**。
+
+### 17.4 离线链路重跑与 Agent 运维
 
 离线链路重跑（内存受限，走错峰模式）：
 
@@ -975,23 +1084,53 @@ curl -s --get http://127.0.0.1:8100/api/retrieve \
      --data-urlencode 'q=最近一周卖了多少钱' --data-urlencode 'k=3' | python3 -m json.tool
 ```
 
-站点启用 HTTPS（首次安装已自动完成；换机器或证书过期时手动执行）：
+### 17.5 站点协议（**当前：明文 HTTP；TLS 已按实测暂停用**）
+
+**当前形态**：单一 HTTP 站点（`:80`），全部业务直接提供，**不监听 443**。
+443 的配置与 `scripts/setup-tls.sh` 保留在仓库，需要时按 commit `347dfdd` 恢复。
+协议由 `.env` 的 `SITE_SCHEME` 决定（当前 `http`），见 `AGENTS.md` §15.7 硬规范 1。
 
 ```bash
-sudo SERVER_IP=<服务器IP> bash scripts/setup-tls.sh   # 生成自签证书（幂等）
-bash scripts/deploy-web.sh                            # 安装配置并 reload Nginx
+grep -E '^SITE_SCHEME=' .env                 # 当前值 http
+# 启用 TLS 时（等注册域名并备案之后）：
+#   sudo SERVER_IP=<服务器IP> bash scripts/setup-tls.sh   # 生成自签证书（幂等）
+#   bash scripts/deploy-web.sh                            # 安装配置并 reload Nginx
+#   ! 重新启用时注意 http2 写法随 nginx 版本变化：本项目钉 1.24.0，
+#     必须写 `listen 443 ssl http2;`（`http2 on;` 是 1.25.1+ 语法，会让 nginx -t 失败）
 ```
 
-> ✅ **公网偶发 502 已解决（2026-09-26）**：此前客户端经公网访问 `/data/*`
-> 约 15~40% 概率收到 502，而服务器 nginx 访问日志里**没有任何 502**、
+> ⚠️ **公网偶发 502 的结论已被修正（不要照抄"上 HTTPS 就解决了"）**：
+> 当时观察到约 15~40% 的请求返回 502，而服务器 nginx 访问日志里**没有任何 502**、
 > `ListenOverflows` 为 0、服务端自测全部 200。
 > 关键判据是那个 502 **不带 `Server` 响应头、响应体为空** ——
-> nginx 自己发的 502 必然带 `Server: nginx/1.24.0` 和一段 HTML 错误页，
+> nginx **在默认配置下**发出的 502 必定带 `Server: nginx/1.24.0` 和一段 HTML 错误页，
 > 所以它**不是我们的服务发的**，而是明文 HTTP 在传输途中被中间设备改写。
-> 上 HTTPS 后该现象消失：实测公网 **64/64 全部 200**。
-> 排查全过程与判据见 [`docs/sprint/SPRINT_6.md`](docs/sprint/SPRINT_6.md) 第 7 节。
-> 备用手段（网络受限时）：`ssh -N -L 18080:127.0.0.1:443 root@<ip>`，
-> 然后访问 `https://127.0.0.1:18080/data/`。
+> 当时上 HTTPS 后现象确实消失（实测公网 **64/64 全部 200**），
+> 但那是**另一条路径上的旁证**，不足以支持"必须上 TLS"。
+> **真正的定位是补做的那一步**：关掉客户端 VPN 代理后重新测，
+> **明文 HTTP 30/30 全部正常** —— 改写的中间设备在 **VPN 的出口路径上**，
+> 不在这条 IP 直连路径上。
+> 因此当前按实测走明文，**前提是演示时不要挂 VPN / 代理**。
+> 完整判据见 [`docs/sprint/SPRINT_6.md`](docs/sprint/SPRINT_6.md) 第 8 节与
+> [`AGENTS.md`](AGENTS.md) §15.7。
+> **备用手段（仅在临时启用 TLS 时可用，当前 443 未监听，这条命令现在会失败）**：
+> `ssh -N -L 18080:127.0.0.1:443 root@<ip>`，然后访问 `https://127.0.0.1:18080/data/`。
+
+### 17.6 交付物清单（Sprint 13）
+
+```text
+docs/thesis/REPORT_DRAFT.md          论文正文草稿（含摘要 / 正文 / 不足）
+docs/thesis/REPORT_OUTLINE.md        章节大纲
+docs/thesis/DEFENSE_SLIDES.md        答辩 PPT 逐页大纲
+docs/thesis/DEFENSE_SCRIPT.md        答辩讲稿（带时间轴）
+docs/thesis/QA_PREP.md               答辩问答准备
+docs/thesis/DATA_AND_LIMITATIONS.md  数据来源与已知限制
+docs/thesis/外部审查包.md             外部审查包（主张 / 证据 / 边界对照）
+docs/thesis/EVIDENCE_MATRIX.md        证据矩阵（主张 → 证据 → 结论分类）
+docs/thesis/FINAL_AUDIT_REPORT.md     终审报告（P0/P1/P2 + 未决项）
+docs/thesis/毕业论文_*.docx            Word 终稿（由 md_to_thesis_docx.py 导出）
+docs/sprint/SPRINT_13.md             本 Sprint 的任务书与结算
+```
 
 ---
 
@@ -1064,11 +1203,16 @@ docker stats --no-stream prometheus grafana    # 实测内存占用（预算 512
 | [`docs/sprint/SPRINT_1_VERIFICATION_STATUS.md`](docs/sprint/SPRINT_1_VERIFICATION_STATUS.md) | Sprint 1 逐项验证状态与证据 |
 | [`docs/sprint/SPRINT_2.md`](docs/sprint/SPRINT_2.md) | Sprint 2 设计：离线链路（含 11 条踩坑记录） |
 | [`docs/sprint/SPRINT_3.md`](docs/sprint/SPRINT_3.md) | Sprint 3 设计：离线分层建模 + 批流交叉对账（含 10 条踩坑与内存事故记录） |
+| [`docs/sprint/SPRINT_4.md`](docs/sprint/SPRINT_4.md) | Sprint 4 设计：Airflow 调度 + 流量域归档（含 10 条踩坑与 5 个系统性缺陷） |
+| [`docs/sprint/SPRINT_5.md`](docs/sprint/SPRINT_5.md) | Sprint 5 设计：Iceberg Lakehouse + 流量域分层与对账（含 1 项未归零缺陷的待决策方案） |
 | [`docs/sprint/SPRINT_6.md`](docs/sprint/SPRINT_6.md) | Sprint 6 设计：数据后台 + 前后端（服务层） |
 | [`docs/sprint/SPRINT_7.md`](docs/sprint/SPRINT_7.md) | Sprint 7 设计：LLM + Tool Calling 数据问答 Agent（含 7 条踩坑） |
 | [`docs/sprint/SPRINT_8.md`](docs/sprint/SPRINT_8.md) | Sprint 8 设计：LangGraph 图式编排（节点/边/上界与端到端实证） |
 | [`docs/sprint/SPRINT_9.md`](docs/sprint/SPRINT_9.md) | Sprint 9 设计：元数据/口径检索（词法方案依据与同义词表） |
+| [`docs/sprint/SPRINT_10.md`](docs/sprint/SPRINT_10.md) | Sprint 10 设计：MCP（4 个只读工具、两种传输、两路径一致性实证） |
 | [`docs/sprint/SPRINT_11.md`](docs/sprint/SPRINT_11.md) | Sprint 11 设计：数据质量 + 监控（版本选型、内存预算、9 条踩坑） |
+| [`docs/sprint/SPRINT_12.md`](docs/sprint/SPRINT_12.md) | Sprint 12 设计：测试 + 性能基线（含 `.env` 事故复盘与四类基线口径） |
+| [`docs/sprint/SPRINT_13.md`](docs/sprint/SPRINT_13.md) | **Sprint 13 性质与收口范围（Prove + Audit + Close；审计线清单与 P0/P1/P2 分级）** |
 | [`infrastructure/quality/checks.conf`](infrastructure/quality/checks.conf) | **数据质量校验清单（25 条，含阈值依据）** |
 | [`services/agent/knowledge/synonyms.json`](services/agent/knowledge/synonyms.json) | **检索同义词表（每条都带理由，可增删可测试）** |
 | [`services/api/README.md`](services/api/README.md) | 数据服务说明（接口、安全、部署） |

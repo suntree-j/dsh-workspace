@@ -4,7 +4,7 @@
 > 依据：[`docs/PROJECT_DESIGN_V1.md`](../PROJECT_DESIGN_V1.md) 第 7 章（Agent 架构）、
 > 第 8 章 Roadmap 第 9 行；[`docs/DECISIONS.md`](../DECISIONS.md) ⏳7（检索方案）
 > 前置：Sprint 7（Agent 主体）、Sprint 8（LangGraph 图式编排）
-> 状态：见第 9 节「实施记录」
+> 状态：✅ **已完成并验收通过**（`verify-sprint-9.sh` 59/0/0；详见第 9 节「实施记录」）
 
 ---
 
@@ -210,7 +210,7 @@ execute → validate → reflect → …
 | `services/agent/app/corpus.py` | **新增**：语料装载与分块（`Doc` / `Corpus` / markdown 表格逐行成块） |
 | `services/agent/app/lexical.py` | **新增**：BM25 后端 + 同义词扩展 + 中文分词（纯标准库） |
 | `services/agent/app/retrieval.py` | **新增**：`Retriever.retrieve(query)` 门面（语料缓存 + 可换后端） |
-| `services/agent/knowledge/synonyms.json` | **新增**：同义词表（54 条短语，每条带理由） |
+| `services/agent/knowledge/synonyms.json` | **新增**：同义词表（**55 条**短语 —— 以文件内 `synonyms` 字段实测为准，每条带理由） |
 | `services/agent/knowledge/layering.md` | **新增**：分层/两条链路/对账/粒度陷阱的静态语料 |
 | `services/agent/app/main.py` | 新增 `/api/retrieve`（检索可解释）、`/retrieval`（语料画像） |
 | `services/agent/app/graph.py` | 图首节点 `retrieve`（确定性执行），检索结果进 `state.docs` 随回答返回 |
@@ -321,4 +321,4 @@ channels = {
 | 日期 | 版本 | 变更 |
 | --- | --- | --- |
 | — | V1.0 | 建立 Sprint 9 任务书（实现前先行） |
-| 2026-09-27 | V1.1 | 回填实施记录：语料 65 条 / 同义词 54 条；验收 59/0/0；4 条检索质量踩坑 |
+| 2026-09-27 | V1.1 | 回填实施记录：语料 65 条 / 同义词 **55 条**（`synonyms.json` 的 `synonyms` 字段实测；V1.0~V1.1 曾写 54，属早期计数残留）；验收 59/0/0；4 条检索质量踩坑 |

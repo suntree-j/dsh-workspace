@@ -168,7 +168,8 @@
 | Agent | LangGraph | 数据分析 Agent 编排 | Sprint 8 |
 | LLM | 大语言模型 | 意图理解 / SQL 生成 / 结果解释 | Sprint 7 |
 | 工具协议 | MCP | 标准化工具与元数据暴露 | Sprint 10 |
-| 检索 | RAG（向量检索） | 指标定义与文档检索 | Sprint 9 |
+| 检索 | RAG（**词法检索**：BM25 + CJK bigram + 显式同义词表） | 指标定义与文档检索 | Sprint 9 |
+| | | > ⚠️ **实现订正（Sprint 9 实测）**：本行原写"RAG（向量检索）"。实际实现是**词法检索** —— BM25（k1=1.2 / b=0.75）+ 自实现 CJK bigram + 显式同义词表（`services/agent/knowledge/synonyms.json`）；**未使用向量库、未使用 embedding**（`retrieval.py` 的 `vector_store=None`、`backend="lexical-bm25"`，全目录无 embedding 依赖）。原因见 `docs/sprint/SPRINT_9.md` 第 2.1 节与 `docs/DECISIONS.md` ⏳7 | |
 | 质量 | 数据质量规则引擎 | 完整性 / 一致性 / 及时性校验 | Sprint 11 |
 | 监控 | Prometheus + Grafana | 指标采集与告警看板 | Sprint 11 |
 

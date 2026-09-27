@@ -607,7 +607,7 @@ docker compose exec doris-be mysql -h 172.28.0.10 -P 9030 -uroot -e "SHOW BACKEN
 | **10** | **MCP** | ✅ **已完成并验收通过**（`verify-sprint-10.sh` **84/0/0**；4 个只读工具；MCP 与直接 HTTP 路径逐字段 IDENTICAL；`mcp==2.2.0`） |
 | **11** | **Data Quality + Monitoring** | ✅ **已完成并验收通过**（`verify-sprint-11.sh` 61/0/0，详见 15.11） |
 | **12** | **测试 + 性能优化** | ✅ **已完成并验收通过**（`verify-sprint-12.sh` **32/0/0**；全量 pytest **353/0/0/3 xfail**；四类性能基线已实测 —— 注意"353 全绿"是**环境恢复**后的结果，见 15.12） |
-| 13 | 毕业论文 + 答辩 | 未开始 |
+| **13** | **毕业论文 + 答辩** | 🔄 **进行中（性质：Prove + Audit + Close，禁止新增组件）** —— 材料已成稿（报告正文、大纲、PPT、讲稿、问答、外部审查包、Word 导出），见 [`docs/sprint/SPRINT_13.md`](docs/sprint/SPRINT_13.md) 与 [`docs/thesis/`](docs/thesis/) |
 
 ### 15.1 Sprint 0 验收结果
 
@@ -635,6 +635,10 @@ docker compose exec doris-be mysql -h 172.28.0.10 -P 9030 -uroot -e "SHOW BACKEN
 ✅ scripts/health-check.sh       11/11 [OK]（Sprint 0 五项 + Sprint 1 六项）
 ✅ python -m pytest -m smoke     74 passed（27 基础设施 + 47 实时链路）
 ✅ DWD 落库                      订单 6000 / 支付 5406 / 退款 254 / 行为 20000
+                                （**行数 = distinct `event_id` 基数 ≠ 链路处理量**：
+                                  对应 topic latest 合计分别约 29 倍 —— 174000 / 156774 / 7366 / 580000，
+                                  Doris 侧 UNIQUE KEY + merge-on-write 去重后才是上表行数，
+                                  完整取证见 15.12 与 docs/thesis/FINAL_AUDIT_REPORT.md §1.3）
 ✅ ADS 与 MySQL 精确对账         GMV 51,890,375.77 == 51,890,375.77（精确到分）
 ```
 
@@ -816,8 +820,14 @@ bash scripts/verify-sprint-2.sh`（详见
     pause → ods → archive → dwd → dws → ads → reconcile → load → restore
 ✅ 批流对账（交易域）                11458 个分钟窗口，**不一致 0 个**
                                     GMV 实时 51,890,375.77 == 离线 51,890,375.77
-✅ 流量域归档（本 Sprint 新增）       **20000 行 == Kafka latest offset 合计（零丢失）**
+✅ 流量域归档（本 Sprint 新增）       **20000 行 == Kafka latest offset 合计**
     703 个 dt 分区；16/16 作业内自检全过
+    ⚠️ 判据是**归档作业内的自检**（先数 Kafka 消息数、再数写入行数），
+       是**单次验收窗口内**的等式、不覆盖验收之后的增量事件，且该环境 Kafka **副本数为 1** ——
+       因此写"本次验收窗口内未观察到丢失"，不要写无限定的"零丢失"。
+       另：表内行数 = distinct `event_id` 基数 ≠ 链路处理量（该 topic latest 合计
+       580000 = 29 × 20000，Doris 侧 UNIQUE KEY upsert 去重后仍是 20000，见 15.12 与
+       docs/thesis/FINAL_AUDIT_REPORT.md §1.3）
     漏斗 VIEW 10472 > CLICK 5759 > CART 2095 > BUY 628（FAVORITE 1046 旁支）
 ✅ 内存闸门                          暂停实时链路释放 1.65 GB（2282 → 3935 MB）
     曾主动拒绝一次批处理（可用 2258 MB）——**拒绝而非硬跑**
@@ -852,25 +862,49 @@ bash scripts/verify-sprint-2.sh`（详见
 
 ### 15.9 边界要求
 
-> **Sprint 0 / 1 / 2 / 3 / 4 / 6 / 7 已稳定；Sprint 5 进行中（阶段 4 已完成，见 15.10）。**
-> 禁止提前实现 Sprint 8 及以后的内容（LangGraph / RAG / MCP / 监控）。
+> **Sprint 0 ~ 12 已全部稳定并验收通过**（逐项证据见本节状态表与 15.1~15.12）。
+> **Sprint 13（毕业论文 + 答辩）的性质是 Prove + Audit + Close，不是继续 Build**
+> —— 禁止新增任何技术组件；本 Sprint 只做"证据—主张"对齐与收口，
+> 见 [`docs/sprint/SPRINT_13.md`](docs/sprint/SPRINT_13.md)。
 > 指标口径以 [`sql/metadata/metrics.md`](sql/metadata/metrics.md) 为唯一权威，
 > 实时链路、离线链路与 Agent 都必须引用该口径，不得自建第二份定义。
 > **Agent 侧额外约束**：SQL 只能经过 `POST /query`（受守卫与只读账号约束），
 > 禁止让 Agent 直连数据库或持有凭据；回答必须能给出 `tables` 与 `executed_sql`。
 >
-> **流量域：原设计缺口已由 Sprint 4 关闭**（归档 20000 行、零丢失）。
-> 流量域的 DWD / DWS / ADS 分层**尚未建模** —— 这是 Sprint 5 的一部分：
-> Iceberg 会改变湖仓的存储与表管理方式，先按 Parquet 分层再迁表等于做两遍，
-> 因此并入 Sprint 5 一起做（记于 `docs/DECISIONS.md`）。
-> 在此之前，Agent 若被问到流量域的去重类指标，仍应如实说明其口径范围。
+> **〔历史条款，已失效〕** Sprint 0~7 期间本节曾写"禁止提前实现 Sprint 8 及以后的内容
+> （LangGraph / RAG / MCP / 监控）"。该禁令是当时的边界要求，
+> **随 Sprint 8~12 逐个验收通过而失效**——保留此注仅为沿革可追溯，
+> **不得再据此认定后续 Sprint 的工作"违规"**。
+> 仍然有效的那条一般性纪律是第 11.2 节的"属于后续 Sprint 的功能不要提前实现"，
+> 它作用于**当时尚未开工**的 Sprint（对已验收的 Sprint 无约束力）。
+>
+> **流量域：原设计缺口已由 Sprint 4 关闭**（归档 20000 行 == Kafka latest offset 合计，
+> 本次验收窗口内未观察到丢失；该判据是**归档作业内自检**、Kafka **副本数为 1**，
+> 且"行数 = distinct `event_id` 基数"≠ 链路处理量）。流量域的 DWD / DWS / ADS 分层
+> **已由 Sprint 5 建成并验收**（DWD 21/21、DWS 20/20、ADS 36/36、对账 10/10；
+> 19643 个窗口不一致 0、单边窗口 0），设计取舍见 `docs/DECISIONS.md`。
+> 当时"先按 Parquet 分层再迁表等于做两遍、故并入 Sprint 5"的判断，
+> 是那一次排期的理由，不是当前状态。
+> **仍未归零的一项**：实时侧 1 个窗口的 `click_rate` 与自身计数自相矛盾
+> （见 [`sql/metadata/metrics.md`](sql/metadata/metrics.md) 第 3.3 节与 SPRINT_5.md 第 10 节）；
+> 该缺陷**不阻断对账作业退出码**（实时侧 anomaly 只登记、不参与 `is_pass`），
+> Agent 若被问到流量域的去重类与比率类指标，仍应如实说明其口径范围。
 
 ### 15.10 Sprint 5 阶段 4 结果（Parquet → Iceberg）+ Iceberg 硬规范
+
+> **本段的适用范围（两次运行不要混读）**：这是**阶段 4 的首次迁移**，清单 **18 张表**、校验 **60/60**
+> （构成 `18 Provider + 18 行数 + 23 金额列合计 + 1 库表数`，已按代码与 DDL 复算吻合）。
+> 之后清单扩到 **23 张表**并复跑，校验 **70/70**（见 §15 状态行与 §15.12）。
+> **两次的运行范围不同，不是"同一判据的两次结果"，也不能互相替代**；
+> 且 `70/70` 只有**汇总记录、无逐项细目**。
+> **本段结论的范围限定**：只覆盖 ①表身份（`Provider == iceberg`）、②行数（`COUNT(*)` 精确相等）、
+> ③ **6 个金额列的整表合计**；**不覆盖**逐行/全字段/分区布局/schema 等价性等维度，
+> 因此不得据此声称"完全无损/逐行一致/所有字段一致"。
 
 ```text
 ✅ bash scripts/batch-mode.sh --stage iceberg-migrate    [check] 60/60 通过
 ✅ 18 张表迁到 iceberg.lakehouse_iceberg（Iceberg v2，HiveCatalog，snappy parquet）
-   行数与 Parquet 侧**逐表一致**，含金额 SUM 核对；
+   行数与 Parquet 侧**未发现差异**（判据：逐表 `COUNT(*)` 精确相等 + 6 个金额列整表合计核对）；
    每张表建完取 DESCRIBE EXTENDED 的 Provider == iceberg
 ✅ 实时链路：错峰批处理完成后 health-check 11/11 [OK]
 ```
@@ -1008,11 +1042,14 @@ bash scripts/verify-sprint-2.sh`（详见
 ```text
 Sprint 5   Iceberg Lakehouse + 流量域分层                    ✅ 已完成
   证据：docs/sprint/SPRINT_5.md（第 8/9 节 + 版本记录 V1.1/V1.2）
-  - Iceberg 迁移清单 18 → 23 张表；阶段 4 校验 60/60 通过
-    （逐表行数与金额与 Parquet 版精确一致，含金额 SUM 核对）
+  - Iceberg 迁移清单 18 → 23 张表；**阶段 4 首次迁移（18 张表）校验 60/60**；
+    **扩到 23 张表复跑校验 70/70**（仅汇总记录、无逐项细目；两次范围不同，不要混读）
+    （判据：逐表行数精确相等 + **6 个金额列的整表合计**核对 + Provider == iceberg；
+      **不覆盖**逐行/全字段/分区/schema 等价性）
   - 流量域分层建成：DWD 21/21、DWS 20/20、ADS 36/36、对账 10/10
   - 流量域逐窗口对账：**19643/19643 个窗口，不一致 0、单边窗口 0**
-    （7 个判据列 uv/pv/6 个行为计数逐窗口一致）
+    （**7 个判据列 = uv / pv / 5 个行为计数**逐窗口一致；比率列只留证、
+      不参与 is_match，见 metrics.md 第 3.3 节）
   - 一处**实质性发现（未修复）**：实时侧 1 个窗口的 click_rate
     与自身计数自相矛盾（缺陷在实时链路，已落进对账表与 metrics.md 第 3.3 节，
     修复需重部署 Flink 作业并触发 Kafka 全量重放 —— 待项目负责人决策）

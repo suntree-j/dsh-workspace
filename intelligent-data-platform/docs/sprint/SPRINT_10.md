@@ -4,7 +4,7 @@
 > 依据：[`docs/PROJECT_DESIGN_V1.md`](../PROJECT_DESIGN_V1.md) 第 7 章（Agent 架构）、
 > 第 8 章 Roadmap 第 10 行；[`AGENTS.md`](../../AGENTS.md) §10（Agent 安全规范）
 > 前置：Sprint 7（Agent 主体）、Sprint 8（LangGraph 图）、Sprint 9（检索增强）
-> 状态：见第 9 节「实施记录」
+> 状态：✅ **已完成并验收通过**（`verify-sprint-10.sh` 84/0/0；详见第 9 节「实施记录」）
 
 ---
 

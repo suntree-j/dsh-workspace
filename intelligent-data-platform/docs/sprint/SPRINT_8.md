@@ -4,7 +4,7 @@
 > 依据：[`docs/PROJECT_DESIGN_V1.md`](../PROJECT_DESIGN_V1.md) 第 7 章（Agent 架构）、
 > 第 8 章 Roadmap 第 8 行
 > 前置：Sprint 7（LLM + Tool Calling，验收 49/49）、Sprint 6（只读数据服务）
-> 状态：见第 9 节「实施记录」
+> 状态：✅ **已完成并验收通过**（`verify-sprint-8.sh` 71/0/0；详见第 9 节「实施记录」）
 
 ---
 

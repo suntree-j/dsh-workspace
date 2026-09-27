@@ -4,7 +4,8 @@
 > 依据：[`docs/PROJECT_DESIGN_V1.md`](../PROJECT_DESIGN_V1.md) 第 8 章 Roadmap；
 > [`AGENTS.md`](../../AGENTS.md) §8（测试规范）、§15.8（"成功信号不可信"）
 > 前置：Sprint 0~11
-> 状态：见第 8 节「实施记录」
+> 状态：✅ **已完成并验收通过**（`verify-sprint-12.sh` 32/0/0；全量 pytest 353/0/0/3 xfail；
+> 详见第 8 节「实施记录」与 [`docs/PERFORMANCE.md`](../PERFORMANCE.md)）
 
 ---
 
@@ -279,12 +280,12 @@ UNION ALL SELECT gmv FROM ecommerce.ads_realtime_trade_1m
 
 | 事项 | 状态 | 原因 / 说明 |
 | --- | --- | --- |
-| 全量 `python -m pytest` | ✅ **353 passed / 0 failed / 0 skipped / 3 xfailed**（268.43 s） | 采用依赖最全的 `.venv-agent` 解释器。这个数字在修复过程中变动过三次，每次都对应一个**真实的基础设施状态**，见 §8.4 的"数字变动史" |
+| 全量 `python -m pytest` | ✅ **353 passed / 0 failed / 0 skipped / 3 xfailed**（268.43 s）**（修复前值；修复后 381 passed）** | 采用依赖最全的 `.venv-agent` 解释器。这个数字在修复过程中变动过三次，每次都对应一个**真实的基础设施状态**，见 §8.4 的"数字变动史"。⚠️ PHASE F 修复后新增了 MCP/守卫对抗用例，全量 pytest 为 **381 passed / 0 failed** —— 与本节 353 是**不同时点**，引用需带时点（"修复前 32/353；修复后 42/381"） |
 | 单元测试 `-m unit` | ✅ **215 passed / 138 deselected / 3 xfailed** | 纯单元、零外部依赖（AGENTS §8.2） |
 | 本次新增的两个测试文件 | ✅ 全绿 | `tests/test_mcp.py` 28 passed；`tests/test_sql_guard_adversarial.py` **63 条**（60 passed + 3 xfailed） |
-| 四类性能基线 | ✅ **已采齐并写入 `docs/PERFORMANCE.md`** | 采集于 2026-09-27 09:11~09:15，n=7 中位数；现场：load 1.46 / 可用内存 3921 MB / 无 Spark 作业 |
-| 批量作业耗时 | ✅ 有数字（**改自 Airflow 元数据库**） | 原计划读任务日志，但该目录在 `.env` 事故中随机器状态丢失；改读 `task_instance` 表（更权威） |
-| `scripts/verify-sprint-12.sh` | ✅ **通过 32 / 失败 0 / 跳过 0** | 5 步全绿 |
+| 四类性能基线 | ✅ **已采齐并写入 `docs/PERFORMANCE.md`** | 采集于 2026-09-27 09:11~09:15，**只读接口类每项 n=7 中位数；Agent `/ask` 实际 n=2（无预热）** —— 早期本节笼统写"每项 n=7"把 Agent 项也包了进去，已按原始日志订正；现场：load 1.46 / 可用内存 3921 MB / 无 Spark 作业。**全部为单机、单请求、回环、热缓存口径，未做任何并发/压力测试** |
+| 批量作业耗时 | ✅ 有数字（**改自 Airflow 元数据库**） | 原计划读任务日志，但该目录在 `.env` 事故中随机器状态丢失；改读 `task_instance` 表（更权威）。**口径**：9 个任务各自 `duration` 的**算术和**（≠ 墙钟端到端），且**含 1 次重试 attempt**（`ads_layers` 为 `try_number=2`） |
+| `scripts/verify-sprint-12.sh` | ✅ **通过 32 / 失败 0 / 跳过 0**（**修复前值；修复后为 42/0/0**） | 5 步全绿。⚠️ **版本错位标注**：本节写的是**修复前**的 32/353；PHASE F 修复后同脚本为 **42/0/0**，全量 pytest 为 **381 passed**。引用时必须带时点（`docs/thesis/外部审查包.md` 用的是修复后值） |
 | 结构债重构（方案 A） | ❌ 未做（有意） | 见第 4.2 节：文件所有权 + 时序风险 + `load` 阶段缺失属行为变更 |
 | `measure-latency.sh batch` 的日志路径分支 | ✅ **已修正** | 现在"日志在就读日志、不存在则读元数据库"，并说明为什么元数据库更权威 |
 | 采集时发现的维表空数据缺陷 | ⚠️ **只记录，未修** | `dim_product` / `dim_user` 在 Doris 里仍为 0 行（MySQL 里 600 / 1200 行），导致维表 JOIN 静默返回 0 行。属离线链路文件（禁止碰），详见 `PERFORMANCE.md` §5 与 **DECISIONS ⏳11** |
@@ -407,8 +408,8 @@ spark-master → hive-metastore/9083 → UNREACHABLE
 
 | 限制 | 状态 | 说明 |
 | --- | --- | --- |
-| 服务器端执行 | ✅ 已完成 | `verify-sprint-12.sh` **通过 32 / 失败 0 / 跳过 0** |
-| 全量 pytest | ✅ 通过 | **353 passed / 0 failed / 0 skipped / 3 xfailed**（终局；漂移史见 §8.4.1） |
+| 服务器端执行 | ✅ 已完成 | `verify-sprint-12.sh` **通过 32 / 失败 0 / 跳过 0**（**修复前值；修复后为 42/0/0**） |
+| 全量 pytest | ✅ 通过 | **353 passed / 0 failed / 0 skipped / 3 xfailed**（终局；漂移史见 §8.4.1）。⚠️ **版本错位标注**：这是**修复前**的值；PHASE F 修复后全量 pytest 为 **381 passed / 0 failed**，`verify-sprint-12.sh` 为 **42/0/0** —— 即"**修复前 32/353；修复后 42/381**"，两处引用都必须带时点 |
 | `measure-latency.sh` 的 batch 分支 | ✅ 已修正 | 现在读 Airflow 元数据库（日志目录属机器状态、已丢失） |
 | 维表空数据 | ⚠️ 已记录未修 | `dim_product` / `dim_user` 在 Doris 里 0 行；已登记为 **DECISIONS ⏳11**，需项目负责人决策 |
 | 结构债 | ❌ 未做（有意） | 见第 4 节 |

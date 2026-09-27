@@ -50,7 +50,7 @@ https://github.com/suntree-j/dsh-workspace
 
 ---
 
-## 当前进度：Sprint 0 ~ 12 **全部完成并在服务器上验收通过**
+## 当前进度：Sprint 0 ~ 12 **全部完成并在服务器上验收通过**；Sprint 13 材料已成稿
 
 | Sprint | 主题 | 验收结果（服务器实测） |
 | --- | --- | --- |
@@ -60,14 +60,14 @@ https://github.com/suntree-j/dsh-workspace
 | 2 | Spark + Hive + 湖仓（S3A） | `verify-sprint-2.sh` 8/8；逐表行数与 MySQL 一致 |
 | 3 | ODS/DWD/DWS/ADS + 批流对账 | **32/0/0**；11458 个分钟窗口**不一致 0** |
 | 7 | LLM + Tool Calling（问答 Agent） | **49/0/0**；四类攻击全部被拒且原因正确 |
-| 4 | Airflow 调度 + 流量域归档 | **40/0/0**；归档 20000 行 == Kafka offset（零丢失） |
+| 4 | Airflow 调度 + 流量域归档 | **40/0/0**；归档 20000 行 == Kafka offset（**本次验收未观察到丢失**：20000 == 20000，703 个 dt 分区） |
 | 5 | Iceberg Lakehouse + 流量域分层 | 迁移 **23 张表 70/70**；流量域 DWD 21/21、DWS 20/20、ADS 36/36、对账 **10/10**（19643 窗口不一致 0） |
 | 8 | LangGraph Data Agent | **71/0/0**；反思重试真实触发（`retries=2`） |
 | 9 | RAG + Metadata（词法检索） | **59/0/0**；语料 65 篇、零新增依赖、未引入向量库 |
 | 10 | MCP | **84/0/0**；MCP 路径与直接 HTTP 路径结果**逐字段 IDENTICAL** |
 | 11 | 数据质量 + 监控 | **61/0/0**；25 条校验、失败路径实测 exit 1；Prometheus/Grafana 合计 512 MiB |
 | 12 | 测试 + 性能优化 | **32/0/0**；全量 pytest **353 passed / 0 failed**；四类性能基线已实测 |
-| 13 | 毕业论文 + 答辩 | 🔄 材料整理中（见 `docs/thesis/`） |
+| 13 | 毕业论文 + 答辩 | ✅ **材料已成稿**（`docs/thesis/` 下报告正文 / 大纲 / PPT 逐页大纲 / 讲稿 / 问答准备 / 外部审查包 / 证据矩阵 / 终审报告，Word 终稿已由脚本导出）；性质是 **Prove + Audit + Close**，见 `docs/sprint/SPRINT_13.md`。终稿待答辩前定稿 |
 
 ### 几个可以当场核对的结果
 

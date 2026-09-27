@@ -5,7 +5,8 @@
 > 第 8 章 Roadmap 第 3 行
 > 前置：Sprint 0（基础环境）、Sprint 1（实时链路）、Sprint 2（Spark + Hive 湖仓）、
 > Sprint 6（只读数据服务，顺序前移）
-> 状态：🚧 进行中
+> 状态：✅ **已完成并验收通过**（`verify-sprint-3.sh` 8/8 PASS；11458 个分钟窗口不一致 0；
+> 见本文第 9 节变更记录 V1.1 与验收结果）
 
 ---
 
@@ -49,7 +50,7 @@ Agent（Sprint 7+）引用哪一个都是错的
 | --- | --- | --- |
 | MySQL `ecommerce` 5 表 | `orders` 6000 / `payment` 5406 / `refund` 254 / `user` 1200 / `product` 600 | ODS 抽取基准 |
 | ODS 层（Sprint 2 落地） | 行数与 MySQL 完全一致（6000 / 5406 / 254 / 1200 / 600） | 可直接作为 DWD 输入 |
-| 实时 DWD（Doris `ecommerce`） | `dwd_trade_order_detail` 6000、`dwd_trade_payment_detail` 5406、`dwd_trade_refund_detail` 254、`dwd_traffic_behavior_detail` 40000 | 与 MySQL 1:1，具备对账基础 |
+| 实时 DWD（Doris `ecommerce`） | `dwd_trade_order_detail` 6000、`dwd_trade_payment_detail` 5406、`dwd_trade_refund_detail` 254、`dwd_traffic_behavior_detail` **40000（当时观测值，见下方审计注）** | ~~与 MySQL 1:1，具备对账基础~~ **该行已订正**：流量域在 MySQL **没有源表**（这正是本 Sprint 记录、Sprint 4 才归档补齐的缺口），"与 MySQL 1:1"不成立；行数本身亦已定案为 20000 |
 | 实时 ADS（Doris `ecommerce`） | `ads_realtime_trade_1m` 11459 行、`gmv` 合计 **51,890,375.77**、`order_cnt` 6000、`refund_cnt` 254 | 与 MySQL 精确一致 |
 | 实时 ADS 时间跨度 | `2024-10-25 08:16:00` ~ `2026-09-26 11:37:00`（分钟级稀疏） | 对账窗口必须取"两端都已封闭"的区间 |
 | 订单时间范围 | `2024-10-25` ~ `2026-09-26`（约 700 天有数据） | 离线按天分区，跨度大但每天量小 |
@@ -57,6 +58,29 @@ Agent（Sprint 7+）引用哪一个都是错的
 | Kafka `__consumer_offsets` | 存在，说明四个实时作业仍在消费 | 实时链路仍在追赶，对账需设水位截断 |
 
 ### 2.1 关键结论
+
+> **[审计注 · Sprint 13 收口]** 上表第 3 行的 `dwd_traffic_behavior_detail 40000` 是**当时的观测值**，
+> 本轮收口审计（`.tmp/audit-traffic-20000-40000.md`）按只读证据**定案为 20000**，40000 判为**观测误差**：
+>
+> ```text
+> ① Kafka 源 topic behavior_event 累计位点 = 6506 + 6592 + 6902 = 20000，earliest 全 0（从未被清理）
+> ② 归档作业当天日志：[archive] Kafka 实际消息数 = 20000 / 解析完成，有效行数 = 20000
+> ③ Iceberg 三个快照的 total-records 全部是 20000（每次 replace 703 分区、added = deleted = 20000）
+> ④ Doris 实时 DWD：COUNT(*) = 20000，COUNT(DISTINCT event_id) = 20000
+> ⑤ event_id 为稀疏两段式：40001..49999（9999）+ 410000..420000（10001）= 20000
+> ⑥ 40000 的唯一出处就是本表第 3 行，**无观测时间**，且与同行"与 MySQL 1:1"自相矛盾
+>    （流量域在 MySQL 没有源表）→ 判为当时的观测误差
+> ```
+>
+> * **当前事实**：20000（＝ distinct `event_id` 的基数，**不等于链路处理量** ——
+>   Kafka 侧 `dwd_traffic_behavior_detail` topic 的 `latest` 合计为 **580000 = 29 × 20000**，
+>   即 Flink 作业被重放 29 轮；Doris 侧 `UNIQUE KEY` + merge-on-write 把重复键 upsert 覆盖，
+>   所以表内仍是 20000）。
+> * **历史侧状态保留为 UNRESOLVED**：2026-09-26 13:18 topic 重建**之前**的真实状态已不可考
+>   （需 Kafka topic 重建历史或 Doris 审计日志，当前不可得）。这是"来源不可考"，
+>   **不是**"两种口径都对"。
+> * **不得**据此写"实时链路累计处理 42 万条行为事件"：`evt_420000` 是**生成器进程内序号**，
+>   **不等于** 42 万条消息。
 
 1. **实时链路与 MySQL 事实源目前完全一致**（订单 6000 / 支付 5406 / 退款 254、
    GMV 51,890,375.77），说明 Sprint 1 的链路没有漂移，可以作为对账基准。
