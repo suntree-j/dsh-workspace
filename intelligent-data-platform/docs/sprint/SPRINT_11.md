@@ -609,3 +609,48 @@ docker compose config --quiet            → required variable MINIO_ROOT_PASSWO
 > 本 Sprint 不擅自改它（AGENTS §11.1：涉及行为的改动先说明再动）。
 > 但**该脚本在湖仓不可用时会留下一个"被清空但没装载"的服务层**，
 > 这是一条应当由它的负责人修掉的**破坏性操作顺序**问题。
+
+### 10.4 ⚠️ 我误停了 `spark-master` / `spark-worker`：`--filter ancestor=<image>` 是按**镜像**过滤，不是按**角色**
+
+内存紧张时我决定停掉自己那条回归队列，并顺手清理"我自己起的孤儿 spark-sql 容器"。
+我用的判据是：
+
+```bash
+docker ps -q --filter ancestor=data-platform/spark:3.5.7     # ← 错在这里
+```
+
+**这个过滤器匹配的是"用了这个镜像的所有容器"**，而本项目里**同一个镜像有三种角色**：
+
+```text
+spark-master          常驻服务（基础设施）
+spark-worker          常驻服务（基础设施）
+一次性 spark-sql 容器   `scripts/spark-sql.sh` 每次查询起一个，用完即走
+```
+
+于是 `spark-master` 与 `spark-worker` **被一起停掉了**（约 2 分钟），
+期间我自己的 spark-sql 查询全部失败。
+
+**正确判据（只看一次性容器）**：
+
+```bash
+# 按 Config.Cmd 判角色：一次性 spark-sql 容器的 Cmd 里有 spark-sql
+for cid in $(docker ps -q); do
+    cmd=$(docker inspect -f '{{join .Config.Cmd " "}}' "$cid")
+    case "$cmd" in *spark-sql*) docker stop "$cid" ;; esac
+done
+# 或者按容器名形态判：compose run 生成的名字形如 <project>-<service>-run-<hash>
+```
+
+**处置与实证**：`docker compose up -d spark-master spark-worker` → 两者 `healthy`；
+`health-check.sh` 11/11；`SELECT COUNT(*) FROM iceberg.lakehouse_iceberg.ads_batch_trade_1m` = 11459。
+
+**三条可推广的规则**：
+
+> 1. **镜像 ≠ 角色。** 按镜像过滤等于按"项目"过滤，不是按"用途"过滤。
+>    本项目里 spark / flink / hive 的常驻服务与一次性客户端都可能共用同一镜像。
+> 2. **清理孤儿容器前，先把 `Cmd` 列出来再动手**：
+>    `docker ps --format '{{.Names}}\t{{.Image}}\t{{.Command}}'` ——
+>    一行的成本，换掉一次误停基础设施工。
+> 3. **"清理"动作要有反向操作预案。** 我这次能 2 分钟内恢复，是因为
+>    `spark-master`/`spark-worker` 由 compose 定义（`up -d` 即可重建）；
+>    如果误停的是**没有 compose 定义**的东西（手工起的容器、宿主进程），就没有这个退路。

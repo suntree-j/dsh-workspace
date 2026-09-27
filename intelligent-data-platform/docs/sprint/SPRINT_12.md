@@ -279,7 +279,7 @@ UNION ALL SELECT gmv FROM ecommerce.ads_realtime_trade_1m
 
 | 事项 | 状态 | 原因 / 说明 |
 | --- | --- | --- |
-| 全量 `python -m pytest` | ✅ **331 passed / 22 skipped / 3 xfailed，exit 0**（80.46 s） | 采用依赖最全的 `.venv-agent` 解释器。中途曾出现 7 条 `test_offline.py` 失败，定性为 `hive-metastore` 容器不可用（见 §8.4），容器恢复后消失 |
+| 全量 `python -m pytest` | ✅ **353 passed / 0 failed / 0 skipped / 3 xfailed**（268.43 s） | 采用依赖最全的 `.venv-agent` 解释器。这个数字在修复过程中变动过三次，每次都对应一个**真实的基础设施状态**，见 §8.4 的"数字变动史" |
 | 单元测试 `-m unit` | ✅ **215 passed / 138 deselected / 3 xfailed** | 纯单元、零外部依赖（AGENTS §8.2） |
 | 本次新增的两个测试文件 | ✅ 全绿 | `tests/test_mcp.py` 28 passed；`tests/test_sql_guard_adversarial.py` **63 条**（60 passed + 3 xfailed） |
 | 四类性能基线 | ✅ **已采齐并写入 `docs/PERFORMANCE.md`** | 采集于 2026-09-27 09:11~09:15，n=7 中位数；现场：load 1.46 / 可用内存 3921 MB / 无 Spark 作业 |
@@ -287,7 +287,7 @@ UNION ALL SELECT gmv FROM ecommerce.ads_realtime_trade_1m
 | `scripts/verify-sprint-12.sh` | ✅ **通过 32 / 失败 0 / 跳过 0** | 5 步全绿 |
 | 结构债重构（方案 A） | ❌ 未做（有意） | 见第 4.2 节：文件所有权 + 时序风险 + `load` 阶段缺失属行为变更 |
 | `measure-latency.sh batch` 的日志路径分支 | ✅ **已修正** | 现在"日志在就读日志、不存在则读元数据库"，并说明为什么元数据库更权威 |
-| 采集时发现的维表空数据缺陷 | ⚠️ **只记录，未修** | `dim_product` / `dim_user` 在 Doris 里 0 行（MySQL 里 600 / 1200 行），导致维表 JOIN 静默返回 0 行。属离线链路文件（禁止碰），详见 `PERFORMANCE.md` §5 |
+| 采集时发现的维表空数据缺陷 | ⚠️ **只记录，未修** | `dim_product` / `dim_user` 在 Doris 里仍为 0 行（MySQL 里 600 / 1200 行），导致维表 JOIN 静默返回 0 行。属离线链路文件（禁止碰），详见 `PERFORMANCE.md` §5 与 **DECISIONS ⏳11** |
 | `requirements-dev.txt` | ✅ 已新建 | 见 §8.5 |
 
 ### 8.4 那 7 条失败为什么**不是**本次改动引起的（定性过程）
@@ -344,6 +344,26 @@ spark-master → hive-metastore/9083 → UNREACHABLE
 > 如果只看测试名就下结论，会得出一个完全错误的判断，然后去改根本没错的代码。
 > **必须看实际报错**——报错说的是 `ConnectException`，测试连断言都没跑到。
 
+#### 8.4.1 全量 pytest 数字的"变动史"（每一次都对应一个真实的基础设施状态）
+
+这个数字在收口过程中变了三次。**三次变化都不是代码变了**，而是**被依赖的外部状态变了** ——
+记在这里，是因为"通过数会随环境漂移"本身就是一条需要被理解的结论。
+
+| 时点 | 数字 | 当时的基础设施状态 | 说明 |
+| --- | --- | --- | --- |
+| 09:04 | **346 passed / 7 failed / 3 xfailed** | `hive-metastore` 容器刚重启、9083 未监听 | 7 条失败全是 `ConnectException`（§8.4） |
+| 09:26 | **331 passed / 22 skipped / 3 xfailed** | metastore 已恢复；Doris `lakehouse_ads` 的 ADS 表**被清空**（装载中间态） | 22 条冒烟用例按 §8.3 **优雅跳过**（不误报失败，符合规范） |
+| 10:0x | **306 passed / 47 skipped / 3 xfailed** | 装载尚未完成，跳过数进一步上升 | 同上 |
+| **最终** | **353 passed / 0 failed / 0 skipped / 3 xfailed** | ADS 装载完成（`ads_batch_trade_1m` 11459 行、`ads_batch_trade_1d` 626 行） | **全部用例都真正跑了**，没有任何跳过 |
+
+> **读法**：`skipped` 从 0 → 22 → 47 → 0，`failed` 从 7 → 0。
+> 数字变好**不是因为我们改了什么**，而是因为外部依赖恢复了。
+> 这正是本项目反复强调的那条：**验收结论必须连同"当时的环境状态"一起给** ——
+> 单独一个"353 passed"是没有信息量的，加一句"当时 ADS 已装载完成"才是可核对的事实。
+>
+> 也正因为如此，本 Sprint **没有**为了让某个时刻的数字好看而去动断言：
+> 三次变动里，一次是容器状态、两次是数据装载状态，**没有一次是代码问题**。
+
 ### 8.5 `requirements-dev.txt`（本次新增，来自实测教训）
 
 事故后重建 venv 时，全量测试跑不起来，原因是**测试依赖从来没进过任何 requirements**：
@@ -388,9 +408,9 @@ spark-master → hive-metastore/9083 → UNREACHABLE
 | 限制 | 状态 | 说明 |
 | --- | --- | --- |
 | 服务器端执行 | ✅ 已完成 | `verify-sprint-12.sh` **通过 32 / 失败 0 / 跳过 0** |
-| 全量 pytest | ✅ 通过 | `331 passed / 22 skipped / 3 xfailed`，exit 0（见 §8.4 关于中途 7 条瞬时失败的定性） |
+| 全量 pytest | ✅ 通过 | **353 passed / 0 failed / 0 skipped / 3 xfailed**（终局；漂移史见 §8.4.1） |
 | `measure-latency.sh` 的 batch 分支 | ✅ 已修正 | 现在读 Airflow 元数据库（日志目录属机器状态、已丢失） |
-| 维表空数据 | ⚠️ 已记录未修 | `dim_product` / `dim_user` 在 Doris 里 0 行；属离线链路，需主控决策 |
+| 维表空数据 | ⚠️ 已记录未修 | `dim_product` / `dim_user` 在 Doris 里 0 行；已登记为 **DECISIONS ⏳11**，需项目负责人决策 |
 | 结构债 | ❌ 未做（有意） | 见第 4 节 |
 | 并发/压测、Iceberg 对比、公网延迟 | ❌ 未做（有意） | 内存不允许 / 属独立任务，见 `PERFORMANCE.md` §7 |
 
@@ -404,4 +424,5 @@ spark-master → hive-metastore/9083 → UNREACHABLE
 | — | V1.0 | 建立 Sprint 12 任务书（实现前先行） |
 | 2026-09-27 | V1.1 | 补两个测试文件、性能采集脚本与验收脚本；记录结构债（未做及原因）；记录一次由实施动作引入的配置事故 |
 | 2026-09-27 | V1.2 | 回填四类性能基线实测数字；新增 §8.4（瞬时失败的定性）、§8.5（`requirements-dev.txt`）、§8.6（数字摘要） |
-| 2026-09-27 | **V1.3** | **收口**：`verify-sprint-12.sh` **32/0/0**；全量 pytest **331 passed / 22 skipped / 3 xfailed（exit 0）**；修正"测量条件"判据的用词过窄问题并新增"不得遗留待补占位符"判据；`measure-latency.sh` 的 batch 分支改读 Airflow 元数据库 |
+| 2026-09-27 | **V1.3** | **收口**：`verify-sprint-12.sh` **32/0/0**；修正"测量条件"判据的用词过窄问题并新增"不得遗留待补占位符"判据；`measure-latency.sh` 的 batch 分支改读 Airflow 元数据库 |
+| 2026-09-27 | **V1.4** | **终局数字**：全量 pytest **353 passed / 0 failed / 0 skipped / 3 xfailed**；新增 §8.4.1「数字变动史」（346/7fail → 331/22skip → 306/47skip → 353/0），说明每次变动都源于外部基础设施状态而非代码；维表缺陷登记为 DECISIONS ⏳11 |
