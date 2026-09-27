@@ -214,18 +214,6 @@ def test_information_schema_alone_is_allowed_by_design() -> None:
     assert "information_schema" in result
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "已知缺口（Sprint 12 记录，未修）：_FORBIDDEN_PATTERNS 的 METADATA_PROBE 规则写的是"
-        "`union all select ... from information_schema`，只覆盖这一种**顺序**与**写法**。"
-        "把 `information_schema` 写在 UNION **前面**（`SELECT ... FROM information_schema.tables "
-        "UNION ALL SELECT ... FROM 业务表`）时，两张表都在授权集合里，于是整条语句被放行。"
-        "影响有限：它读到的仍是已授权表，没有越权数据；但它是一次'未授权元数据探测'的入口，"
-        "与 AGENTS.md §10.2 '元数据探测（未授权时）' 的表述不一致。"
-        "修复属于数据服务侧（services/api/app/sqlguard.py）的决定，由主控安排。"
-    ),
-)
 @pytest.mark.parametrize(
     "sql",
     [
@@ -235,18 +223,21 @@ def test_information_schema_alone_is_allowed_by_design() -> None:
     ],
 )
 def test_reversed_union_probe_is_rejected(sql: str) -> None:
-    """**已知缺口**：把 `information_schema` 写在 UNION 前面的探测当前会被放行。
+    """`information_schema` 写在 UNION **前面**的探测也必须被拒（**缺口已修**）。
 
-    用 `xfail(strict=True)` 记录：一旦有人修好它，这些用例会变成 XPASS 并**报错**，
-    逼人回来把 xfail 摘掉、并更新本文档与 SPRINT_12.md 里的结论。
+    !! 这条用例的历史必须保留，它比用例本身更有价值 !!
+        它最初是 `xfail(strict=True)` 记录的**已知缺口**：旧的 METADATA_PROBE 正则写成
+        `union all select ... from information_schema`，只覆盖"元数据写在 UNION **后面**那一支"
+        的顺序；反序拼接时两张表都在授权集合里，于是整条语句被放行。
+        `strict=True` 的用意就是**修好那天会 XPASS 报错**，逼人回来更新结论 ——
+        本次修复后它如期 XPASS，因此这里摘掉 xfail、改成正式的拒绝断言。
 
-    !! 为什么这一条不能写成"能拦住的写法" !!
-        第一版我写的是 `... FROM information_schema.tables UNION ALL SELECT gmv FROM 业务表`
-        并断言它被拒 —— 那是**错的**：守卫的 METADATA_PROBE 正则要求
-        `union all select` **在** `from information_schema` **之前**，
-        反序拼接根本不匹配，于是两张授权表都被放行。
-        实测（本地 `pytest` 3 failed）暴露了这一点。
-        这正是"对抗用例必须真的跑一遍"的意义：**凭印象写断言 = 用测试记录一个错误结论。**
+    修法：判据从"按顺序匹配"改成"**同时**出现 UNION 与 information_schema 就拒绝"
+    （用 lookahead，与先后顺序无关），见 `services/api/app/sqlguard.py`。
+    **教训**：判据一旦写成"按顺序匹配"，同一件事换个语序就绕过去了。
+
+    注意：`information_schema` **单独**查询仍然允许（见上一条用例）——
+    Agent 问"有没有这张表"要走它，禁的是"用 UNION 把元数据与业务数据拼起来"这种探测手法。
     """
     _rejected(sql)
 

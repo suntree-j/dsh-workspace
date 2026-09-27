@@ -84,6 +84,22 @@ TABLES=(
     "ads_traffic_1d|warehouse/ads/traffic_1d/|truncate|dt, uv, pv, view_cnt, click_cnt, cart_cnt, favorite_cnt, buy_cnt, click_rate, cart_rate, buy_rate"
     "ads_reconcile_traffic_1m|warehouse/ads/reconcile_traffic_1m/|truncate|window_start, realtime_uv, batch_uv, diff_uv, realtime_pv, batch_pv, diff_pv, realtime_view_cnt, batch_view_cnt, diff_view_cnt, realtime_click_cnt, batch_click_cnt, diff_click_cnt, realtime_cart_cnt, batch_cart_cnt, diff_cart_cnt, realtime_favorite_cnt, batch_favorite_cnt, diff_favorite_cnt, realtime_buy_cnt, batch_buy_cnt, diff_buy_cnt, realtime_click_rate, batch_click_rate, diff_click_rate, realtime_cart_rate, batch_cart_rate, diff_cart_rate, realtime_buy_rate, batch_buy_rate, diff_buy_rate, is_match, realtime_rate_anomaly, batch_rate_anomaly, compared_at"
     "ads_reconcile_traffic_summary|warehouse/ads/reconcile_traffic_summary/|append|batch_id, compared_at, scope_start, scope_end, realtime_windows, batch_windows, realtime_only_windows, batch_only_windows, matched_windows, mismatched_windows, first_mismatch_at, realtime_min_uv, realtime_max_uv, batch_min_uv, batch_max_uv, realtime_total_pv, batch_total_pv, realtime_rate_anomaly_windows, batch_rate_anomaly_windows, is_pass"
+    # ---- 维表：装到 ecommerce 库（不是 lakehouse_ads）----
+    #
+    # !! 为什么这两张表以前是空的（真实缺陷，DECISIONS ⏳11）!!
+    #   `sql/doris/10_dwd_tables.sql` 在 Sprint 1 就建好了 dim_product / dim_user，
+    #   注释写着"来源：MySQL ecommerce.product 一次性导入"，
+    #   但**从来没有任何脚本真的导过** —— 于是它们一直是 0 行。
+    #   后果不是"查不到"而是**静默查错**：`JOIN dim_product` 不报错、
+    #   返回 HTTP 200 + row_count=0，看板与 Agent 拿到的是"真的没有数据"。
+    #   修法是让离线链路順手把它们一起同步（源用 ODS：与 MySQL 逐列同形）。
+    #
+    # !! 库名前缀 !!
+    #   维表在 `ecommerce`（实时库，供 Flink lookup join 与只读服务查），
+    #   而离线结果在 `lakehouse_ads`。规格串写成 `<库>.<表>` 以支持两者并存；
+    #   不写库名的条目仍默认落到 ${DORIS_DB}（lakehouse_ads）。
+    "ecommerce.dim_product|warehouse/ods/product/|truncate|product_id, product_name, category_id, category_name, brand, price, cost, status|ods_product"
+    "ecommerce.dim_user|warehouse/ods/user/|truncate|user_id, username, gender, age, province, city, user_level|ods_user"
 )
 
 log_stage() { printf '\n%b\n' "${C_BOLD}$*${C_RESET}"; }
@@ -175,26 +191,82 @@ load_tables() {
         exit 1
     fi
 
-    local spec table uri mode columns select_list
+    local spec table uri mode columns lake_table select_list db target probe
     for spec in "${TABLES[@]}"; do
-        IFS='|' read -r table uri mode columns <<< "${spec}"
+        # 第 5 段（湖仓表名）可省略；省略时认为与 Doris 侧表名相同。
+        # 维表必须写：`dim_product` 的湖仓来源是 `ods_product`（不同名）。
+        IFS='|' read -r table uri mode columns lake_table <<< "${spec}"
+        [ -n "${lake_table}" ] || lake_table="${table#*.}"
         uri="s3://lakehouse/${uri}"
-        printf '  %-26s ← %s  [%s]\n' "${table}" "${uri}" "${mode}"
+
+        # 规格串允许写成 `<库>.<表>`：维表在 ecommerce，离线结果在 lakehouse_ads
+        db="${DORIS_DB}"
+        if [[ "${table}" == *.* ]]; then
+            db="${table%%.*}"
+            table="${table#*.}"
+        fi
+        target="${db}.${table}"
+
+        printf '  %-26s ← %s  [%s]\n' "${target}" "${uri}" "${mode}"
 
         # 统一逗号后的空白，避免人工编辑列清单时格式不一致
         select_list="$(printf '%s' "${columns}" | sed 's/[[:space:]]*,[[:space:]]*/, /g')"
 
-        # 第 1 步：清空（独立执行，不能放进事务 —— 见文件头说明）
+        # !! 清空之前必须先证明"源读得到、且不是空的" !!
+        #
+        #   TRUNCATE 与随后的 INSERT **各自**原子，但**两步之间不原子**：
+        #   第二步失败时，系统停在比失败前更差的状态 —— 不是"数据没更新"，
+        #   而是"数据没了"。服务层（看板 / 只读接口 / Agent 都读它）尤其致命。
+        #
+        #   实测事故（DECISIONS ⏳12）：hive-metastore 崩溃期间跑过一次装载，
+        #   `lakehouse_ads` 被清空却没装回来，事后只能靠比对行数才发现。
+        #
+        #   所以"清空"是有前置条件的动作：源不可读或为空时，
+        #   **保留现有数据并失败退出**，而不是先把数据删掉再试。
         if [ "${mode}" = "truncate" ]; then
-            if ! doris_q -e "TRUNCATE TABLE ${DORIS_DB}.${table};"; then
-                log_error "${table} TRUNCATE 失败"
+            if ! probe="$(doris_q -N <<SQL
+SELECT COUNT(1) FROM (
+  SELECT 1 FROM S3(
+    "uri" = "${uri}**/*.parquet",
+    "format" = "parquet",
+    "provider" = "S3",
+    "s3.endpoint" = "${endpoint}",
+    "s3.region" = "us-east-1",
+    "s3.access_key" = "${minio_user}",
+    "s3.secret_key" = "${minio_pw}",
+    "use_path_style" = "true"
+  ) LIMIT 1
+) t;
+SQL
+            )"; then
+                log_error "${target} 源端不可读（${uri}）—— 已跳过清空，现有数据保持不变"
+                exit 1
+            fi
+            probe="$(printf '%s' "${probe}" | tr -d '[:space:]')"
+            case "${probe}" in
+                ''|*[!0-9]*)
+                    log_error "${target} 源端探测返回非数字（'${probe}'）—— 已跳过清空，现有数据保持不变"
+                    exit 1
+                    ;;
+            esac
+            if [ "${probe}" -lt 1 ]; then
+                log_error "${target} 源端为空（${uri}）—— 已跳过清空，现有数据保持不变"
                 exit 1
             fi
         fi
 
-        # 第 2 步：装载（单条 INSERT，Doris 自身保证原子性）
+        # 前置条件已满足（源可读且非空）→ 这时才真正清空。
+        # 清空单独执行、不放进事务：Doris 不允许事务里 TRUNCATE（见文件头说明）。
+        if [ "${mode}" = "truncate" ]; then
+            if ! doris_q -e "TRUNCATE TABLE ${target};"; then
+                log_error "${target} TRUNCATE 失败（源端已确认可读，重跑本脚本即可恢复）"
+                exit 1
+            fi
+        fi
+
+        # 装载（单条 INSERT，Doris 自身保证原子性）
         if ! doris_q <<SQL
-INSERT INTO ${DORIS_DB}.${table} (${select_list})
+INSERT INTO ${target} (${select_list})
 SELECT ${select_list} FROM S3(
     "uri" = "${uri}**/*.parquet",
     "format" = "parquet",
@@ -219,11 +291,20 @@ SQL
 # ------------------------------------------------------------
 verify_counts() {
     log_stage "3/5 行数对账（Doris vs 湖仓）"
-    local failed=0 spec table uri mode columns doris_count lake op ok
+    local failed=0 spec table uri mode columns lake_table db doris_count lake op ok
     for spec in "${TABLES[@]}"; do
-        IFS='|' read -r table uri mode columns <<< "${spec}"
-        doris_count="$(doris_sql <<< "SELECT COUNT(*) FROM ${DORIS_DB}.${table};" | tail -1)"
-        lake="$(lake_count "${table}")"
+        IFS='|' read -r table uri mode columns lake_table <<< "${spec}"
+        [ -n "${lake_table}" ] || lake_table="${table#*.}"
+
+        # 与装载阶段同一套解析：规格串允许写 `<库>.<表>`（维表在 ecommerce）
+        db="${DORIS_DB}"
+        if [[ "${table}" == *.* ]]; then
+            db="${table%%.*}"
+            table="${table#*.}"
+        fi
+
+        doris_count="$(doris_sql <<< "SELECT COUNT(*) FROM ${db}.${table};" | tail -1)"
+        lake="$(lake_count "${lake_table}")"
 
         # 追加式表（对账汇总）只要求"不少于湖仓"：
         # Doris 侧保留历史批次，行数天然多于单次运行的湖仓结果。
@@ -262,6 +343,15 @@ grant_readonly() {
         log_ok "已授予 agent_ro 对 ${DORIS_DB}.* 的 SELECT_PRIV"
     else
         log_warn "授权语句未生效（可能已授权，或账号不存在）；服务层查询会报 Access denied"
+    fi
+
+    # 维表装在 ecommerce（不是 ${DORIS_DB}），所以这里必须**单独**授一次。
+    # 不授也不会立刻暴露：装载与行数对账都用 root 跑、都会通过，
+    # 真正报错的只会是服务层那条 `JOIN dim_product` —— 又是一个"故障现场与改动现场不在一起"。
+    if doris_q -e "GRANT SELECT_PRIV ON ecommerce.* TO 'agent_ro'@'%';" >/dev/null 2>&1; then
+        log_ok "已授予 agent_ro 对 ecommerce.* 的 SELECT_PRIV（维表所在库）"
+    else
+        log_warn "ecommerce 授权语句未生效（可能已授权，或账号不存在）"
     fi
 }
 

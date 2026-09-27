@@ -87,7 +87,24 @@ _FORBIDDEN_PATTERNS = (
     (re.compile(r"/\*"), "COMMENT", "不允许 SQL 注释（/* */）"),
     (re.compile(r"\*/"), "COMMENT", "不允许 SQL 注释（/* */）"),
     (re.compile(r"#"), "COMMENT", "不允许 SQL 注释（#）"),
-    (re.compile(r"\bunion\s+all\s+select\b.*\bfrom\s+information_schema\b", re.I | re.S),
+    # !! 为什么这条规则要用"顺序无关"的写法 !!
+    #
+    #   原写法是 `\bunion\s+all\s+select\b.*\bfrom\s+information_schema\b`，
+    #   它只覆盖"information_schema 出现在 UNION **后面**那一支"的情形。
+    #   实测缺口（Sprint 12 用 xfail(strict=True) 固化过）：
+    #
+    #     SELECT table_name FROM information_schema.tables
+    #     UNION ALL SELECT gmv FROM ecommerce.ads_realtime_trade_1m
+    #
+    #   第一支就是元数据探测，却因为**语序不同**而被放行。
+    #   教训很直接：**判据一旦写成"按顺序匹配"，同一件事换个语序就绕过去了。**
+    #   所以改成组合判据 —— 只要同时出现 UNION 与 information_schema 就拒绝，
+    #   与两者谁先谁后无关（lookahead 不消耗字符，因此与位置无关）。
+    #
+    #   注意：**单独的 information_schema 查询是允许的**（Agent 问"有没有这张表"
+    #   会走它，且它本来就只暴露库表结构）。这里禁的是"拿 UNION 把元数据
+    #   与业务数据拼在一起"这种探测手法。
+    (re.compile(r"(?=.*\bunion\b)(?=.*\binformation_schema\b)", re.I | re.S),
      "METADATA_PROBE", "不允许通过 UNION 探测元数据"),
 )
 
