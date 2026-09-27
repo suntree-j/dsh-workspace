@@ -67,6 +67,13 @@ _AGENT_KEYS = {
     # Sprint 9（元数据/口径检索）
     "AGENT_RETRIEVAL_ENABLED",
     "AGENT_RETRIEVAL_TOP_K",
+    # Sprint 10（经 MCP 取数的客户端路径）
+    "AGENT_DATA_PATH",
+    "AGENT_MCP_SERVER_URL",
+    "AGENT_MCP_TRANSPORT",
+    "AGENT_MCP_STDIO_COMMAND",
+    "AGENT_MCP_STDIO_ARGS",
+    "AGENT_MCP_TIMEOUT",
 }
 
 # 允许通过环境变量覆盖的已知键（含 API_ 前缀，便于与数据服务共用 .env）
@@ -138,6 +145,18 @@ class Settings:
     retrieval_enabled: bool
     retrieval_top_k: int
 
+    # Sprint 10：取数路径（http = 直连只读服务；mcp = 经 MCP 服务）
+    #
+    # 为什么做成**显式开关**而不是"能连 MCP 就用 MCP"：
+    #   验收要能回答"这一次到底走了哪条路"。自动降级会让 MCP 路径
+    #   在任何一次连接抖动后悄悄消失，而所有断言仍然全绿。
+    data_path: str
+    mcp_server_url: str
+    mcp_transport: str
+    mcp_stdio_command: str
+    mcp_stdio_args: tuple[str, ...]
+    mcp_timeout: float
+
     # 仓库根目录：RAG 语料（sql/metadata/*.md）与同义词表都在仓库内，
     # 随代码分发。放进来是为了让"语料从哪读"可配置、可测试，
     # 而不是在 corpus.py 里再算一次相对路径。
@@ -152,6 +171,11 @@ class Settings:
         再去申请 Key。但**绝不会**在缺少 Key 时假装回答。
         """
         return bool(self.llm_api_key)
+
+    @property
+    def data_path_valid(self) -> bool:
+        """取数路径是否合法（装配期就要拦住拼错的值）。"""
+        return self.data_path in ("http", "mcp")
 
 
 def _env_int(env: dict[str, str], key: str, default: int) -> int:
@@ -179,6 +203,22 @@ def _env_bool(env: dict[str, str], key: str, default: bool) -> bool:
     if not raw:
         return default
     return raw in ("1", "true", "yes", "on")
+
+
+def _env_choice(env: dict[str, str], key: str, default: str, allowed: tuple[str, ...]) -> str:
+    """取一个枚举型配置。
+
+    !! 为什么非法值要**启动即失败**，而不是回落到默认值 !!
+        拼错 `AGENT_DATA_PATH=Mcp` 时若静默回落到 `http`，验收脚本会全绿，
+        而"经 MCP 取数"这件事一次都没发生过 —— 属于最难发现的一类错误。
+        这里与 `_env_int` / `_env_float` 的处理保持一致：配置错就 startup 报错。
+    """
+    raw = env.get(key, "").strip()
+    if not raw:
+        return default
+    if raw not in allowed:
+        raise ConfigError(f"{key} 只能是 {' / '.join(allowed)}，实际为 {raw!r}")
+    return raw
 
 
 def load_settings(env_file: Path | None = None) -> Settings:
@@ -220,4 +260,20 @@ def load_settings(env_file: Path | None = None) -> Settings:
         # 只需 2~3 条就能覆盖一个问题的全部依据，5 条留出余量且不挤占上下文。
         retrieval_enabled=_env_bool(env, "AGENT_RETRIEVAL_ENABLED", True),
         retrieval_top_k=_env_int(env, "AGENT_RETRIEVAL_TOP_K", 5),
+        # Sprint 10：取数路径。默认仍是 `http`（直连只读服务）——
+        # 换默认值等于改变已验收过的行为，那是另一个决定，不是本 Sprint 的顺带产物。
+        # 切到 `mcp` 后，工具层改经 MCP 服务取数（终点与守卫完全相同）。
+        data_path=_env_choice(env, "AGENT_DATA_PATH", "http", ("http", "mcp")),
+        mcp_server_url=env.get("AGENT_MCP_SERVER_URL", "http://127.0.0.1:8200/mcp"),
+        mcp_transport=_env_choice(
+            env, "AGENT_MCP_TRANSPORT", "streamable-http", ("streamable-http", "stdio")
+        ),
+        mcp_stdio_command=env.get("AGENT_MCP_STDIO_COMMAND", "python"),
+        mcp_stdio_args=tuple(
+            part for part in env.get("AGENT_MCP_STDIO_ARGS", "-m,app.main,--transport,stdio").split(",") if part
+        ),
+        # MCP 调用超时：取 60s，比数据服务侧（15s）与单次 HTTP（30s）都大。
+        # MCP 调用要串"客户端 → MCP 服务 → 数据服务 → Doris"四跳，
+        # 超时若与单跳相同，会把"MCP 链路更慢"误报成"MCP 不可用"。
+        mcp_timeout=_env_float(env, "AGENT_MCP_TIMEOUT", 60.0),
     )

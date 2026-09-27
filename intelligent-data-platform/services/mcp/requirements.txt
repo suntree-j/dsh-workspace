@@ -1,0 +1,39 @@
+# ============================================================
+# MCP 服务（services/mcp）依赖
+# ============================================================
+#
+# 只装一样东西：
+#   mcp   Model Context Protocol 官方 Python SDK（服务器 + 客户端同一包）
+#
+# 版本**钉死**而不是给区间：MCP 是一个 2024 年才出现的协议，
+# SDK 的 v1 → v2 是一次**破坏性重构**（`FastMCP` → `MCPServer`，
+# 客户端 `ClientSession` → `Client`，httpx → httpx2）。
+# 给区间等于允许在没有代码改动的情况下换掉整套 API 形状 ——
+# 那不是"可复现"，那是"下次部署看运气"。
+#
+# 版本依据（查证，不是猜）：
+#   - PyPI 官方 JSON API（https://pypi.org/pypi/mcp/json）：latest = 2.2.0，
+#     且 2.x 被官方标注为 "the current stable release line"；
+#   - 服务器实测 `pip index versions mcp`：2.2.0, 2.1.1, 2.1.0, 2.0.1, 2.0.0,
+#     1.30.0, 1.29.1, ...
+#   - 实测安装：Version: 2.2.0（记录于 docs/development-environment.md）。
+#
+# 为什么选 2.2.0 而不是最后的 1.x（1.30.0）：
+#   1. 它就是官方当前稳定线，1.x 只收关键修复；
+#   2. v2 支持 2026-07-28 版 MCP 规范（含此前的全部修订），
+#      1.x 不支持新规范；
+#   3. 本项目的用法（`MCPServer` + `@server.tool()` + `Client(url)`）
+#      在 v2 里是最短的路径，没有用到任何被弃用的 API。
+#      安装后实测确认：`MCPServer` / `Client` / `streamable_http_app` /
+#      `custom_route` 全部存在且签名符合预期。
+#
+# 传递依赖（实测装了 13 个）：mcp-types / pydantic / starlette / uvicorn /
+#   anyio / httpx2 / jsonschema / pyjwt[crypto] / cryptography / cffi /
+#   pycparser / opentelemetry-api / sse-starlette / attrs / referencing /
+#   rpds-py / python-multipart。
+#   其中 starlette 与 uvicorn 项目里本来就有（数据服务用的是 FastAPI 那套），
+#   所以**没有引入新的技术栈类型**（`AGENTS.md` §2.3）：
+#   只是把同一门 HTTP/ASGI 技术多接了一个官方 SDK。
+# ============================================================
+
+mcp==2.2.0

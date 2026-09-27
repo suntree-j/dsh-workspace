@@ -1,0 +1,78 @@
+# ============================================================
+# systemd 单元：只读数据 MCP 服务（Sprint 10）
+# ============================================================
+#
+# 安装位置： /etc/systemd/system/data-platform-mcp.service
+# 由 scripts/verify-sprint-10.sh 部署（幂等）。
+# 模板放在本目录（`services/mcp/deploy/`）而不是 `deploy/systemd/`：
+#   单元文件服务于**这一个服务**，与它一起演进更不容易漂移；
+#   `deploy/systemd/` 下的三个单元属"服务层"（api / agent / airflow），
+#   由各自的 deploy-*.sh 管理，本 Sprint 不去动别人的部署脚本。
+#
+# 运维命令：
+#   systemctl status data-platform-mcp
+#   systemctl restart data-platform-mcp
+#   journalctl -u data-platform-mcp -n 100 --no-pager
+#   curl -s http://127.0.0.1:8200/healthz | python3 -m json.tool
+#
+# 为什么是独立单元而不是塞进 Agent 进程：
+#   1) **权限隔离**：MCP 进程里没有数据库凭据（连 .env 都读不到），
+#      它唯一的出口是只读数据服务的 HTTP 接口；
+#   2) **故障隔离**：MCP 崩了不影响 Agent 与数据服务，重启即可；
+#   3) **可审查**：`systemctl cat` + `journalctl` 就能看清它连的是谁、
+#      暴露了哪几个工具（/healthz 会列出来）。
+#
+# 安全设计：
+#   1) 专用系统用户 dpmcp（不加入任何特权组），不用 root；
+#   2) **不注入 .env、不给数据层口令** —— 与 Agent 单元的关键区别。
+#      本单元只注入 4 个非敏感变量（见下）；
+#   3) 只监听 127.0.0.1:8200，对外不暴露（如需对外必须经 Nginx 并加认证）；
+#   4) 基础加固与其它单元保持一致。
+# ============================================================
+
+[Unit]
+Description=Data Platform Read-only MCP Server (Model Context Protocol)
+Documentation=file:/opt/data-platform/docs/sprint/SPRINT_10.md
+After=network-online.target data-platform-api.service
+Wants=network-online.target
+# 用 Wants 而不是 Requires：数据服务暂时不可用时 MCP 仍应能启动，
+# 被调用时如实返回 DATA_API_UNREACHABLE，而不是让 unit 起不来。
+Wants=data-platform-api.service
+
+[Service]
+Type=simple
+User=dpmcp
+Group=dpmcp
+WorkingDirectory=/opt/data-platform/services/mcp
+
+# ⚠️ 刻意**没有** EnvironmentFile=/opt/data-platform/.env：
+#    .env 含数据层口令（root:dpapi 0640）。最小权限不是"少读几个键"，
+#    而是"这个进程根本碰不到那个文件"。
+Environment=MCP_DATA_API_BASE=http://127.0.0.1:8000
+Environment=MCP_HOST=127.0.0.1
+Environment=MCP_PORT=8200
+Environment=MCP_HTTP_PATH=/mcp
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+ExecStart=/opt/data-platform/.venv-agent/bin/python -m app.main --transport streamable-http
+
+Restart=always
+RestartSec=3
+TimeoutStopSec=10
+
+# 基础加固
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=data-platform-mcp
+
+[Install]
+WantedBy=multi-user.target

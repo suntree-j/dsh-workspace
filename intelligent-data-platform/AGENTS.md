@@ -74,6 +74,10 @@
 | Python（宿主机） | `3.12.3` | 数据服务 / Agent / 调度（宿主 venv `.venv`、`.venv-agent`、`.venv-airflow`） |
 | Python（容器） | `3.13.14` | 仅 data-generator 容器（`python:3.13.14-slim-bookworm`） |
 | Apache Airflow | `3.3.2` | 离线流水线调度（Sprint 4 引入；元数据库用 MySQL，独立 venv） |
+| langgraph | `1.1.0` | 图式 Agent 编排（Sprint 8 引入） |
+| mcp（Python SDK） | `2.2.0` | MCP 服务与客户端（Sprint 10 引入） |
+| prom/prometheus | `v3.13.3`（LTS） | 指标采集（Sprint 11 引入） |
+| grafana/grafana | `13.2.2` | 监控看板（Sprint 11 引入） |
 | pytest | 9.x | 测试 |
 
 > ⚠️ **Python 版本有两条线，不要合并成一句**（Sprint 4 修正）：
@@ -92,7 +96,10 @@
 ### 2.2 后续 Sprint 引入
 
 Iceberg（S5）、
-LangGraph（S8）、RAG（S9）、MCP（S10）、Prometheus + Grafana（S11）。
+LangGraph（S8）、RAG（S9）、MCP（S10）。
+
+> `Prometheus + Grafana（S11）` 已于 Sprint 11 引入，因此已从本节移除，
+> 版本与内存上限见 §2.1 与本文件 §15.11（监控实测总预算 512 MB）。
 
 > Sprint 6（数据后台 + 前后端）已按项目负责人要求**前移**到 Sprint 2~5 之前，
 > 理由是让数据"可访问、可验收"并为智能层预留只读接口，详见
@@ -594,12 +601,12 @@ docker compose exec doris-be mysql -h 172.28.0.10 -P 9030 -uroot -e "SHOW BACKEN
 | **3** | **ODS / DWD / DWS / ADS（离线分层 + 批流交叉对账）** | ✅ **已完成并验收通过**（11458 个分钟窗口零差异，见 SPRINT_3.md） |
 | **7** | **LLM + Tool Calling（数据问答 Agent）** | ✅ **已完成并验收通过**（验收 49/49，见 SPRINT_7.md） |
 | **4** | **Airflow 调度 + 流量域归档** | ✅ **已完成并验收通过**（验收 40/0/0，见 15.8 与 SPRINT_4.md） |
-| 5 | Iceberg Lakehouse | 🔄 **进行中**：阶段 4 完成（18 张表迁到 `iceberg.lakehouse_iceberg`，校验 60/60，行数与金额逐表一致）；流量域分层与对账待做 |
-| 8 | LangGraph Data Agent | 未开始 |
-| 9 | RAG + Metadata | 未开始 |
-| 10 | MCP | 未开始 |
-| 11 | Data Quality + Monitoring | 未开始 |
-| 12 | 测试 + 性能优化 | 未开始 |
+| **5** | **Iceberg Lakehouse + 流量域分层** | ✅ **已完成并验收通过**（Iceberg 23 张表 70/70；流量域 DWD 21/21、DWS 20/20、ADS 36/36、对账 10/10 —— 19643 个窗口不一致 0；见 15.10 与 15.12） |
+| **8** | **LangGraph Data Agent** | ✅ **已完成并验收通过**（`verify-sprint-8.sh` 71/0/0；`langgraph 1.1.0`） |
+| **9** | **RAG + Metadata** | ✅ **已完成并验收通过**（`verify-sprint-9.sh` 59/0/0；BM25 词法检索 + 显式同义词表，未引入向量库） |
+| **10** | **MCP** | 见 15.12（以实测结果为准；未取到实测证据前写"进行中（待补证据）"，不编数字） |
+| **11** | **Data Quality + Monitoring** | ✅ **已完成并验收通过**（`verify-sprint-11.sh` 61/0/0，详见 15.11） |
+| **12** | **测试 + 性能优化** | 见 15.12（同上，性能基线未补齐则如实写"进行中"） |
 | 13 | 毕业论文 + 答辩 | 未开始 |
 
 ### 15.1 Sprint 0 验收结果
@@ -724,6 +731,11 @@ bash scripts/verify-sprint-2.sh`（详见
 > `services/api/app/sqlguard.py` 的 `BUSINESS_TABLES`（权限边界）
 > 与 `services/agent/app/agent.py` 系统提示词的「数据地图」（模型认知）——
 > 只改一处会出现"模型知道有表却不知道有哪些列"。
+>
+> **白名单数量以 `sqlguard.py` 为准（2026-09-27 实测 `len(BUSINESS_TABLES)` = 16 张）。**
+> 本节与 `SPRINT_7.md` 曾写作"19 张表"，那是**文档与代码不一致**（Sprint 8 复核时发现，
+> 差异记录见 `docs/DEVELOPMENT_LOG.md`）。改白名单时必须**同步**这里与
+> Agent 系统提示词的「数据地图」，否则会重新制造同一类不一致。
 
 一键复现：`bash scripts/deploy-agent.sh && bash scripts/verify-sprint-7.sh`
 （详见 [`docs/sprint/SPRINT_7.md`](docs/sprint/SPRINT_7.md)，
@@ -883,3 +895,131 @@ bash scripts/verify-sprint-2.sh`（详见
 > 6. **判断进程是否存活必须用 `pgrep -af`**（`-f` 才匹配完整命令行）。
 >    `pgrep -c batch-mode` 匹配的是**进程名**，而脚本的进程名是 `bash` ——
 >    它会稳定地返回 0，把人引向"进程已死"的错误结论。
+
+### 15.11 Sprint 11 结果（数据质量 + 监控）+ 本次 `.env` 事故的硬规范
+
+```text
+✅ bash scripts/verify-sprint-11.sh   通过 61 / 失败 0 / 跳过 0（8 步）
+    服务状态 / 版本与内存上限 / 内存预算取证 / Prometheus /
+    Grafana / 数据质量校验 / 失败路径证明 / Nginx 与回归
+✅ 数据质量校验                       Doris 侧 24 通过 / 0 失败 / 1 跳过（spark 项另驱动）
+    25 条校验覆盖 7 类：行数非空守卫 / 主键唯一 / 关键字段非空 / 枚举合法 /
+    层间一致 / 金额关系 / 新鲜度（交易域与流量域都覆盖）
+    实测：orders 6000 / payments 5406 / refunds 254 / behaviors 20000；
+          GMV 实时 51,890,375.77 == 离线 51,890,375.77（等值，无容差）；
+          漏斗 VIEW 10472 > CLICK 5759 > CART 2095 > BUY 628
+    湖仓层间：DWD == ODS 逐表，不一致表数 0（Iceberg 5 张交易表）
+✅ 失败路径（可复现的证明）            --proof-fail 故意改坏期望值：
+    演示 1 期望 999999999999 → [FAIL] → **退出码 1**
+    演示 2 期望 -1           → [FAIL] → **退出码 1**
+    恢复后仍全绿（证明失败来自断言，不是数据被改坏）
+✅ 监控版本与内存（实测）              prom/prometheus:v3.13.3（LTS，禁用了 EOL 只剩 3 天的 3.14.0）
+                                      grafana/grafana:13.2.2
+                                      mem_limit 各 256m，合计 **512m**（预算上限）
+                                      实测占用 prometheus 105 MiB / grafana 187 MiB
+✅ Prometheus 抓取                    4/4 目标 up（prometheus / doris-fe / doris-be / grafana）
+                                      Doris FE 1564 条、BE 1019 条指标
+✅ 公网入口                           http://<IP>/grafana/ → 200（面板 23 个，匿名只读）
+                                      http://<IP>/metrics/ → 200（原始指标，只放行 GET/HEAD/OPTIONS）
+                                      /metrics/-/healthy → 200；/data/ 200；/airflow/ 200
+```
+
+**硬规范（Sprint 11 起，全部来自本次实测事故）**：
+
+> 1. **共享文件的权限必须按「所有读者」定，不能按「最小权限」直觉定。**
+>    本机 `.env` 必须是 **`640 root:dpapi`，不能是 600** ——
+>    因为 `data-platform-api` 以 `dpapi` 组身份运行、`data-platform-agent`
+>    以 `dpagent` 用户（`dpapi` 组成员）运行，两者都需要**组读**。
+>    实测后果：写成 600 会让 Agent 直接起不来（`PermissionError: /opt/data-platform/.env`），
+>    而症状出现在"别人负责的服务"上 —— **故障现场与改动现场不在一起**，
+>    是最难关联的一类故障。权限属于"别人也依赖的共享状态"，
+>    **每次部署都要校正一次**，不能只在"首次生成"时设对。
+>
+> 2. **禁止任何"原子换树 / 镜像式"同步。**
+>    `mv /opt/data-platform <旧树> && rm -rf <旧树>` 这种写法会把 `.gitignore`
+>    覆盖的**机器状态**一起删掉 —— 本项目真实发生过：`.env`、三个 venv、
+>    `airflow/airflow.env` 全被删除，导致 `docker compose` 直接不可用
+>    （它靠 `.env` 做变量插值）、Agent 起不来、Airflow 三单元"活着但重启即失败"。
+>    正确做法：**只覆盖需要覆盖的文件**，且用 `mv` 做**单文件**原子替换
+>    （换 inode，正在执行的脚本不会读到半截内容），绝不动目录本身。
+>
+> 3. **在确认凭据已落盘之前，禁止 `docker compose up / restart`。**
+>    容器/进程的 `Config.Env` 里可能还留着**上一份**凭据（进程启动时读入内存，
+>    文件删了也还在）。此时重建容器非但不能"修好"，反而会把**唯一的一份**凭据丢掉。
+>    排查顺序应当是：先确认 `.env` 在位且可用 → 再重建容器。
+>
+> 4. **改共享编排文件（`deploy/**`、`docker-compose.yml`）必须先落创作副本再同步。**
+>    服务器上直接改的仓库文件，会被任何一次"创作副本 → 工作区 → 服务器"的同步
+>    **静默回滚**（同步报成功、nginx 也不报错，只是功能变回旧行为）。
+>    验收时必须核对 `/etc/nginx/sites-available/data-platform.conf`
+>    与仓库副本的 **md5 一致**。
+>
+> 5. **会改机器状态的验收脚本，开头必须检查 `.env` 是否存在，不存在就 `exit 1`。**
+>    否则脚本会在"没有凭据"的机器上跑出一堆看起来像功能缺陷的失败，
+>    把真正的根因（凭据缺失）埋在噪声里。
+>    反之：**只做解析/只读的入口（如 `--list`）不应依赖 `.env`** ——
+>    本次已把 `infrastructure/quality/run-check.sh --list` 与 `--dry-run`
+>    改为按需加载 `.env`，`.env` 缺失时仍可用。
+
+> **本次事故的价值**：它是"共享状态 + 并行改动"这一类风险的完整样本 ——
+> 一个**看起来更干净**的动作（清理旧树 / 收紧权限）跨过服务边界就变成了故障。
+> 记住三条判据：**这个文件还有谁在读？这个目录里还有什么我没看见的状态？
+> 我现在做的动作，别人会不会依赖它的旧值？**
+
+### 15.12 Sprint 5 / 8 / 9 / 10 / 12 实测数字汇总
+
+本节只汇总**有书面或日志证据**的数字；取不到证据的一律写"进行中（待补证据）"，
+**不编数字**（这是本项目反复强调的纪律：宁可留白，不可伪造）。
+
+```text
+Sprint 5   Iceberg Lakehouse + 流量域分层                    ✅ 已完成
+  证据：docs/sprint/SPRINT_5.md（第 8/9 节 + 版本记录 V1.1/V1.2）
+  - Iceberg 迁移清单 18 → 23 张表；阶段 4 校验 60/60 通过
+    （逐表行数与金额与 Parquet 版精确一致，含金额 SUM 核对）
+  - 流量域分层建成：DWD 21/21、DWS 20/20、ADS 36/36、对账 10/10
+  - 流量域逐窗口对账：**19643/19643 个窗口，不一致 0、单边窗口 0**
+    （7 个判据列 uv/pv/6 个行为计数逐窗口一致）
+  - 一处**实质性发现（未修复）**：实时侧 1 个窗口的 click_rate
+    与自身计数自相矛盾（缺陷在实时链路，已落进对账表与 metrics.md 第 3.3 节，
+    修复需重部署 Flink 作业并触发 Kafka 全量重放 —— 待项目负责人决策）
+
+Sprint 8   LangGraph Data Agent                              ✅ 已完成
+  证据：docs/DEVELOPMENT_LOG.md 的 Sprint 8/9 条目
+  - scripts/verify-sprint-8.sh：通过 71 / 失败 0 / 跳过 0
+  - 图单元测试 27 passed；langgraph 实际版本 **1.1.0**（.venv-agent）
+  - 起点：verify-sprint-7.sh 49/49 **无回退**
+
+Sprint 9   RAG + Metadata（词法检索）                          ✅ 已完成
+  证据：同上
+  - scripts/verify-sprint-9.sh：通过 59 / 失败 0 / 跳过 0
+  - 检索单元测试 26 passed；语料 65 篇；**向量库相关包数量 = 0**
+  - BM25 + 显式同义词表；回答附 docs（命中的口径来源，带文件与行号）
+
+Sprint 10  MCP                                                🔄 进行中（待补证据）
+  证据：services/mcp/ 与 docs/sprint/SPRINT_10.md 已存在；
+        scripts/verify-sprint-10.sh 已交付（6 步验收）
+  - **服务器端验收数字本次未取到**（验收脚本在本次回归队列中执行，
+    结果以回归输出为准）。已知的**未通过**观察：`pytest -m unit`
+    在 services/mcp 相关用例上有失败（如 MCP_PORT 环境变量断言、
+    systemd 单元读 .env 的断言、requirements pin 断言），
+    这些断言针对的是 Sprint 10 的**代码/配置文件内容**，
+    不是环境问题 —— 由 Sprint 10 负责人判定与修复。
+
+Sprint 12  测试 + 性能优化（基线）                              🔄 进行中（待补证据）
+  证据：docs/sprint/SPRINT_12.md 与 docs/PERFORMANCE.md 已存在；
+        scripts/perf/measure-latency.sh、scripts/verify-sprint-12.sh 已交付
+  - SPRINT_12.md 的"已知限制"一节自述：**服务器端执行 ⏳ 待补**
+  - 全量 pytest（本机实测，`.venv`）：**208 passed / 8 failed /
+    138 deselected / 1 xfailed**；其中 8 个失败全部集中在
+    test_mcp.py 与 test_sql_guard_adversarial.py（见 Sprint 10 条目）
+  - 性能基线文档是否已含实测数字：**以 verify-sprint-12.sh 的结果为准**（待补）
+```
+
+> **关于 Sprint 12 的两个"测试环境"事实**（本次实测，供其负责人参考）：
+> 1. `pytest` **不在任何 requirements 文件里**（`requirements.txt` /
+>    `services/*/requirements.txt` 都没有它），一直是手工装的；
+>    因此 08:34 重建 venv 时它丢失了。本次已装回 `.venv` 与 `.venv-agent`（9.1.1）。
+> 2. `tests/test_data_generator.py` 依赖 `Faker` / `python-dotenv`，
+>    这两个包同样不在任何 requirements 里，本次一并装回。
+>    **建议把它们正式写进某个 requirements（或新增 `requirements-dev.txt`），
+>    否则下次重建 venv 会再次丢失。**

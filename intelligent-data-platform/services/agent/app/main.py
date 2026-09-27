@@ -1,8 +1,9 @@
-"""数据问答 Agent（Sprint 7 → Sprint 8 图式编排 → Sprint 9 检索增强）。
+"""数据问答 Agent（Sprint 7 → S8 图式编排 → S9 检索增强 → S10 MCP 取数路径）。
 
 定位：
     这是「智能层」的可运行形态 —— 自然语言问题进，带来源说明的回答出。
-    它**不直连数据库**：所有取数都经 `services/api` 的只读接口，
+    它**不直连数据库**：所有取数都经 `services/api` 的只读接口
+    （Sprint 10 起也可以经 MCP 服务，见下），
     因此 Agent 的能力边界与一个只读用户完全一致（进程边界即权限边界）。
 
 启动：
@@ -22,6 +23,14 @@
 保留这条回退路径的原因很实际：**排障与回归要有基线** ——
 图出问题时，能立刻判断"是图的问题还是数据/模型的问题"。
 它不是长期的双实现，`/ask` 的响应里 `engine` 字段会如实说明用了哪条。
+
+## 取数走哪条路（Sprint 10）
+
+`AGENT_DATA_PATH=http`（默认）→ 工具直接打只读数据服务；
+`AGENT_DATA_PATH=mcp`      → 工具经 MCP 服务取数（`app/mcp_client.py`）。
+
+两条路径的终点与守卫完全相同，`GET /mcp` 会如实报告当前走的是哪条，
+并把它**从 MCP 服务现场发现的工具清单**列出来（能力面可审查）。
 """
 
 from __future__ import annotations
@@ -97,7 +106,7 @@ def index() -> dict[str, Any]:
             "engine": _engine_name(),
             "endpoints": [
                 "/health", "/tools", "POST /ask", "/prompt",
-                "/graph", "/retrieval", "/api/retrieve",
+                "/graph", "/retrieval", "/api/retrieve", "/mcp",
             ],
             "docs": "/docs",
         },
@@ -113,6 +122,51 @@ def index() -> dict[str, Any]:
 
 def _engine_name() -> str:
     return "langgraph" if SETTINGS.graph_enabled else "single-loop（Sprint 7 回退）"
+
+
+def _data_path_profile(probe_mcp: bool = True) -> dict[str, Any]:
+    """报告"取数走哪条路"，并（可选地）现场探测 MCP 服务能提供什么。
+
+    `probe_mcp=False` 用于 `/health`：健康检查会被监控高频调用，
+    不该每次都去建一条 MCP 会话。`GET /mcp` 才做真探测 ——
+    它是"能力面可审查"的接口，慢一点是对的。
+    """
+    profile: dict[str, Any] = {
+        "path": SETTINGS.data_path,
+        "transport": SETTINGS.mcp_transport,
+        "server_url": SETTINGS.mcp_server_url,
+        "timeout_s": SETTINGS.mcp_timeout,
+        # 这一条**无条件**出现：它是设计声明，不是"只在某条路径下才成立"的属性。
+        # 曾经只在 mcp 路径下给 note，结果 http 路径下 /mcp 不解释"为什么不回退" ——
+        # 而"不自动回退"恰恰是最需要被读到的一条约定。
+        "no_silent_fallback": True,
+        "note": (
+            "http = 工具直连只读数据服务；mcp = 工具经 MCP 服务取数。"
+            "两条路径的终点与守卫（sqlguard + 只读账号）完全相同；"
+            "**不会自动回退**（MCP 不可达即失败）—— 走哪条路由本配置显式决定。"
+        ),
+    }
+    if SETTINGS.data_path != "mcp":
+        profile["reachable"] = None
+        profile["detail"] = "当前取数路径是 http，未连接 MCP"
+        return profile
+
+    if not probe_mcp:
+        return profile
+
+    from .mcp_client import McpToolClient
+
+    client = McpToolClient(SETTINGS)
+    try:
+        tools = client.list_tools()
+        profile["reachable"] = True
+        profile["detail"] = f"MCP 服务可用，声明了 {len(tools)} 个工具"
+        profile["remote_tools"] = tools
+    except Exception as exc:  # noqa: BLE001 - MCP 不可达必须在接口上可见
+        profile["reachable"] = False
+        profile["detail"] = f"{type(exc).__name__}: {exc}"
+        profile["remote_tools"] = []
+    return profile
 
 
 @app.get("/health", summary="健康检查")
@@ -163,6 +217,7 @@ def health() -> dict[str, Any]:
             "status": status,
             "engine": _engine_name(),
             "data_api": {"ok": api_ok, "base": SETTINGS.data_api_base, "detail": api_detail},
+            "data_path": _data_path_profile(probe_mcp=False),
             "llm": {
                 "configured": SETTINGS.llm_configured,
                 "provider": SETTINGS.llm_provider,
@@ -177,6 +232,7 @@ def health() -> dict[str, Any]:
                 "query_limit": SETTINGS.query_limit,
                 "total_timeout": SETTINGS.total_timeout,
                 "retrieval_top_k": SETTINGS.retrieval_top_k,
+                "mcp_timeout": SETTINGS.mcp_timeout,
             },
         },
         "source": {
@@ -255,6 +311,38 @@ def graph_description() -> dict[str, Any]:
             "metric_definitions": [],
             "time_range": {"start": None, "end": None},
             "note": "编排为声明式图；节点/边/上界均在此列出，便于审查与论文引用",
+        },
+        "generated_at": now_iso(),
+    }
+
+
+@app.get("/mcp", summary="MCP 取数路径（Sprint 10）")
+def mcp_profile() -> dict[str, Any]:
+    """报告 Agent 的 MCP 接入状态，并列出 **MCP 服务现场声明的工具**。
+
+    ## 为什么这个接口值得存在
+
+        「能力最小化」（`AGENTS.md` §10.3 第 6 条）只有在**能力面可枚举**时
+        才是可验收的。`/tools` 列出的是 Agent 交给模型的工具声明（Agent 自称），
+        而这里列出的是**对端 MCP 服务实际声明的东西**（现场拉到）——
+        两者都可以读，`remote_tools` 与 `/tools` 在取数类工具上一一对应。
+
+        若 MCP 服务临时不可达，本接口**不报 500**：如实返回
+        `reachable=false` 与失败原因。理由是"能力面审查"这件事不该因为
+        对端抖动就失去可读性 —— 配置了哪条路径、对端地址是什么，仍然是真的。
+    """
+    profile = _data_path_profile(probe_mcp=True)
+    return {
+        "data": profile,
+        "source": {
+            "tables": [],
+            "metric_definitions": [],
+            "time_range": {"start": None, "end": None},
+            "note": (
+                "MCP 只暴露只读能力（4 个工具：metrics_lookup / tables_lookup / "
+                "sql_query / reconciliation），且自身不持有数据库凭据；"
+                "唯一取数通道仍是 POST /data/api/query，受 sqlguard 与只读账号约束。"
+            ),
         },
         "generated_at": now_iso(),
     }

@@ -1,6 +1,6 @@
-"""Agent 工具集：Agent 能做的每一件事都在这里，且**只经 HTTP 调数据服务**。
+"""Agent 工具集：Agent 能做的每一件事都在这里，且**只经 HTTP 或 MCP**取数。
 
-## 为什么工具只走 HTTP，不直连 Doris
+## 为什么工具只走 HTTP / MCP，不直连 Doris
 
     进程边界即权限边界。
     Agent 进程里**没有**数据库凭据，也没有 mysql 客户端依赖 ——
@@ -8,6 +8,15 @@
     都要过 `sqlguard`（仅 SELECT / 表白名单 / 强制 LIMIT）与只读账号 `agent_ro`。
     这样"Agent 不得拥有数据库管理员权限"（AGENTS.md 第 10.1 节）
     就不是靠代码自觉，而是靠架构保证 —— 想绕过也没有入口。
+
+## 两条取数路径（Sprint 10）
+
+    `AGENT_DATA_PATH=http`（默认）  取数直接打只读数据服务
+    `AGENT_DATA_PATH=mcp`          取数经 MCP 服务（`app/mcp_client.py`）
+
+    两条路径的**终点完全相同**（都是 `POST /data/api/query` + sqlguard +
+    只读账号），差别只在中间多一跳 MCP。做成开关而不是自动探测，是为了
+    让"这一次走了哪条路"永远是一个可断言的事实（见 `config.Settings.data_path`）。
 
 ## 工具集合刻意保持最小（AGENTS.md 第 10.3 节「权限最小化」）
 
@@ -35,6 +44,7 @@
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -50,11 +60,43 @@ __all__ = [
     "REASONING_SPEC",
     "ToolResult",
     "ToolBox",
+    "extract_tables",
 ]
 
 # 单次数据服务调用的超时。取 30s：数据服务侧 Doris 查询超时是 15s，
 # 这里必须比它大，否则会出现"数据服务还在正常查、Agent 已经超时报错"的假失败。
 API_TIMEOUT = 30
+
+# 走 MCP 的工具名（Sprint 10）。刻意**不含** `retrieve_docs` / `propose_sql`：
+# 前者查 Agent 自己的语料，后者是图内部的规划协议，两者都不是取数。
+_MCP_TOOL_NAMES = frozenset({"metrics_lookup", "tables_lookup", "sql_query", "reconciliation"})
+
+# !! 为什么从 SQL 里抠表名要在这儿再写一份正则 !!
+#   权威实现在 `services/api/app/sqlguard.py` 的 `extract_tables`（守卫与血缘
+#   用的是同一套规则）。但 Agent 不能 import 它：
+#     - 那是**另一个部署单元**的包（`services/api/app`），而 `services/agent`
+#       与它各自的 `app` 包同名，tests/conftest.py 里已经记录过这个坑；
+#     - Agent 进程里引入守卫模块会给人"Agent 也持有权限判断"的错觉，
+#       而真实边界是"Agent 只发 HTTP"。
+#   代价是两处规则可能漂移。对策不是"记得同步"，而是**可发现**：
+#   `scripts/verify-sprint-10.sh` 会断言两条取数路径对同一条 SQL 报出
+#   完全相同的 tables，漂移会在验收时暴露。
+_IDENT = r"(?:`[^`]+`|\"[^\"]+\"|\[[^\]]+\]|[A-Za-z_][\w$]*)"
+_TABLE_RE = re.compile(rf"\b(?:from|join)\s+({_IDENT}(?:\s*\.\s*{_IDENT})*)", re.I)
+
+
+def extract_tables(sql: str) -> list[str]:
+    """从 SQL 里提取目标表名（去重、保持出现顺序）。
+
+    与 `sqlguard.extract_tables` 规则一致：支持 `库.表`、反引号、方括号写法。
+    少识别一种写法就等于少一份血缘信息，因此标识符按"点分片段"来匹配。
+    """
+    seen: list[str] = []
+    for match in _TABLE_RE.finditer(sql or ""):
+        name = re.split(r"\s*\.\s*", match.group(1).strip())[-1].strip().strip("`\"[]")
+        if name and name not in seen:
+            seen.append(name)
+    return seen
 
 
 @dataclass
@@ -75,10 +117,49 @@ class ToolResult:
 
 
 class ToolBox:
-    """工具的实现集合。持有一个 Settings（数据服务地址）即可。"""
+    """工具的实现集合。持有一个 Settings（数据服务地址）即可。
+
+    Sprint 10 起还持有一个**惰性创建**的 MCP 客户端：
+    `data_path == "mcp"` 时所有取数改经它，否则完全不建连接
+    （默认路径不该因为多了一个开关就多出一个后台线程）。
+    """
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self._mcp: Any = None
+
+    # --------------------------------------------------------
+    # 取数路径（Sprint 10）
+    # --------------------------------------------------------
+    @property
+    def data_path(self) -> str:
+        """本次运行实际使用的取数路径：`http` 或 `mcp`。"""
+        return self.settings.data_path
+
+    @property
+    def mcp(self) -> Any:
+        """MCP 客户端（首次访问时才创建，且只在 `data_path == "mcp"` 时被用到）。"""
+        if self._mcp is None:
+            from .mcp_client import McpToolClient
+
+            self._mcp = McpToolClient(self.settings)
+        return self._mcp
+
+    @staticmethod
+    def _mcp_failure(tool: str, arguments: dict[str, Any], exc: Exception) -> ToolResult:
+        """把 MCP 侧失败转成给模型看的失败结果（**不回退到直连**）。
+
+        与 `_send` 的取舍一致：这是有价值的反馈而不是崩溃，
+        但要如实带上"这是 MCP 这一跳出的问题"，否则排障会找错地方。
+        """
+        return ToolResult(
+            False,
+            f"MCP 取数失败（{type(exc).__name__}）：{exc}。"
+            f"本次运行配置的取数路径是 mcp，不会自动回退到直连 —— "
+            f"如需直连请把 AGENT_DATA_PATH 改回 http 后重启 Agent。",
+            tool=tool,
+            arguments=arguments,
+        )
 
     # --------------------------------------------------------
     # 底层 HTTP
@@ -310,7 +391,26 @@ class ToolBox:
     # 分发
     # --------------------------------------------------------
     def call(self, name: str, arguments: dict[str, Any]) -> ToolResult:
-        """按名字调用工具。未知工具返回失败结果而不是抛异常。"""
+        """按名字调用工具。未知工具返回失败结果而不是抛异常。
+
+        ## 取数路径的分流点就在这里（Sprint 10）
+
+        `data_path == "mcp"` 时，**所有取数类工具**改经 MCP 客户端调用，
+        方法名与 MCP 工具名一一对应。放在这一处分流而不是逐个方法内部判断，
+        理由有两条：
+
+          1. 只有一个分流点，"哪些工具走了 MCP"是一眼可读的事实，
+             而不是散在五个函数体里的五处 if；
+          2. 直连实现（`_get` / `_post`）**一行都不用改** ——
+             Sprint 7 已验收的路径保持原样，回归风险最小。
+
+        `retrieve_docs` 与 `propose_sql` 不走 MCP：前者查的是 Agent 自己的
+        语料文件与检索索引，后者是图内部的规划协议，**两者本来就不是取数**。
+        把它们也塞进 MCP 会让"最小能力集合"这个说法失真。
+        """
+        if self.data_path == "mcp" and name in _MCP_TOOL_NAMES:
+            return self._call_via_mcp(name, arguments)
+
         handlers = {
             "metrics_lookup": lambda a: self.metrics_lookup(str(a.get("keyword", ""))),
             "tables_lookup": lambda a: self.tables_lookup(str(a.get("table", ""))),
@@ -344,6 +444,81 @@ class ToolBox:
                 tool=name,
                 arguments=arguments,
             )
+
+    # --------------------------------------------------------
+    # 经 MCP 取数（Sprint 10）
+    # --------------------------------------------------------
+    def _call_via_mcp(self, name: str, arguments: dict[str, Any]) -> ToolResult:
+        """经 MCP 调用同名工具，并把结果**归一成与直连完全相同的形状**。
+
+        !! 归一化是必需的，不是美化 !!
+            直连 `/meta/tables` 返回的是 rows 列表，MCP 的 `tables_lookup`
+            返回 `{"tables": [...]}`；`reconciliation` 直连返回 data 里的
+            `latest`/`deltas`/`totals`，MCP 返回 `latest_batch`/`deltas`/`totals`。
+            若不复原成直连形状，图（Sprint 8）里读 `result.tables` 与
+            `_extract_number(content, "row_count")` 的地方会**静默拿到空值** ——
+            表现为"回答里没有数字"，而工具其实成功了。这类"两条路径形状不同"
+            比功能性缺陷更难定位，因此在边界上一次抹平。
+        """
+        try:
+            payload = self.mcp.call_tool(name, arguments)
+        except Exception as exc:  # noqa: BLE001 - MCP 故障必须可见，不回退
+            return self._mcp_failure(name, arguments, exc)
+
+        if name == "tables_lookup":
+            rows = list(payload.get("tables") or [])
+            if payload.get("found") is False:
+                available = "、".join(payload.get("available_tables") or [])
+                return ToolResult(
+                    False,
+                    f"没有名为「{arguments.get('table', '')}」的表。可用的表：{available}",
+                    tool=name,
+                    arguments=arguments,
+                )
+            return ToolResult(
+                True,
+                _dump(rows),
+                tables=[str(t.get("table", "")) for t in rows],
+                tool=name,
+                arguments=arguments,
+            )
+
+        if name == "reconciliation":
+            normalised = {
+                "latest_batch": payload.get("latest_batch") or {},
+                "deltas": payload.get("deltas") or {},
+                "totals": payload.get("totals") or {},
+                "mismatch_count": payload.get("mismatch_count", 0),
+            }
+            return ToolResult(
+                True,
+                _dump(normalised),
+                tables=[],
+                tool=name,
+                arguments=arguments,
+            )
+
+        if name == "sql_query":
+            # sql_query 的失败在 MCP 侧已经是结构化错误（守卫拒绝），
+            # 客户端会抛 McpToolError —— 交给 `_mcp_failure` 之外的分支处理，
+            # 这里只处理成功路径。
+            normalised = {
+                "executed_sql": payload.get("executed_sql", ""),
+                "row_count": payload.get("row_count", 0),
+                "elapsed_ms": payload.get("elapsed_ms", 0),
+                "rows": payload.get("rows") or [],
+            }
+            return ToolResult(
+                True,
+                _dump(normalised),
+                # 血缘信息与直连路径同源：都从实际执行的 SQL 里提取，
+                # 而不是让 MCP 自报（自报的表名不可核对）。
+                tables=extract_tables(str(payload.get("executed_sql") or "")),
+                tool=name,
+                arguments=arguments,
+            )
+
+        return ToolResult(True, _dump(payload), tool=name, arguments=arguments)
 
 
 # ------------------------------------------------------------
