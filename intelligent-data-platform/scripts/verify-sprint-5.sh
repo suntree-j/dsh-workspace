@@ -14,7 +14,26 @@
 #   5  **流量域批流对账**（逐窗口全量比对、差异 0、单边窗口 0）
 #   6  对账证据与口径（区间可核 / 去重指标不可加的实证 / 比率列独立核对）
 #   7  内存与执行方式（仍走错峰模式、闸门未被放宽）
-#   8  回归（交易域对账仍在、verify-sprint-3/4 通过、服务层可达）
+#   8  回归（**轻量**：健康检查 + 交易域对账仍在 + 两个入口可达 + 关键服务 active）
+#
+# !! 第 8 步为什么从"整链回归"降级为"轻量回归"（本 Sprint 的降噪改动）!!
+#
+#   原来的第 8 步会**再跑一遍** verify-sprint-3.sh 与 verify-sprint-4.sh，
+#   而这两个脚本各自都要驱动一次离线批处理（Spark 作业链）——
+#   于是"验收 Sprint 5"这件事被放大到 25 分钟以上，
+#   实际使用中只能在跑到一半时被掐断（掐断之后连已通过的部分也拿不到汇总）。
+#
+#   这是一次**明确降低覆盖面**的改动，因此必须留下移交记录，不许悄悄去掉：
+#     - 交易域/流量域的**整链验收**：`bash scripts/verify-sprint-3.sh`
+#                                     `bash scripts/verify-sprint-4.sh`
+#     - **统一回归入口**（Sprint 12 起）：`bash scripts/verify-sprint-12.sh`
+#   本步骤只回答一个问题："我这次改的东西，有没有把别人已经验收过的东西弄坏？"
+#   它用**外部可观测面**回答（健康检查数、对账表结论、HTTP 入口、服务状态），
+#   不重新做一遍别人的离线计算 —— 那属于 Sprint 12 的统一回归。
+#
+#   为什么留下的偏偏是这几条：它们覆盖了**被本 Sprint 改动的东西所在的路径**
+#   （Doris 装载结果 → 只读服务 → 看板/Agent 入口 → systemd 服务）。
+#   轻量不等于随便挑：留下的是最短的那条"改动 → 暴露面"链路。
 #
 # !! 为什么第 1 步是"阶段接入自检"而不是"看表在不在" !!
 #   Sprint 4 实测过一个缺陷：阶段加进了 STAGES 与 --list，
@@ -674,22 +693,51 @@ step_memory() {
     # 实时链路当前必须已经恢复（批处理不应把看板永久留在暂停状态）
     local flink_running
     flink_running="$(docker ps --format '{{.Names}}' 2>/dev/null | grep -c flink-taskmanager || true)"
-    local health
-    health="$(bash "${REPO_ROOT}/scripts/health-check.sh" 2>/dev/null | grep -c '\[OK\]' || true)"
     printf '     当前宿主机内存： '
     free -m | awk 'NR==2{printf "可用 %s MB / 共 %s MB\n", $7, $2}'
     check_true "实时链路已恢复（flink-taskmanager 在运行）" "实际 ${flink_running} 个" \
         test "${flink_running:-0}" -ge 1
-    printf '     health-check [OK] 数： %s\n' "${health:-0}"
+
+    # 注意：这里**不再**顺带跑一次 health-check。
+    # 原来步骤 7 与步骤 8 各调一次 health-check.sh（各约 7~8 秒，其中包含
+    # 等待 Flink 作业恢复的就绪轮询）—— 同一件事做两遍，且第一次的结果
+    # 只被打印、从不参与断言。现在统一放到第 8 步：只跑一次，且**有断言**。
+    printf '     （健康检查的断言在第 8 步统一做，避免同一件事跑两遍）\n'
 }
 
 # ============================================================
-# 8. 回归
+# 8. 回归（轻量）
+#
+# !! 本步骤**故意不做整链回归**，移交关系写在文件头第 8 条说明里 !!
+#   整链（含离线批处理）的验收命令：
+#     bash scripts/verify-sprint-3.sh     交易域分层 + 批流对账
+#     bash scripts/verify-sprint-4.sh     Airflow 调度 + 流量域归档
+#     bash scripts/verify-sprint-12.sh    统一回归入口（Sprint 12 起）
+#   本步骤只保留"本 Sprint 的改动有没有把已验收的东西弄坏"所必需的最短链路。
 # ============================================================
 step_regression() {
-    step_start "8/8 回归（交易域对账 / Sprint 3 & 4 验收 / 服务层）"
+    step_start "8/8 回归（轻量：健康检查 / 交易域对账 / 服务可达 / 服务 active）"
 
-    # 交易域对账成果必须还在（Sprint 3 的核心结论）
+    # ---- 0. 先把移交关系打印出来（不许悄悄降低覆盖面）----
+    printf '  %b %s\n' "${C_YELLOW}[移交]${C_RESET}" \
+        "整链回归（含离线批处理）已移交： bash scripts/verify-sprint-3.sh / verify-sprint-4.sh"
+    printf '  %b %s\n' "${C_YELLOW}[移交]${C_RESET}" \
+        "统一回归入口（Sprint 12 起）：    bash scripts/verify-sprint-12.sh"
+    printf '  %b %s\n' "${C_YELLOW}[说明]${C_RESET}" \
+        "本步骤只做轻量断言，不再重跑 3/4 的整链验收 —— 那会把单项验收放大到 25 分钟以上"
+
+    # ---- 1. 健康检查（容器五件套 + 实时链路，共 11 项）----
+    #
+    # 这里就**不**再单独跑一次 grep -c 了：直接解析本步骤这一次运行的输出，
+    # 既拿到断言，又能把数字打印出来（同一件事只做一次）。
+    local hc_out hc_rc=0 hc_ok
+    hc_out="$(bash "${REPO_ROOT}/scripts/health-check.sh" 2>&1)" || hc_rc=$?
+    hc_ok="$(printf '%s\n' "${hc_out}" | grep -c '\[OK\]' || true)"
+    printf '     health-check.sh： [OK] %s 项，退出码 %s\n' "${hc_ok:-0}" "${hc_rc}"
+    check "health-check.sh 通过（退出码 0）" "0" "${hc_rc}"
+    check "health-check [OK] 项数（Sprint 1 基线）" "11" "${hc_ok:-0}"
+
+    # ---- 2. 交易域对账成果必须还在（Sprint 3 的核心结论）----
     local trade_summary
     trade_summary="$(lake_scalar 'SELECT CONCAT_WS("|", COUNT(*), SUM(CASE WHEN is_match THEN 0 ELSE 1 END)) FROM lakehouse.ads_reconcile_trade_1m;')"
     local trade_rows trade_bad
@@ -698,37 +746,40 @@ step_regression() {
         test "${trade_rows:-0}" -gt 0
     check "交易域对账不一致窗口数" "0" "${trade_bad:-0}"
 
-    # 服务层可达
+    # ---- 3. 服务层两个入口可达 ----
+    #
+    # !! 判据为什么是"2xx/3xx"而不是写死 200 !!
+    #   站点协议由 .env 的 SITE_SCHEME 决定（见 AGENTS.md 15.7 硬规范 1）。
+    #   哪天重新启用 TLS，这两个入口会给出 **301/302**；
+    #   写死 200 会把一次**配置变更**报成**功能缺陷**（Sprint 7 踩过同类坑）。
     local code
     code="$(curl_site -s -o /dev/null -w '%{http_code}' --max-time 15 "$(site_base)/data/" 2>/dev/null || echo 000)"
-    check "GET /data/ 可达（Sprint 6 未被破坏）" "200" "${code}"
+    check_true "GET /data/ 可达（Sprint 6 未被破坏）" "实际 HTTP ${code}" \
+        test "${code}" -ge 200 -a "${code}" -lt 400
 
     code="$(curl_site -s -o /dev/null -w '%{http_code}' --max-time 15 "$(site_base)/data/agent/health" 2>/dev/null || echo 000)"
-    check "GET /data/agent/health 可达（Sprint 7 未被破坏）" "200" "${code}"
+    check_true "GET /data/agent/health 可达（Sprint 7 未被破坏）" "实际 HTTP ${code}" \
+        test "${code}" -ge 200 -a "${code}" -lt 400
 
-    # Sprint 3 / 4 验收脚本必须仍通过
-    local s3_out s4_out
-    if bash "${REPO_ROOT}/scripts/verify-sprint-3.sh" >/tmp/vs5-sprint3.log 2>&1; then
-        s3_out="$(grep -E '通过 [0-9]+' /tmp/vs5-sprint3.log | tail -1)"
-        printf '  %b %-52s %s\n' "${C_GREEN}[ OK ]${C_RESET}" "verify-sprint-3.sh 仍通过" "${s3_out}"
-        PASS=$(( PASS + 1 ))
-    else
-        printf '  %b %-52s %s\n' "${C_RED}[FAIL]${C_RESET}" "verify-sprint-3.sh 失败" "见 /tmp/vs5-sprint3.log"
-        DETAILS+=("verify-sprint-3.sh 失败")
-        FAIL=$(( FAIL + 1 ))
-    fi
+    # ---- 4. 关键服务 active ----
+    #
+    # 为什么用循环列清单而不是写死某一个：这几个单元分属不同 Sprint
+    #   （api=Sprint 6、agent=Sprint 7、mcp=Sprint 10）。
+    #   这样"谁掉了"在输出里一眼可见，而不是只报一个笼统的失败。
+    local unit down=""
+    for unit in data-platform-api data-platform-agent data-platform-mcp nginx; do
+        if systemctl is-active --quiet "${unit}" 2>/dev/null; then
+            printf '  %b %-52s %s\n' "${C_GREEN}[ OK ]${C_RESET}" "服务 active： ${unit}" "active"
+            PASS=$(( PASS + 1 ))
+        else
+            printf '  %b %-52s %s\n' "${C_RED}[FAIL]${C_RESET}" "服务 active： ${unit}" "非 active"
+            DETAILS+=("systemd 单元 ${unit} 不是 active")
+            FAIL=$(( FAIL + 1 ))
+            down="${down} ${unit}"
+        fi
+    done
 
-    if bash "${REPO_ROOT}/scripts/verify-sprint-4.sh" >/tmp/vs5-sprint4.log 2>&1; then
-        s4_out="$(grep -E '通过 [0-9]+' /tmp/vs5-sprint4.log | tail -1)"
-        printf '  %b %-52s %s\n' "${C_GREEN}[ OK ]${C_RESET}" "verify-sprint-4.sh 仍通过" "${s4_out}"
-        PASS=$(( PASS + 1 ))
-    else
-        printf '  %b %-52s %s\n' "${C_RED}[FAIL]${C_RESET}" "verify-sprint-4.sh 失败" "见 /tmp/vs5-sprint4.log"
-        DETAILS+=("verify-sprint-4.sh 失败")
-        FAIL=$(( FAIL + 1 ))
-    fi
-
-    # 自动化测试
+    # ---- 5. 自动化测试（单元，毫秒级；留着是因为它便宜且直接守着业务口径）----
     local py=""
     if [ -x "${REPO_ROOT}/.venv/bin/python" ]; then
         py="${REPO_ROOT}/.venv/bin/python"
@@ -745,6 +796,10 @@ step_regression() {
         printf '  %b %-52s %s\n' "${C_RED}[FAIL]${C_RESET}" "单元测试失败" "见 /tmp/vs5-unit.log"
         DETAILS+=("单元测试失败")
         FAIL=$(( FAIL + 1 ))
+    fi
+
+    if [ -n "${down}" ]; then
+        printf '     !! 非 active 的服务： %s\n' "${down}"
     fi
 }
 
@@ -785,7 +840,7 @@ main() {
     local f7="${FAIL}"
 
     step_regression
-    step_record "回归" "$([ "${FAIL}" -eq "${f7}" ] && echo PASS || echo FAIL)"
+    step_record "回归（轻量）" "$([ "${FAIL}" -eq "${f7}" ] && echo PASS || echo FAIL)"
 
     printf '\n%b\n' "${C_BOLD}=====================================${C_RESET}"
     printf '%b\n' "${C_BOLD} Sprint 5 验收汇总${C_RESET}"
