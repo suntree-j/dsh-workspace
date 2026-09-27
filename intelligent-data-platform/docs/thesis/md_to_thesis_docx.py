@@ -30,7 +30,7 @@ from docx.enum.section import WD_SECTION
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Cm, Pt, RGBColor
+from docx.shared import Cm, Length, Pt, RGBColor
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 
@@ -56,9 +56,21 @@ CODE_LINE_PT = 14.0     # 代码块固定行距，避免中英混排把行高撑
 FOOTER_PT = 10.5
 
 PAGE_W_CM, PAGE_H_CM = 21.0, 29.7        # A4
-MARGIN_TB_CM = 2.54
-MARGIN_LR_CM = 3.17
-TEXT_WIDTH_CM = PAGE_W_CM - 2 * MARGIN_LR_CM   # 14.66 cm
+# ---------------------------------------------------------------- 页边距
+# !! 按《湖南工商大学本科生毕业论文（设计）撰写规范》㈣.9 / ㈥.4 的硬要求 !!
+#   规范原文：「页面上边距：30mm；下边距：25mm；左边距：30mm；右边距：20mm。」
+#   注意是**四边不对称**的：上=左=30mm，下=25mm，右=20mm。
+#   原先用的 2.54 / 3.17 是 Word 默认值（上下 2.54、左右 3.17），
+#   与学校要求不符 —— 形式审查会按规范核对页边距，所以必须改。
+#   同时：正文行距为**固定值 22 磅**（规范㈥.4、㈦.4），不是 1.5 倍。
+MARGIN_TOP_CM = 3.0      # 30mm
+MARGIN_BOTTOM_CM = 2.5   # 25mm
+MARGIN_LEFT_CM = 3.0     # 30mm
+MARGIN_RIGHT_CM = 2.0    # 20mm
+# 正文可用宽度 = 21 − 3.0 − 2.0 = 16.0 cm（表格列宽按它分配）
+TEXT_WIDTH_CM = PAGE_W_CM - MARGIN_LEFT_CM - MARGIN_RIGHT_CM   # 16.0 cm
+
+BODY_LINE_PT = 22.0      # 正文行距固定值 22 磅（规范要求）
 
 CODE_FILL = "F5F5F5"
 NOTE_FILL = "F7F7F7"
@@ -527,7 +539,10 @@ def _setup_styles(doc) -> None:
     normal.font.color.rgb = RGBColor(0, 0, 0)
     _style_rfonts(normal, FONT_BODY_CN, FONT_BODY_EN)
     npf = normal.paragraph_format
-    npf.line_spacing = 1.5
+    # 规范㈥.4 / ㈦.4：正文行间距为**固定值 22 磅**。
+    # 原先写 1.5 倍行距 —— 那不是规范要求的量（1.5 倍随字号变化，
+    # 而"固定值 22 磅"是绝对量），形式审查会按 22 磅核对。
+    npf.line_spacing = Pt(BODY_LINE_PT)
     npf.space_before = Pt(0)
     npf.space_after = Pt(0)
 
@@ -541,7 +556,7 @@ def _setup_styles(doc) -> None:
         pf.first_line_indent = Pt(0)
         pf.space_before = Pt(12)
         pf.space_after = Pt(6)
-        pf.line_spacing = 1.5
+        pf.line_spacing = Pt(BODY_LINE_PT)
         pf.keep_with_next = True
 
 
@@ -555,11 +570,23 @@ def _rich_paragraph(
     bold: bool = False,
     align: int | None = None,
     style: str | None = None,
-    line_spacing: float = 1.5,
+    line_spacing: float | "Length" = Pt(BODY_LINE_PT),
     space_before: float = 0.0,
     space_after: float = 0.0,
     color: RGBColor | None = None,
 ) -> Paragraph:
+    """通用段落。
+
+    !! 行距默认值必须是「固定值 22 磅」，不能是 1.5 !!
+      规范㈥.4 / ㈦.4 要求正文行间距为**固定值 22 磅**。
+      但本函数会给段落写**直接格式**（paragraph_format），
+      而直接格式的优先级高于样式 —— 所以哪怕 Normal 样式已经设成 22 磅，
+      只要这里默认写 1.5，正文段落的实际行距就还是 1.5。
+      实测证据（导出自检）：Normal 段落里出现
+        line=360 rule=auto 293 段（=1.5 倍）与 line=440 rule=exact 180 段（=22 磅）
+      两种并存 —— 前者就是被这个默认值带偏的。
+      调用方若确实需要别的行距（封面标题、页脚等），显式传参即可。
+    """
     paragraph = doc.add_paragraph(style=style)
     pf = paragraph.paragraph_format
     pf.line_spacing = line_spacing
@@ -572,7 +599,7 @@ def _rich_paragraph(
 
 
 def _body_paragraph(doc, text: str) -> Paragraph:
-    """正文段：宋体小四、1.5 倍行距、首行缩进 2 字符，英文数字 Times New Roman。"""
+    """正文段：宋体小四、行距固定值 22 磅、首行缩进 2 字符，英文数字 Times New Roman。"""
     paragraph = _rich_paragraph(doc, text)
     _set_indent(paragraph, left_cm=0.0, right_cm=0.0, first_line_pt=2 * BODY_PT,
                 first_line_chars=FIRST_LINE_CHARS)
@@ -582,7 +609,7 @@ def _body_paragraph(doc, text: str) -> Paragraph:
 def _list_paragraph(doc, marker: str, text: str, *, extra_left_cm: float = 0.0) -> Paragraph:
     paragraph = doc.add_paragraph()
     pf = paragraph.paragraph_format
-    pf.line_spacing = 1.5
+    pf.line_spacing = Pt(BODY_LINE_PT)
     pf.space_before = Pt(0)
     pf.space_after = Pt(0)
     # 悬挂缩进：编号顶到左边距，折行与文字左对齐（参考文献条目同此处理）
@@ -595,7 +622,7 @@ def _list_paragraph(doc, marker: str, text: str, *, extra_left_cm: float = 0.0) 
 def _quote_paragraph(doc, text: str, *, marker: str = "", indent_cm: float = QUOTE_LEFT_CM) -> Paragraph:
     paragraph = doc.add_paragraph()
     pf = paragraph.paragraph_format
-    pf.line_spacing = 1.5
+    pf.line_spacing = Pt(BODY_LINE_PT)
     pf.space_before = Pt(3)
     pf.space_after = Pt(3)
     _set_indent(paragraph, left_cm=indent_cm, right_cm=0.0, first_line_pt=0.0,
@@ -778,7 +805,7 @@ def _heading_paragraph(doc, block: Block) -> Paragraph:
     paragraph = doc.add_paragraph(style=f"Heading {level}")
     pf = paragraph.paragraph_format
     pf.keep_with_next = True
-    pf.line_spacing = 1.5
+    pf.line_spacing = Pt(BODY_LINE_PT)
     pf.space_before = Pt(18 if level == 1 else 12)
     pf.space_after = Pt(12 if level == 1 else 6)
     _set_indent(paragraph, left_cm=0.0, right_cm=0.0, first_line_pt=0.0, first_line_chars=0)
@@ -792,24 +819,101 @@ def _heading_paragraph(doc, block: Block) -> Paragraph:
 
 
 def _cover(doc) -> None:
+    """封面：严格按《湖南工商大学本科生毕业论文（设计）撰写规范》㈡ + 封面样式模板。
+
+    模板原文（`封面样式.docx`）的表格是 **7 行 × 2 列**：
+
+        题    目 | （空）
+        学生姓名 | （空）
+        学    号 | （空）
+        学    院 | （空）
+        专业班级 | （空）
+        指导教师 | （空）
+        职    称 | （空）
+
+    末尾另起一行是「年      月」。
+
+    !! 为什么改成"表格"而不是原先的"作者/学号/导师/日期 四行文字" !!
+    !!   学校模板是**表格**；形式审查按模板逐项核对，少一项（学院/专业班级/职称）
+    !!   或多出一项（"作者""导师"都不是模板用词）都会被要求返工。
+    !!   所以这里把字段名与顺序**照抄模板**，不自己发明。
+    """
     def blank(count: int) -> None:
         for _ in range(count):
             _empty_paragraph(doc)
 
-    blank(5)
-    _rich_paragraph(doc, "________大学", size=22, cn=FONT_HEADING, en=FONT_HEADING, bold=True,
+    blank(4)
+    _rich_paragraph(doc, "湖南工商大学", size=26, cn=FONT_HEADING, en=FONT_HEADING, bold=True,
                     align=WD_ALIGN_PARAGRAPH.CENTER, line_spacing=1.0)
-    _rich_paragraph(doc, "本科毕业设计（论文）", size=18, cn=FONT_HEADING, en=FONT_HEADING,
+    _rich_paragraph(doc, "本科毕业设计（论文）", size=20, cn=FONT_HEADING, en=FONT_HEADING,
                     bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, line_spacing=1.0)
-    blank(5)
+    blank(4)
     _rich_paragraph(doc, _COVER_MAIN, size=22, cn=FONT_HEADING, en=FONT_HEADING, bold=True,
                     align=WD_ALIGN_PARAGRAPH.CENTER, line_spacing=1.5)
-    _rich_paragraph(doc, _COVER_SUB, size=16, cn=FONT_HEADING, en=FONT_HEADING, bold=True,
-                    align=WD_ALIGN_PARAGRAPH.CENTER, line_spacing=1.5)
-    blank(9)
-    for label in ("作者", "学号", "导师", "日期"):
-        _rich_paragraph(doc, f"{label}：______", size=14, align=WD_ALIGN_PARAGRAPH.CENTER,
-                        line_spacing=1.5)
+    if _COVER_SUB:
+        _rich_paragraph(doc, _COVER_SUB, size=16, cn=FONT_HEADING, en=FONT_HEADING, bold=True,
+                        align=WD_ALIGN_PARAGRAPH.CENTER, line_spacing=1.5)
+    blank(3)
+
+    # 字段名照抄学校模板（含模板里的空格排版），值为占位符
+    cover_rows = (
+        ("题    目", _COVER_MAIN),
+        ("学生姓名", COVER_FIELDS.get("name", "")),
+        ("学    号", COVER_FIELDS.get("sid", "")),
+        ("学    院", COVER_FIELDS.get("college", "")),
+        ("专业班级", COVER_FIELDS.get("cls", "")),
+        ("指导教师", COVER_FIELDS.get("teacher", "")),
+        ("职    称", COVER_FIELDS.get("title", "")),
+    )
+    table = doc.add_table(rows=len(cover_rows), cols=2)
+    table.style = "Table Grid"
+    table.autofit = False
+    # 左列放字段名（3.2cm），右列放内容（其余宽度）
+    label_w, value_w = 3.2, TEXT_WIDTH_CM - 3.2
+    for ri, (label, value) in enumerate(cover_rows):
+        row = table.rows[ri]
+        row.height = Cm(1.0)
+        for ci, (cell, text) in enumerate(zip(row.cells, (label, value))):
+            cell.width = Cm(label_w if ci == 0 else value_w)
+            para = cell.paragraphs[0]
+            para.alignment = (WD_ALIGN_PARAGRAPH.CENTER if ci == 0
+                              else WD_ALIGN_PARAGRAPH.CENTER)
+            para.paragraph_format.line_spacing = 1.0
+            _set_indent(para, left_cm=0.0, right_cm=0.0, first_line_pt=0.0, first_line_chars=0)
+            _add_inline_runs(para, text or "", size=14.0,
+                             cn=FONT_BODY_CN, en=FONT_BODY_EN,
+                             bold=(ci == 0))
+    blank(2)
+    _rich_paragraph(doc, COVER_FIELDS.get("date", "年      月"), size=14,
+                    align=WD_ALIGN_PARAGRAPH.CENTER, line_spacing=1.0)
+
+
+def _integrity_page(doc) -> None:
+    """诚信声明（规范二㈢.2：排在封面之后、摘要之前，**页脚不标页码**）。
+
+    正文照抄学校模板（`1.湖南工商大学本科生毕业论文管理规范汇总` 第 498-501 行），
+    只把"作者签名/日期"留空待手写 —— 声明内容一个字都不能改。
+    """
+    _rich_paragraph(doc, "湖南工商大学本科毕业论文（设计）诚信声明", size=16,
+                    cn=FONT_HEADING, en=FONT_HEADING, bold=True,
+                    align=WD_ALIGN_PARAGRAPH.CENTER, line_spacing=1.5,
+                    space_before=12, space_after=12)
+    _rich_paragraph(
+        doc,
+        "本人郑重声明：所呈交的本科毕业论文（设计）"
+        "《基于 Lakehouse 与 AI Agent 的批流一体智能数据分析平台》"
+        "是本人在指导老师的指导下，独立进行研究工作所取得的成果，成果不存在知识产权争议，"
+        "除文中已经注明引用的内容外，本论文（设计）不含任何其他个人或集体已经发表或撰写过的"
+        "作品成果。对本文的研究做出重要贡献的个人和集体均已在文中以明确方式标明。"
+        "本人完全意识到本声明的法律结果由本人承担。",
+        size=BODY_PT, line_spacing=Pt(BODY_LINE_PT),
+    )
+    for _ in range(3):
+        _empty_paragraph(doc)
+    _rich_paragraph(doc, "作者签名：________________", size=BODY_PT,
+                    align=WD_ALIGN_PARAGRAPH.RIGHT, line_spacing=1.5)
+    _rich_paragraph(doc, "日期：        年     月     日", size=BODY_PT,
+                    align=WD_ALIGN_PARAGRAPH.RIGHT, line_spacing=1.5)
 
 
 def _toc_page(doc, notes: list[Block]) -> None:
@@ -868,25 +972,70 @@ def _body(doc, blocks: list[Block]) -> None:
         previous = block.kind
 
 
+def _rich_paragraph_into(paragraph: Paragraph, text: str, *, size: float,
+                         cn: str = FONT_BODY_CN, en: str = FONT_BODY_EN,
+                         bold: bool = False) -> None:
+    """把一段文字追加进**已有**段落（用于页眉/页脚）。
+
+    为什么需要它：`_rich_paragraph` 内部会 `doc.add_paragraph()` 新建段落，
+    而页眉页脚的第 0 段是 Word 预置好的 —— 再新建就会多出一个空段，
+    表现为"页眉上方多一条空白行"。所以这里只做 run 级追加。
+    """
+    _add_inline_runs(paragraph, text, size=size, cn=cn, en=en, bold=bold)
+
+
 def _setup_sections(doc) -> None:
     for section in doc.sections:
         section.page_width = Cm(PAGE_W_CM)
         section.page_height = Cm(PAGE_H_CM)
-        section.top_margin = Cm(MARGIN_TB_CM)
-        section.bottom_margin = Cm(MARGIN_TB_CM)
-        section.left_margin = Cm(MARGIN_LR_CM)
-        section.right_margin = Cm(MARGIN_LR_CM)
+        section.top_margin = Cm(MARGIN_TOP_CM)
+        section.bottom_margin = Cm(MARGIN_BOTTOM_CM)
+        section.left_margin = Cm(MARGIN_LEFT_CM)
+        section.right_margin = Cm(MARGIN_RIGHT_CM)
         section.header_distance = Cm(1.5)
         section.footer_distance = Cm(1.75)
 
-    # 封面单独一节（无页脚）；其后所有页页码从 1 开始，页脚居中页码
+    # ------------------------------------------------------------
+    # 页眉：规范㈦.10「页眉设计为"湖南工商大学毕业论文（设计）"，页脚设计为
+    #       "第 页 共 页"式样，均居中设置，小五号宋体，从论文（设计）正文
+    #       所在页开始计算」
+    #
+    # !! "从正文所在页开始计算"要落到 section 上，而不是靠"某一页不写" !!
+    #   本文件的节划分是：封面节 / 摘要节 / 正文节。因此页眉页脚只在
+    #   **正文节**设置，前面两节显式 is_linked_to_previous = False 且留空 ——
+    #   否则 Word 会把正文节的页眉页脚**向前继承**，摘要页也会长出页眉。
+    # ------------------------------------------------------------
     body_section = doc.sections[-1]
+    body_section.header.is_linked_to_previous = False
+    header_para = body_section.header.paragraphs[0]
+    header_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    header_para.paragraph_format.line_spacing = 1.0
+    _set_indent(header_para, left_cm=0.0, right_cm=0.0, first_line_pt=0.0, first_line_chars=0)
+    _rich_paragraph_into(header_para, "湖南工商大学毕业论文（设计）", size=FOOTER_PT,
+                         cn=FONT_BODY_CN, en=FONT_BODY_EN)
+
     body_section.footer.is_linked_to_previous = False
     footer_para = body_section.footer.paragraphs[0]
     footer_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
     footer_para.paragraph_format.line_spacing = 1.0
     _set_indent(footer_para, left_cm=0.0, right_cm=0.0, first_line_pt=0.0, first_line_chars=0)
+    # 页脚样式：「第 X 页 共 Y 页」（规范原文式样），X/Y 都是 Word 域
+    _rich_paragraph_into(footer_para, "第 ", size=FOOTER_PT, cn=FONT_BODY_CN, en=FONT_BODY_EN)
     _add_field(footer_para, " PAGE ", "1", size=FOOTER_PT, cn=FONT_BODY_CN, en=FONT_BODY_EN)
+    _rich_paragraph_into(footer_para, " 页 共 ", size=FOOTER_PT, cn=FONT_BODY_CN, en=FONT_BODY_EN)
+    _add_field(footer_para, " NUMPAGES ", "1", size=FOOTER_PT, cn=FONT_BODY_CN, en=FONT_BODY_EN)
+    _rich_paragraph_into(footer_para, " 页", size=FOOTER_PT, cn=FONT_BODY_CN, en=FONT_BODY_EN)
+
+    # 前置节（封面 / 摘要）不继承正文节的页眉页脚。
+    # 规范㈡ 说封面"按照学校统一规定的封面样式打印"，摘要页页码用罗马数字，
+    # 这里先做到"不出现正文页眉页脚"；罗马页码由 _roman_front_matter 处理。
+    for section in doc.sections[:-1]:
+        section.header.is_linked_to_previous = False
+        section.footer.is_linked_to_previous = False
+        for p in list(section.header.paragraphs):
+            p.text = ""
+        for p in list(section.footer.paragraphs):
+            p.text = ""
 
     sectPr = body_section._sectPr
     pg_num = OxmlElement("w:pgNumType")
@@ -911,33 +1060,99 @@ def _enable_update_fields(doc) -> None:
 _COVER_MAIN = ""
 _COVER_SUB = ""
 
+# ---------------------------------------------------------------- 封面/声明 填表信息
+# 由学生本人提供，来源为答辩与附件材料填报；改这里即可同时更新
+# 封面表格、诚信声明落款等所有需要这一组信息的位置。
+COVER_FIELDS: dict[str, str] = {
+    "name": "蒋树阳",
+    "sid": "2325010007",
+    "college": "前沿交叉学院",
+    "cls": "大数据2303",
+    "teacher": "陈杰",
+    "title": "副教授",
+    "grade": "2027",          # 届别
+    "date": "2027 年   月",   # 封面底部「年  月」
+}
+
 
 def build_document(blocks: list[Block], title: str) -> "Document":
-    """组装整个文档：封面 → 目录 → 正文（摘要起单独分页）。"""
+    """组装整个文档。
+
+    !! 装订顺序按《湖南工商大学本科生毕业论文（设计）撰写规范》三㈢ !!
+        1.封面  2.中文摘要及关键词  3.英文摘要及关键词  4.目录  5.正文
+        6.参考文献  7.符号说明  8.附录  9.致谢
+        （另据二㈢.2：**诚信声明排在封面之后、摘要之前，且页脚不标页码**）
+
+    !! 与原先实现的差别 !!
+       原先的顺序是「封面 → 目录 → 正文」，把摘要当普通正文段落；
+       而规范要求摘要在目录**之前**、且中英文摘要各自单独成页。
+       所以这里改成：封面节 → 诚信声明 → [中文摘要节] → [英文摘要节] → 正文节，
+       每个节点用 `add_section(NEW_PAGE)` 真正**分节**（不是靠空段落顶开），
+       这样"页眉页脚从正文页开始"才有可挂靠的节边界。
+    """
     global _COVER_MAIN, _COVER_SUB
     _COVER_MAIN, _COVER_SUB = _split_cover_title(title)
 
     doc = Document()
     _setup_styles(doc)
+
+    # ---- ① 封面 ----
     _cover(doc)
     doc.add_section(WD_SECTION.NEW_PAGE)
 
-    # 首个 "#" 一级标题是报告题目：已放到封面，正文不再重复；
-    # 它后面、下一个标题之前的引用块是“草稿说明”，放到目录页（正文不重复）。
+    # ---- ② 诚信声明（规范要求：页脚不标页码）----
+    _integrity_page(doc)
+
+    # ---- 定位正文章节：首个 "N. " 形式的一级标题（工科编号）----
+    #   兼容两种写法：新的 "1. 绪论" 与旧的 "第 1 章 绪论"，
+    #   这样即使正文还没改编号，也不会把摘要当成正文起点。
+    def _is_body_chapter(b: "Block") -> bool:
+        if b.kind != "heading" or b.level != 1:
+            return False
+        return bool(re.match(r"^\s*(第\s*\d+\s*章|\d+[\.、]\s*\S)", b.text or ""))
+
+    body_idx = next((i for i, b in enumerate(blocks) if _is_body_chapter(b)), -1)
+
+    # 首个 "#" 一级标题是报告题目（已上封面，正文不再重复）；
+    # 其后的引用块是"草稿说明"，放到目录页。
     title_idx = next(
         (i for i, b in enumerate(blocks) if b.kind == "heading" and b.level == 1), -1
     )
-    body_start = 0
+    start = title_idx + 1 if title_idx >= 0 else 0
     notes: list[Block] = []
-    if title_idx >= 0:
-        body_start = title_idx + 1
-        while body_start < len(blocks) and blocks[body_start].kind != "heading":
-            if blocks[body_start].kind in ("quote", "para"):
-                notes.append(blocks[body_start])
-            body_start += 1
+    scan = start
+    while scan < len(blocks) and not _is_body_chapter(blocks[scan]):
+        if blocks[scan].kind in ("quote", "para"):
+            notes.append(blocks[scan])
+        scan += 1
+
+    front = blocks[start:body_idx] if body_idx >= 0 else []
+    body = blocks[body_idx:] if body_idx >= 0 else blocks[start:]
+
+    # ---- ③④ 摘要：中文摘要 / 英文摘要 各自单独成页 ----
+    #   规范㈣.10「中文摘要与关键词单独为一页」、㈤.8「英文摘要与关键词单独为一页」。
+    abs_split = next(
+        (i for i, b in enumerate(front)
+         if b.kind == "heading" and re.match(r"^\s*(ABSTRACT|Abstract)\s*$", b.text or "")),
+        -1,
+    )
+    zh = front[:abs_split] if abs_split >= 0 else front
+    en = front[abs_split:] if abs_split >= 0 else []
+
+    if zh:
+        _body(doc, zh)
+    if en:
+        doc.add_section(WD_SECTION.NEW_PAGE)
+        _body(doc, en)
+
+    # ---- ⑤ 目录 ----
+    doc.add_section(WD_SECTION.NEW_PAGE)
     _toc_page(doc, notes)
 
-    _body(doc, blocks[body_start:])
+    # ---- ⑥~⑨ 正文（含参考文献/附录/致谢，它们本身是正文的一级标题）----
+    doc.add_section(WD_SECTION.NEW_PAGE)
+    _body(doc, body)
+
     _setup_sections(doc)
     _enable_update_fields(doc)
     return doc
@@ -1009,22 +1224,56 @@ def verify(path: Path, sample: int = 200) -> None:
     assert len(tables) > 0, "文档里没有表格"
     assert headings[1] > 5, f"Heading 1 数量不足：{headings[1]}"
 
-    # ---- 页面：A4 + 页边距 ----
+    # ---- 页面：A4 + 页边距（四边不对称，按学校规范逐边断言）----
     section = doc.sections[-1]
-    LOG.info("页面 A4         : %.1f x %.1f cm，边距 上下 %.2f / 左右 %.2f cm",
-             section.page_width.cm, section.page_height.cm,
-             section.top_margin.cm, section.left_margin.cm)
+    LOG.info("页面 A4         : %.1f x %.1f cm", section.page_width.cm, section.page_height.cm)
+    LOG.info("页边距          : 上 %.2f / 下 %.2f / 左 %.2f / 右 %.2f cm",
+             section.top_margin.cm, section.bottom_margin.cm,
+             section.left_margin.cm, section.right_margin.cm)
     assert abs(section.page_width.cm - PAGE_W_CM) < 0.05
     assert abs(section.page_height.cm - PAGE_H_CM) < 0.05
-    assert abs(section.top_margin.cm - MARGIN_TB_CM) < 0.02
-    assert abs(section.left_margin.cm - MARGIN_LR_CM) < 0.02
+    # 规范㈣.9：上 30mm / 下 25mm / 左 30mm / 右 20mm —— 四条边都要核
+    assert abs(section.top_margin.cm - MARGIN_TOP_CM) < 0.02, "上边距不符合 30mm"
+    assert abs(section.bottom_margin.cm - MARGIN_BOTTOM_CM) < 0.02, "下边距不符合 25mm"
+    assert abs(section.left_margin.cm - MARGIN_LEFT_CM) < 0.02, "左边距不符合 30mm"
+    assert abs(section.right_margin.cm - MARGIN_RIGHT_CM) < 0.02, "右边距不符合 20mm"
 
-    # ---- 表格：Table Grid / 表头重复 / 底纹 / 字号 ----
+    # ---- 页眉页脚：规范㈦.10 要求页眉「湖南工商大学毕业论文（设计）」、
+    #      页脚「第 页 共 页」----
+    header_txt = "".join(p.text for p in section.header.paragraphs)
+    footer_txt = "".join(p.text for p in section.footer.paragraphs)
+    LOG.info("页眉            : %r", header_txt.strip())
+    LOG.info("页脚            : %r", footer_txt.strip())
+    assert "湖南工商大学毕业论文（设计）" in header_txt, "页眉缺少学校规定的文字"
+    assert "第" in footer_txt and "页" in footer_txt and "共" in footer_txt, \
+        "页脚不符合「第 页 共 页」式样"
+
+    # ---- 前置部分不得带正文页眉（规范：页眉从正文页开始）----
+    front_sections = doc.sections[:-1]
+    leaked = [i for i, s in enumerate(front_sections)
+              if "湖南工商大学毕业论文（设计）" in "".join(p.text for p in s.header.paragraphs)]
+    assert not leaked, f"前置节 {leaked} 泄漏了正文页眉"
+
+    # ---- 表格：Table Grid / 表头重复 / 底纹 ----
+    # !! 封面表与数据表是**两类**表，判据必须分开 !!
+    #   封面那张表是学校模板的"题目/学生姓名/…"表单：只有 1 页、没有表头概念，
+    #   **不应**设置 tblHeader（设了会在换页时重复整行）。
+    #   正文里的数据表才要求"跨页重复表头 + 表头底纹"。
+    #   原先的断言 `repeats == len(tables)` 把两类混在一起比，
+    #   加了封面表之后必然失败 —— 而失败的原因是"封面表不该重复"，
+    #   那是**正确的行为**，所以要改的是判据，不是封面表。
+    def _is_cover_table(t) -> bool:
+        if len(t.columns) != 2 or len(t.rows) != 7:
+            return False
+        return t.cell(0, 0).text.strip().replace(" ", "") == "题目"
+
+    data_tables = [t for t in tables if not _is_cover_table(t)]
+    cover_tables = [t for t in tables if _is_cover_table(t)]
+    LOG.info("封面表          : %d 张（1 页表单，不要求跨页重复表头）", len(cover_tables))
+
     repeats = 0
     shaded = 0
-    for table in tables:
-        if table.style is not None and table.style.name == "Table Grid":
-            pass
+    for table in data_tables:
         trPr = table.rows[0]._tr.find(qn("w:trPr"))
         if trPr is not None and trPr.find(qn("w:tblHeader")) is not None:
             repeats += 1
@@ -1034,16 +1283,32 @@ def verify(path: Path, sample: int = 200) -> None:
             shaded += 1
     grid = sum(1 for t in tables if t.style is not None and t.style.name == "Table Grid")
     LOG.info("表格样式/表头  : Table Grid %d/%d，重复表头 %d/%d，表头底纹 %d/%d",
-             grid, len(tables), repeats, len(tables), shaded, len(tables))
+             grid, len(tables), repeats, len(data_tables), shaded, len(data_tables))
     assert grid == len(tables), "有表格没有套用 Table Grid"
-    assert repeats == len(tables), "存在未设置 tblHeader 的表头"
+    assert repeats == len(data_tables), "存在未设置 tblHeader 的数据表表头"
 
-    # ---- 正文版式：1.5 倍行距 + 首行缩进 2 字符 + 宋体/Times New Roman ----
-    body_from = next(
-        (i for i, p in enumerate(paragraphs)
-         if p.style.name == "Heading 2" and p.text.strip() == "摘要"), 0
-    )
+    # ---- 正文版式：**行距固定值 22 磅** + 首行缩进 2 字符 + 宋体/Times New Roman ----
+    #   规范㈥.4 / ㈦.4 写的是"行间距为固定值 22 磅"。
+    #   Word 用 w:spacing 的 w:line + w:lineRule 表达行距：
+    #     固定值 22 磅 → line="440"（22 × 20 = 440 twips）+ lineRule="exact"
+    #     1.5 倍行距    → line="360" + lineRule="auto"
+    #
+    # !! 判据的**起点必须是正文第一页**，不能从"摘要"或"目录"开始 !!
+    #   规范㈣.10 要求"中文摘要与关键词单独为一页"、目录页也有自己的排版
+    #   （目录条目按规范㈥.2 用"固定值 22"，但页首的 TOC 域与说明文字不是正文段落）。
+    #   实测踩到的坑：把起点设在"摘要"时，目录页的 3 个段落（TOC 域、提示语、
+    #   目录标题）被算进正文，计数 462/465 恒不相等 —— 而它们**本来就不该按正文行距**。
+    #   所以这里把起点定位到"第一个一级标题"（正文第一章），逐段核到文末。
+    body_from = 0
+    for i, p in enumerate(paragraphs):
+        if p.style is not None and p.style.name == "Heading 1" and p.text.strip():
+            body_from = i
+            break
+    LOG.info("正文起点        : 第 %d 段（%r）", body_from, paragraphs[body_from].text.strip()[:30]
+             if body_from < len(paragraphs) else "")
+    expect_line = str(int(round(BODY_LINE_PT * 20)))   # 22 磅 → 440
     spacing_ok = indent_ok = font_ok = body_count = code_count = 0
+    spacing_bad: list[str] = []
     for paragraph in paragraphs[body_from:]:
         if _is_code_paragraph(paragraph):
             code_count += 1
@@ -1055,8 +1320,11 @@ def verify(path: Path, sample: int = 200) -> None:
             pPr = paragraph._p.find(qn("w:pPr"))
             spacing = pPr.find(qn("w:spacing")) if pPr is not None else None
             ind = pPr.find(qn("w:ind")) if pPr is not None else None
-            if spacing is not None and spacing.get(qn("w:line")) == "360":
+            if spacing is not None and spacing.get(qn("w:line")) == expect_line \
+                    and spacing.get(qn("w:lineRule")) == "exact":
                 spacing_ok += 1
+            elif len(spacing_bad) < 5:
+                spacing_bad.append(paragraph.text.strip()[:30])
             if ind is not None and ind.get(qn("w:firstLineChars")) == str(FIRST_LINE_CHARS):
                 indent_ok += 1
         for run in paragraph.runs:
@@ -1066,10 +1334,13 @@ def verify(path: Path, sample: int = 200) -> None:
                     and rFonts.get(qn("w:eastAsia")) == FONT_BODY_CN:
                 font_ok += 1
                 break
-    LOG.info("正文段落        : %d 个（Normal 非空），其中 1.5 倍行距 %d、首行缩进 2 字符 %d",
-             body_count, spacing_ok, indent_ok)
+    LOG.info("正文段落        : %d 个（Normal 非空），其中行距固定值 %.0f 磅 %d、首行缩进 2 字符 %d",
+             body_count, BODY_LINE_PT, spacing_ok, indent_ok)
     LOG.info("代码块段落      : %d", code_count)
-    assert body_count > 0 and spacing_ok == body_count, "有正文段落不是 1.5 倍行距"
+    if spacing_bad:
+        LOG.warning("行距不符的段落样例：%s", " | ".join(spacing_bad))
+    assert body_count > 0 and spacing_ok == body_count, \
+        f"有正文段落不是行距固定值 {BODY_LINE_PT:.0f} 磅（规范要求）"
     assert indent_ok > 0, "没有任何段落设置首行缩进 2 字符"
 
     # ---- 列表与参考文献：悬挂缩进 ----

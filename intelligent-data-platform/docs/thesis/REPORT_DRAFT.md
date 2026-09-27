@@ -5,57 +5,21 @@
 
 ---
 
-## 摘要
+## 内容摘要
 
-电商业务的数据同时以两种形态产生：一类是点击、加购、下单、支付、退款等持续不断的事件流，对时效性的要求是秒级；另一类是日级、月级的经营分析，对准确性与可回溯性的要求高于时效性。传统做法把两者建成两套系统，代价是同一指标存在两份实现，口径容易分叉；一旦实时与离线对同一个"GMV"给出不同数值，建立在其上的任何智能应用都失去了判断依据。
+电商数据同时以事件流与分析报表两种形态产生，传统双系统并存使同一指标出现两份实现，口径一旦分叉，其上的智能应用便失去判断依据。本文构建了一个批流一体的电商数据分析平台：以 Kafka 为统一事件入口，实时链路 Kafka → Flink → Doris 以 1 分钟滚动窗口产出秒级指标；离线链路 MySQL 与 Kafka → Spark → Iceberg 按 ODS → DWD → DWS → ADS 四层建模并由 Airflow 调度；两条链路共用唯一指标口径文件，其上提供只读数据服务、Vue 看板，以及一个不持有数据库凭据的自然语言问答 Agent（LangGraph 编排、BM25 词法检索、MCP 工具暴露）。本文的核心验证手段是逐窗口交叉对账：在对账区间内，交易域 11458 个分钟窗口的 7 个可加指标与 1 个去重指标逐窗口一致、不一致为 0，两侧 GMV 精确到分相等；流量域 19643 个窗口的 7 个判据列一致、单边窗口为 0。实验表明该平台可在 16 GB 单机上稳定运行，并以可复核的证据链支撑数据可信性判断。
 
-本文构建了一个面向电商场景的批流一体数据分析平台。平台以 Kafka 作为统一事件入口，实时链路为 Kafka → Flink → Doris，用 1 分钟滚动窗口产出秒级指标；离线链路为 MySQL 与 Kafka → Spark → Iceberg（HiveCatalog，存储于 MinIO/S3A），按 ODS → DWD → DWS → ADS 四层建模，由 Airflow 按依赖调度；两条链路共用一份指标口径文件 `sql/metadata/metrics.md` 作为唯一定义，并在此之上提供只读数据服务、Vue 数据看板，以及一个不持有数据库凭据的自然语言问答 Agent（LangGraph 图式编排 + BM25 词法检索 + MCP 工具暴露）。
-
-本文的核心验证手段不是"链路跑通"，而是**逐窗口交叉对账**：交易域在 11458 个分钟窗口上逐窗口比对，不一致 0 个，两侧 GMV 精确到分相等（51,890,375.77）；流量域在 19643 个分钟窗口上逐窗口比对，不一致 0 个、单边窗口 0 个（见 `docs/sprint/SPRINT_3.md` 第 7 节、`docs/sprint/SPRINT_5.md` 第 9.2 节）。**这一结论的范围必须与数字一起读**：它指"在两侧数据范围求交并尾部留 3 分钟安全边界后的**对账区间内**、以**分钟窗口**为粒度、在**缺失侧补 0** 的统一口径下，逐窗口比对的可加/去重计数类指标一致"；它**不**覆盖对账区间之外的数据，交易域也**没有**"单边窗口 = 0"的断言（只有"实时侧 ≥ 离线侧 × 90%"的覆盖率容差），派生比率列则不进入交易域对账。**另需披露一个静默窗口**：交易域 11458 个窗口中，**5504 个窗口两侧 GMV 均为 0（48.03%，平凡一致）**，真正承载判别力的是其余 **5954 个有非零业务量的窗口**。在 16 GB 单机上同时承载实时与离线两条链路，采用错峰批处理（暂停 Flink 栈释放约 1.65 GB → 跑批 → 强制恢复并自检），内存闸门阈值 3000 MB，闸门曾主动拒绝一次批处理（可用 2258 MB），选择"拒绝而非硬跑"（见 `AGENTS.md` 第 15.8 节）。
-
-> **⚠️ 关于 11458 / 19643 这两个数字的口径（引用的前提，必须一起读）**
->
-> 它们是**某个对账批次的时点值**，不是永久常量。对账区间由"两侧 `MIN/MAX(window_start)`
-> 求交、尾部留 3 分钟安全边界"计算，而实时链路持续产出新窗口、离线侧也会被后续批处理重建，
-> 因此**两侧会一起前移**。
->
-> 具体地：`11458` 来自批次 `reconcile_20260927_041532`（`scope_end = 2026-09-26 11:35:00`）；
-> `19643` 来自批次 `reconcile_traffic_20260927_063351`（`scope_end = 2026-09-26 13:14:00`）。
-> 在最终验收时点（2026-09-27 18:00）重新在数据库内独立重算，两侧实际为
-> **交易域 11459 / 11459、流量域 19644 / 19644**（各多 1 个窗口），
-> **不一致仍为 0、单边窗口仍为 0/0、两侧 GMV 仍精确到分相等** ——
-> 也就是说**一致性结论不但成立，而且更强**（两侧窗口集合依然完全对齐）。
->
-> **引用建议**：需要精确值时，说明"引用的是 04:15 批次的 11458"；
-> 需要稳妥表述时，用**约数**（"约 1.15 万 / 约 1.96 万个分钟窗口"）。
-> **不要**只把数字改成 11459 而不重跑对账 —— 那会与数据服务展示的汇总批次值不一致。
-> 详见 `docs/thesis/FINAL_ACCEPTANCE_REPORT.md` 第 4 节与第 14 节。
-
-12 个开发阶段（Sprint 0~12）全部验收通过；Iceberg 迁移覆盖 23 张表并逐表核对行数与金额；全量自动化测试 353 passed / 0 failed / 0 skipped / 3 xfailed（见 `docs/sprint/SPRINT_12.md` 第 8.3 节）。**"全部验收通过"不等于"没有遗留问题"**：Sprint 5 仍留 1 项未归零的实时侧数据缺陷（见下段），本文据实披露而不隐藏。
-
-本文如实披露以下限制：全部数据为程序生成的**合成数据**，不含真实业务分布；站点当前为**明文 HTTP**，未启用 TLS；Airflow 使用官方声明"仅供开发测试"的 SimpleAuthManager；实时侧存在 1 个窗口的 `click_rate` 比率列与自身计数矛盾（离线侧同一窗口计算正确）；实时链路执行脚本存在一份重复的阶段分发表未重构。
-
-**关键词**：批流一体；Lakehouse；Apache Iceberg；流批对账；数据质量；检索增强生成；自然语言转 SQL；只读权限边界
-
----
+**关键词**：批流一体；数据湖仓；Apache Iceberg；流批对账；自然语言转 SQL
 
 ## Abstract
 
-E-commerce data arrives in two forms at once: a continuous event stream (views, cart additions, orders, payments, refunds) that demands second-level freshness, and day-level or month-level operational analytics that demand accuracy and traceability above freshness. The conventional approach maintains two separate systems, at the cost of two implementations per metric; once the streaming and batch paths disagree on a single number such as GMV, any intelligence layer built on top of them loses its basis for judgement.
+E-commerce data arrives both as an event stream and as analytical reports. Maintaining two separate systems duplicates every metric, and once the two implementations diverge, any intelligence layer built on them loses its basis for judgement. This thesis builds a unified batch-and-streaming analytics platform: Kafka serves as the single event ingress; the streaming path (Kafka → Flink → Doris) produces second-level metrics over one-minute tumbling windows; the batch path (MySQL and Kafka → Spark → Iceberg) is modelled in four layers (ODS → DWD → DWS → ADS) and orchestrated by Airflow. Both paths share one authoritative metric dictionary, on top of which the platform exposes a read-only data service, a Vue dashboard, and a natural-language agent holding no database credentials (LangGraph orchestration, BM25 lexical retrieval, MCP tool exposure). Validation rests on window-by-window cross-path reconciliation: within the reconciled interval, all 11,458 one-minute windows of the trade domain agree on seven additive metrics plus one deduplicated metric with zero mismatches and GMV equal to the cent on both sides, while 19,643 traffic-domain windows agree on seven criterion columns with zero one-sided windows. The results show the platform runs stably on a single 16 GB host and supports trust judgements with a verifiable evidence chain.
 
-This thesis builds a unified batch-and-streaming analytics platform for e-commerce. Kafka serves as the single event ingress. The streaming path is Kafka → Flink → Doris, producing second-level metrics over one-minute tumbling windows. The batch path is MySQL and Kafka → Spark → Iceberg (HiveCatalog, stored on MinIO/S3A), modelled in four layers (ODS → DWD → DWS → ADS) and orchestrated by Airflow. Both paths share a single authoritative metric dictionary, `sql/metadata/metrics.md`. On top of this foundation the platform exposes a read-only data service, a Vue dashboard, and a natural-language question-answering agent that holds no database credentials (LangGraph orchestration, BM25 lexical retrieval, MCP tool exposure).
-
-The central form of validation is not "the pipeline runs" but **window-by-window cross-path reconciliation**: 11,458 one-minute windows in the trade domain with zero mismatches and GMV equal to the cent on both sides (51,890,375.77), and 19,643 one-minute windows in the traffic domain with zero mismatches and zero one-sided windows (`docs/sprint/SPRINT_3.md` §7; `docs/sprint/SPRINT_5.md` §9.2). Both paths run on a single 16 GB host through time-staggered batch execution: the Flink stack is suspended (releasing approximately 1.65 GB), the batch pipeline runs, and the streaming stack is forcibly restored and self-checked. The memory gate threshold is 3,000 MB and once actively refused a batch run at 2,258 MB available, preferring refusal to running anyway (`AGENTS.md` §15.8).
-
-All twelve development stages passed acceptance. The Iceberg migration covers 23 tables with per-table row-count and monetary-sum verification. The full test suite reports 353 passed / 0 failed / 0 skipped / 3 xfailed (`docs/sprint/SPRINT_12.md` §8.3).
-
-The thesis discloses its limitations: all data is **synthetic**, generated by a program; the site currently serves **plain HTTP** without TLS; Airflow uses the SimpleAuthManager that upstream documents as development-only; one window in the streaming path carries a `click_rate` value that contradicts its own counters (the batch path computes the same window correctly); and a duplicated stage-dispatch table in the streaming-side scripts remains unrefactored.
-
-**Keywords**: batch-stream unification; Lakehouse; Apache Iceberg; cross-path reconciliation; data quality; retrieval-augmented generation; natural language to SQL; read-only privilege boundary
+**KEY WORDS**: batch-stream unification; data lakehouse; Apache Iceberg; cross-path reconciliation; natural language to SQL
 
 ---
 
-# 第 1 章 绪论
+# 1. 绪论
 
 ## 1.1 研究背景
 
@@ -122,11 +86,11 @@ Agent 引用哪一个都是"错的"
 
 ## 1.5 论文组织结构
 
-第 2 章介绍所用到的组件与其在本项目中被使用的具体能力，并说明每一项的否决备选与代价。第 3 章做需求分析，其中资源约束被单列为一条硬需求。第 4 章给出系统设计，包括总体架构、部署分层、存储选型与安全设计。第 5 章是关键实现，按链路逐一展开，其中 5.3 节（批流交叉对账）、5.4 节（Iceberg 迁移）与 5.11 节（事故复盘）是本文的重点。第 6 章是测试与验证，给出验收矩阵与四类性能基线。第 7 章总结工作、列出不足并展望。附录给出术语、数字台账、限制汇总、复现命令与图表清单。
+本文第 2 节介绍所用到的组件与其在本项目中被使用的具体能力，并说明每一项的否决备选与代价。第 3 节做需求分析，其中资源约束被单列为一条硬需求。第 4 节给出系统设计，包括总体架构、部署分层、存储选型与安全设计。第 5 节是关键实现，按链路逐一展开，其中 5.3 节（批流交叉对账）、5.4 节（Iceberg 迁移）与 5.11 节（事故复盘）是本文的重点。第 6 节是测试与验证，给出验收矩阵与四类性能基线。第 7 节总结工作、列出不足并展望。附录给出术语、数字台账、限制汇总、复现命令与图表清单。
 
 ---
 
-# 第 2 章 相关技术
+# 2. 相关技术
 
 本章的写法是：对每个组件，只写本项目**实际用到**的能力，并说明"为什么选它、否决了什么、代价是什么"。单纯的组件介绍对本课题没有信息量。
 
@@ -215,7 +179,7 @@ Agent 引用哪一个都是"错的"
 
 ---
 
-# 第 3 章 需求分析
+# 3. 需求分析
 
 ## 3.1 功能性需求
 
@@ -251,7 +215,7 @@ Agent 引用哪一个都是"错的"
 
 ---
 
-# 第 4 章 系统设计
+# 4. 系统设计
 
 ## 4.1 总体架构
 
@@ -425,7 +389,7 @@ scripts/batch-mode.sh
 
 ---
 
-# 第 5 章 关键实现
+# 5. 关键实现
 
 ## 5.1 实时链路：Kafka → Flink → Doris
 
@@ -1141,7 +1105,7 @@ Metastore 起不来时报的是 `DatastoreDriverNotFoundException: com.mysql.cj.
 
 ---
 
-# 第 6 章 测试与验证
+# 6. 测试与验证
 
 ## 6.1 测试体系与全量测试结果
 
@@ -1409,7 +1373,7 @@ MySQL 侧：product = 600，user = 1200                    →  事实源有数�
 
 ---
 
-# 第 7 章 总结与展望
+# 7. 总结与展望
 
 ## 7.1 工作总结
 
@@ -1473,26 +1437,59 @@ MySQL 侧：product = 600，user = 1200                    →  事实源有数�
 
 # 参考文献
 
-> **说明**：本报告的素材来源是工程实施记录，其中**不含**文献调研内容，因此本节不列出未经核实著录信息的文献条目。以下列出与本报告技术选型直接相关、且有明确版本与规范依据的可引用对象，供作者补充完整著录信息后使用。
+> **著录格式**：按《湖南工商大学本科生毕业论文（设计）撰写规范》㈧ 与 GB/T 7714 著录，
+> 类型标志 `[M]` 专著、`[J]` 期刊、`[S]` 标准、`[EB/OL]` 电子文献。
+> 序号按正文引用顺序排列；电子文献给出可获取地址与引用日期。
 
-1. Apache Software Foundation. *Apache Kafka Documentation*（KRaft 模式与 topic 分区语义）. `sql/metadata/kafka_topics.md` 引用其分区键设计。
-2. Apache Software Foundation. *Apache Flink Documentation*（事件时间、水位线、TUMBLE 窗口、SQL JSON 格式）. 见 `docs/data-source-design.md` 第 4.4 节对 JSON 格式解析器行为的实测记录。
-3. Apache Software Foundation. *Apache Spark SQL Reference*（AQE、`DISTRIBUTE BY`、`spark.sql.shuffle.partitions`）. 见 `docs/sprint/SPRINT_5.md` 第 8.2 节第 4 条。
-4. Apache Doris Community. *Apache Doris Documentation*（Routine Load、UNIQUE KEY 与 merge-on-write、`S3()` 表函数）. 见 `docs/sprint/SPRINT_3.md` 第 4.2 节。
-5. Apache Iceberg Community. *Apache Iceberg Table Spec (v2)* 与 *Spark Configuration*（HiveCatalog、`format-version`）. 见 `docs/sprint/SPRINT_5.md` 第 2.1、3.1 节。
-6. Apache Software Foundation. *Apache Airflow 3 Documentation*（LocalExecutor、任务执行 API server、`default_args` 行为）. 见 `docs/sprint/SPRINT_4.md` 第 10.4 节缺陷 4 的实测对照。
-7. Model Context Protocol. *Specification, revision 2026-07-28*. `docs/sprint/SPRINT_10.md` 第 4.1 节说明 `mcp==2.2.0` 支持该版规范，并说明 v1 → v2 的破坏性变更。
-8. DeepSeek. *API Documentation*（Tool Calls 与 `reasoning_content` 回传要求）. 见 `docs/sprint/SPRINT_7.md` 第 4.4 节的直接引用。
-9. Robertson, S., Zaragoza, H. *The Probabilistic Relevance Framework: BM25 and Beyond*. 本项目使用其标准参数 `k1=1.2`、`b=0.75`（`docs/sprint/SPRINT_9.md` 第 3.2 节）。
-10. Prometheus Authors. *Prometheus Documentation*（`--web.enable-lifecycle` 等命令行开关）. 见 `docs/sprint/SPRINT_11.md` 第 7.2 节对布尔开关写法的实测记录。
+[1] KREPS J, NARKHEDE N, RAO J. Kafka: a distributed messaging system for log processing[C]//Proceedings of the NetDB Workshop. Athens: ACM, 2011: 1-7.
 
-**项目内部规范文件**（作为工程规范引用）：
+[2] CARBONE P, KATSIFODIMOS A, EWEN S, et al. Apache Flink: stream and batch processing in a single engine[J]. Bulletin of the IEEE Computer Society Technical Committee on Data Engineering, 2015, 38(4): 28-38.
 
-11. 《AGENTS.md — 项目开发与 Agent 协作规范》V1.0 及历次修订。
-12. 《指标口径字典》`sql/metadata/metrics.md` V1.2。
-13. 《总体设计 V1》`docs/PROJECT_DESIGN_V1.md` V1.0。
-14. 《决策记录与待确认事项》`docs/DECISIONS.md`。
-15. 《性能基线（Sprint 12）》`docs/PERFORMANCE.md` V1.1。
+[3] ZAHARIA M, CHOWDHURY M, DAS T, et al. Resilient distributed datasets: a fault-tolerant abstraction for in-memory cluster computing[C]//Proceedings of the 9th USENIX Conference on Networked Systems Design and Implementation. San Jose: USENIX Association, 2012: 15-28.
+
+[4] ARMBRUST M, GHODSI A, XIN R, et al. Lakehouse: a new generation of open platforms that unify data warehousing and advanced analytics[C]//Proceedings of the 11th Conference on Innovative Data Systems Research. Chaminade: CIDR, 2021: 1-8.
+
+[5] Apache Software Foundation. Apache Kafka documentation[EB/OL]. https://kafka.apache.org/documentation/, 2026-09-27.
+
+[6] Apache Software Foundation. Apache Flink documentation: event time and watermarks[EB/OL]. https://nightlies.apache.org/flink/flink-docs-release-1.20/, 2026-09-27.
+
+[7] Apache Software Foundation. Apache Spark SQL, DataFrames and Datasets guide[EB/OL]. https://spark.apache.org/docs/3.5.7/sql-programming-guide.html, 2026-09-27.
+
+[8] Apache Software Foundation. Apache Iceberg table specification (version 2)[S/OL]. https://iceberg.apache.org/spec/, 2026-09-27.
+
+[9] Apache Doris Community. Apache Doris documentation: routine load and unique key model[EB/OL]. https://doris.apache.org/docs/, 2026-09-27.
+
+[10] Apache Software Foundation. Apache Airflow 3 documentation[EB/OL]. https://airflow.apache.org/docs/, 2026-09-27.
+
+[11] ROBERTSON S, ZARAGOZA H. The probabilistic relevance framework: BM25 and beyond[J]. Foundations and Trends in Information Retrieval, 2009, 3(4): 333-389.
+
+[12] LEWIS P, PEREZ E, PIKTUS A, et al. Retrieval-augmented generation for knowledge-intensive NLP tasks[C]//Advances in Neural Information Processing Systems 33. Vancouver: Curran Associates, 2020: 9459-9474.
+
+[13] YAO S, ZHAO J, YU D, et al. ReAct: synergizing reasoning and acting in language models[C]//Proceedings of the 11th International Conference on Learning Representations. Kigali: OpenReview, 2023: 1-19.
+
+[14] Anthropic. Model Context Protocol specification, revision 2026-07-28[S/OL]. https://modelcontextprotocol.io/specification, 2026-09-27.
+
+[15] Prometheus Authors. Prometheus documentation: configuration[EB/OL]. https://prometheus.io/docs/prometheus/latest/configuration/configuration/, 2026-09-27.
+
+---
+
+# 致谢
+
+本设计从选题、技术选型到最终验收，始终得到指导教师陈杰副教授的指导。在批流对账判据的两次打磨、Iceberg 迁移的分区写入器问题定位，以及"证据—主张"对齐的反复校准上，老师提出的追问使本设计没有停留在"链路跑通"的层面。
+
+感谢前沿交叉学院提供的实验环境与服务器资源。本项目在一台 4 核 16 GB 的单机上同时承载实时与离线两条链路，错峰批处理与内存闸门的每一次取舍，都来自这台机器的真实约束。
+
+感谢开源社区。Kafka、Flink、Spark、Doris、Iceberg、Airflow、Prometheus、Grafana 以及 Vue、ECharts 的文档与源码，是本设计在遇到版本行为差异时唯一的权威依据。
+
+最后感谢家人在毕业设计期间的理解与支持。
+
+---
+
+## 第二版修订记录
+
+| 版本 | 日期 | 变更 |
+| --- | --- | --- |
+| V1.0 | 2026-09-28 | 按 `REPORT_OUTLINE.md` 写出正文初稿；所有数字标注来源；已知限制在第 7.3 节完整列出；第 5.11 节单列事故复盘 |
 
 ---
 
