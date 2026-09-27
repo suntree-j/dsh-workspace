@@ -1,0 +1,541 @@
+{
+  "uid": "data-platform-overview",
+  "title": "批流一体数据平台 · 总览",
+  "tags": ["data-platform", "sprint-11", "lakehouse"],
+  "timezone": "Asia/Shanghai",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "1m",
+  "time": { "from": "now-90d", "to": "now" },
+  "timepicker": {
+    "refresh_intervals": ["10s", "30s", "1m", "5m", "15m", "1h"],
+    "time_options": ["6h", "24h", "7d", "30d", "90d", "1y"]
+  },
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "这个面板在看什么",
+      "gridPos": { "h": 5, "w": 24, "x": 0, "y": 0 },
+      "options": {
+        "mode": "markdown",
+        "content": "## 批流一体智能数据分析平台 · 数据治理总览\n\n**两套数据源，各自回答一个不同的问题：**\n\n| 数据源 | 回答的问题 | 覆盖面板 |\n| --- | --- | --- |\n| `Doris (只读)` | **数据对不对**：离线 ADS 的 GMV/UV/PV/漏斗、逐窗口批流对账结论 | 业务数据区 |\n| `Prometheus` | **服务活不活**：Prometheus 抓取、Doris FE/BE 的查询与内存、Grafana 自身 | 监控区 |\n\n**时间范围默认 `now-90d`**：本机的数据由 `data-generator` 一次性生成，\n最新窗口在 **2026-09-26** 前后（约 25 小时前）。默认用 6h/24h 窗口会看到**空面板** ——\n那会让人误以为「面板做坏了」，而不是「数据本来就是历史数据」。\n\n**数据质量校验**（行数/主键/非空/枚举/层间一致/金额/新鲜度）在命令行：\n`bash scripts/run-quality-checks.sh`（失败会 `exit 1`）。本面板只做可视化，不做判定。"
+      }
+    },
+
+    {
+      "id": 2,
+      "type": "row",
+      "title": "一、数据新鲜度（离线 ADS 最新窗口 / 最新分区）",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "交易域最新窗口（ads_batch_trade_1m）",
+      "description": "离线交易总览的最新分钟窗口。落后现在超过 26h 说明离线流水线至少漏跑了一整天（口径见 infrastructure/quality/checks.conf 第七节）",
+      "datasource": { "type": "mysql", "uid": "doris-mysql" },
+      "gridPos": { "h": 5, "w": 8, "x": 0, "y": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT MAX(window_start) AS `最新交易窗口` FROM lakehouse_ads.ads_batch_trade_1m"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "fieldConfig": { "defaults": { "unit": "dateTimeAsIso", "decimals": 0 }, "overrides": [] }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "流量域最新窗口（ads_traffic_1m）",
+      "description": "离线流量总览的最新分钟窗口（Sprint 5 新建的流量域分层）",
+      "datasource": { "type": "mysql", "uid": "doris-mysql" },
+      "gridPos": { "h": 5, "w": 8, "x": 8, "y": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT MAX(window_start) AS `最新流量窗口` FROM lakehouse_ads.ads_traffic_1m"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "fieldConfig": { "defaults": { "unit": "dateTimeAsIso", "decimals": 0 }, "overrides": [] }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "流量域最新天分区（ads_traffic_1d.dt）",
+      "datasource": { "type": "mysql", "uid": "doris-mysql" },
+      "gridPos": { "h": 5, "w": 8, "x": 16, "y": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT MAX(dt) AS `最新天分区` FROM lakehouse_ads.ads_traffic_1d"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "fieldConfig": { "defaults": { "unit": "dateTimeAsIso", "decimals": 0 }, "overrides": [] }
+    },
+
+    {
+      "id": 6,
+      "type": "row",
+      "title": "二、交易域（离线 ADS：GMV / 订单量 / 支付成功率）",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 11 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "每日 GMV（离线 ads_batch_trade_1d，单位：元）",
+      "datasource": { "type": "mysql", "uid": "doris-mysql" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT dt AS time, SUM(gmv) AS `每日GMV` FROM lakehouse_ads.ads_batch_trade_1d WHERE UNIX_TIMESTAMP(dt) >= UNIX_TIMESTAMP(NOW()) - $__range_s GROUP BY dt ORDER BY dt"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyCNY",
+          "decimals": 2,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "showPoints": "auto", "spanNulls": true }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "每日订单量（离线 ads_batch_trade_1d）",
+      "datasource": { "type": "mysql", "uid": "doris-mysql" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT dt AS time, SUM(order_cnt) AS `每日订单量` FROM lakehouse_ads.ads_batch_trade_1d WHERE UNIX_TIMESTAMP(dt) >= UNIX_TIMESTAMP(NOW()) - $__range_s GROUP BY dt ORDER BY dt"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": { "drawStyle": "bars", "lineWidth": 1, "fillOpacity": 60, "showPoints": "never", "spanNulls": true }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 9,
+      "type": "table",
+      "title": "交易指标快照（离线 ads_batch_trade_1d 最近 10 天）",
+      "description": "avg_order_amount / payment_success_rate / refund_rate 分母为 0 时为 NULL —— 那是口径约定，不是数据缺失（见 sql/metadata/metrics.md）",
+      "datasource": { "type": "mysql", "uid": "doris-mysql" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 20 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT dt AS `日期`, gmv AS `GMV`, order_cnt AS `订单量`, order_user_cnt AS `下单用户`, avg_order_amount AS `客单价`, payment_cnt AS `支付成功`, payment_fail_cnt AS `支付失败`, payment_success_rate AS `支付成功率`, refund_cnt AS `退款笔数`, refund_amount AS `退款金额`, refund_rate AS `退款率` FROM lakehouse_ads.ads_batch_trade_1d WHERE UNIX_TIMESTAMP(dt) >= UNIX_TIMESTAMP(NOW()) - $__range_s ORDER BY dt DESC LIMIT 10"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": { "show": false, "reducer": ["sum"], "countRows": false, "fields": "" }
+      },
+      "fieldConfig": { "defaults": { "custom": { "align": "auto", "filterable": false } }, "overrides": [] }
+    },
+
+    {
+      "id": 10,
+      "type": "row",
+      "title": "三、流量域（离线 ADS：UV / PV / 行为漏斗）",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 28 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "每日 PV / UV（离线 ads_traffic_1d）",
+      "description": "UV 是去重用户数，跨天不可加；PV 可加。两者画在一起时看的是趋势而不是量级",
+      "datasource": { "type": "mysql", "uid": "doris-mysql" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 29 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT dt AS time, SUM(pv) AS `PV`, SUM(uv) AS `UV` FROM lakehouse_ads.ads_traffic_1d WHERE UNIX_TIMESTAMP(dt) >= UNIX_TIMESTAMP(NOW()) - $__range_s GROUP BY dt ORDER BY dt"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 8, "showPoints": "auto", "spanNulls": true }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 12,
+      "type": "barchart",
+      "title": "行为漏斗（离线 ads_traffic_1d 全历史合计，应当逐级收窄）",
+      "description": "AGENTS.md 8.2 的数据正确性断言：VIEW > CLICK > CART > BUY。若某级反超，先看 DWD 去重是否生效。这里刻意**不做时间过滤**：全历史合计是固定的口径基线，便于任何时间点复核",
+      "datasource": { "type": "mysql", "uid": "doris-mysql" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 29 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT 'VIEW' AS `行为`, SUM(view_cnt) AS `次数` FROM lakehouse_ads.ads_traffic_1d UNION ALL SELECT 'CLICK', SUM(click_cnt) FROM lakehouse_ads.ads_traffic_1d UNION ALL SELECT 'CART', SUM(cart_cnt) FROM lakehouse_ads.ads_traffic_1d UNION ALL SELECT 'FAVORITE', SUM(favorite_cnt) FROM lakehouse_ads.ads_traffic_1d UNION ALL SELECT 'BUY', SUM(buy_cnt) FROM lakehouse_ads.ads_traffic_1d"
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "showValue": "auto",
+        "xTickLabelRotation": 0,
+        "legend": { "showLegend": false, "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 }, "overrides": [] }
+    },
+
+    {
+      "id": 13,
+      "type": "row",
+      "title": "四、批流对账（实时链路 == 离线链路 的窗口级证据）",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 37 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 14,
+      "type": "stat",
+      "title": "交易域不一致窗口数（ads_reconcile_trade_1m）",
+      "description": "Sprint 3 的验收口径：11458 个分钟窗口，不一致 0 个。这里为 0 才说明批流算的是同一个数",
+      "datasource": { "type": "mysql", "uid": "doris-mysql" },
+      "gridPos": { "h": 5, "w": 8, "x": 0, "y": 38 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COUNT(*) AS `不一致窗口` FROM lakehouse_ads.ads_reconcile_trade_1m WHERE is_match = false"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 15,
+      "type": "stat",
+      "title": "流量域不一致窗口数（ads_reconcile_traffic_1m）",
+      "description": "Sprint 5 的流量域批流对账；同样要求 0",
+      "datasource": { "type": "mysql", "uid": "doris-mysql" },
+      "gridPos": { "h": 5, "w": 8, "x": 8, "y": 38 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COUNT(*) AS `不一致窗口` FROM lakehouse_ads.ads_reconcile_traffic_1m WHERE is_match = false"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 16,
+      "type": "stat",
+      "title": "流量域对账总窗口数（有数据 = 对账真的跑过）",
+      "description": "为什么要给『分母』也做一个面板：只显示『不一致 0』会被空表骗过 —— 一个从来没跑过对账的系统也会显示 0",
+      "datasource": { "type": "mysql", "uid": "doris-mysql" },
+      "gridPos": { "h": 5, "w": 8, "x": 16, "y": 38 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COUNT(*) AS `对账窗口总数` FROM lakehouse_ads.ads_reconcile_traffic_1m"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 }, "overrides": [] }
+    },
+
+    {
+      "id": 17,
+      "type": "row",
+      "title": "五、监控自身（Prometheus 抓取 / Doris FE-BE / Grafana）",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 43 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 18,
+      "type": "stat",
+      "title": "抓取目标数（up）",
+      "description": "4 个目标：prometheus / doris-fe / doris-be / grafana。少于 4 说明某个目标掉了",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 44 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(up)",
+          "instant": true,
+          "range": false,
+          "format": "table",
+          "legendFormat": "抓取中的目标"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "yellow", "value": 1 }, { "color": "green", "value": 4 } ] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "各抓取目标是否存活（up，1 = 正常）",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 6, "w": 16, "x": 8, "y": 44 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "up",
+          "legendFormat": "{{job}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["lastNotNull", "min"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "max": 1,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "showPoints": "never", "spanNulls": true }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Prometheus 抓取耗时（秒）",
+      "description": "抓取变慢通常是目标端（Doris /metrics 约 128 KB）在忙，而不是 Prometheus 的问题",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 50 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "scrape_duration_seconds",
+          "legendFormat": "{{job}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 3,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 8, "showPoints": "never", "spanNulls": true }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Doris FE 查询错误累计（doris_fe_query_err）",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 50 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(doris_fe_query_err) by (instance)",
+          "legendFormat": "FE {{instance}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 8, "showPoints": "never", "spanNulls": true }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 22,
+      "type": "stat",
+      "title": "Grafana 自身存活（up）",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 57 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "up{job=\"grafana\"}",
+          "instant": true,
+          "range": false,
+          "format": "table",
+          "legendFormat": "grafana up"
+        },
+        {
+          "refId": "B",
+          "expr": "grafana_build_info",
+          "instant": true,
+          "range": false,
+          "format": "table",
+          "legendFormat": "{{version}}"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "fieldConfig": { "defaults": { "decimals": 0 }, "overrides": [] }
+    },
+    {
+      "id": 23,
+      "type": "table",
+      "title": "Prometheus 抓取目标明细（最后一次抓取是否成功）",
+      "description": "拿不到 up 或 scrape_duration_seconds 时，先看这张表里哪个 job 是 0",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 7, "w": 16, "x": 8, "y": 57 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "up",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "B",
+          "expr": "scrape_duration_seconds",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "options": { "showHeader": true, "cellHeight": "sm" },
+      "fieldConfig": { "defaults": { "custom": { "align": "auto", "filterable": false } }, "overrides": [] }
+    }
+  ]
+}

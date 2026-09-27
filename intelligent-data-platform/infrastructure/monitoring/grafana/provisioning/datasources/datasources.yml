@@ -1,0 +1,82 @@
+# ============================================================
+# infrastructure/monitoring/grafana/provisioning/datasources/datasources.yml
+# Grafana 数据源自动供给（Sprint 11）
+# ============================================================
+#
+# 为什么用 provisioning 文件而不是"进 UI 手工点"：
+#   手工点的数据源与面板只存在于容器的数据卷里，**仓库里没有**。
+#   换一台机器、或者有人 `docker compose down -v` 之后，
+#   面板就没了 —— 而文档还写着"有 Grafana 面板"，属于典型的
+#   "成功信号 ≠ 目标状态"。provisioning 让面板与数据源成为**代码**。
+#
+# !! uid 必须与仪表盘 JSON 里引用的 uid 完全一致 !!
+#   面板 JSON 里写的是 {"type":"prometheus","uid":"prometheus"} /
+#   {"type":"mysql","uid":"doris-mysql"}。
+#   这里改 uid 而那里不改，面板会显示 "Datasource not found"，
+#   但**仪表盘本身仍然能正常加载** —— 很容易被误判成"面板没问题"。
+#
+# 口令来源：GRAFANA_DORIS_PASSWORD 由 docker-compose.yml 从 .env 注入
+# （${API_DORIS_PASSWORD}），仓库里不出现任何真实口令。
+# ============================================================
+
+apiVersion: 1
+
+datasources:
+
+  # ----------------------------------------------------------
+  # Prometheus：监控自身指标（Prometheus / Doris FE / Doris BE / Grafana）
+  # ----------------------------------------------------------
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    orgId: 1
+    # 服务名而非 localhost（AGENTS.md 6.2：容器间禁止 localhost）
+    url: http://prometheus:9090
+    isDefault: true
+    # 面板里会手写 PromQL，关掉编辑器里的"仅允许已保存查询"限制
+    jsonData:
+      httpMethod: POST
+      timeInterval: 30s
+      prometheusType: Prometheus
+      prometheusVersion: 3.13.3
+    version: 1
+
+  # ----------------------------------------------------------
+  # Doris（MySQL 协议）—— 让面板能看到**真正的业务数据**
+  #
+  # !! 为什么必须有这一个数据源 !!
+  #   只连 Prometheus 的话，面板上只有"容器活不活、抓取成不成功"，
+  #   看不到任何一行业务数据 —— 那不是"数据治理面板"，只是"进程看板"。
+  #
+  # 凭据：**只读账号 agent_ro**（Sprint 6 建立，只授予 SELECT_PRIV），
+  #   与数据服务、Agent 用的是同一个最小权限账号。
+  #   Grafana 侧不做任何写操作，因此这个账号足够；
+  #   **不使用 root**（AGENTS.md 10.3）。
+  #
+  # 连 Doris FE 而不是 BE：FE 提供 MySQL 协议入口（9030），
+  #   由 FE 负责查询规划；BE 的 9030 不是查询入口。
+  # ----------------------------------------------------------
+  - name: Doris (只读)
+    uid: doris-mysql
+    type: mysql
+    access: proxy
+    orgId: 1
+    url: 172.28.0.10:9030
+    # !! 这些 ${...} 必须加引号 !!
+    #   不加引号时 YAML 会把 ${API_DORIS_USER} 里的花括号当成**流式映射**
+    #   的语法，报 "did not find expected ',' or '}'" 而整个供给文件失效
+    #   —— 表现为 Grafana 起来了、面板也在，但所有面板都是
+    #   "Datasource not found"。加引号后它就是普通字符串，
+    #   由 Grafana 自己去做环境变量插值。
+    user: "${API_DORIS_USER}"
+    secureJsonData:
+      password: "${GRAFANA_DORIS_PASSWORD}"
+    jsonData:
+      database: "${API_DORIS_DATABASE}"
+      maxOpenConns: 4
+      maxIdleConns: 2
+      # 4 小时连接寿命：避免长连接在 Doris 侧被回收后 Grafana 仍复用它
+      connMaxLifetime: 14400
+      timezone: Asia/Shanghai
+    version: 1

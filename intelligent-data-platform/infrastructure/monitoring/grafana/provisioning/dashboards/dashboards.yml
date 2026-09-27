@@ -1,0 +1,30 @@
+# ============================================================
+# infrastructure/monitoring/grafana/provisioning/dashboards/dashboards.yml
+# 仪表盘自动供给（Sprint 11）
+# ============================================================
+#
+# allowUiUpdates: false —— 刻意的选择
+#   true 的话，任何人在 UI 里改一下面板都会被写回容器卷，
+#   而仓库里那份 JSON 仍然是旧的：**代码与运行态分叉**，
+#   下次重建容器改动就"神秘消失"。关掉它，唯一事实源就是仓库。
+#   要改面板 → 改 JSON → 重启容器（scripts/deploy-monitoring.sh）。
+#
+# foldersFromFilesStructure: false —— 保持文件夹名固定为 "数据平台"，
+#   与仪表盘 JSON 里的 folder 语义一致，避免多出 "monitoring" 这类
+#   由目录结构推导出来的文件夹。
+# ============================================================
+
+apiVersion: 1
+
+providers:
+  - name: data-platform
+    orgId: 1
+    folder: 数据平台
+    folderUid: data-platform
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 60
+    options:
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: false

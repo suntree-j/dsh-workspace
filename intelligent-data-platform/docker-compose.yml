@@ -59,6 +59,15 @@ volumes:
   # Spark Worker 的本地工作目录（shuffle / spill），用卷避免写满容器层
   spark-work:
     name: data-platform-spark-work
+  # Sprint 11 — 监控（Prometheus / Grafana）
+  #   为什么必须是命名卷而不是绑定挂载：
+  #     Prometheus 的 TSDB 与 Grafana 的 sqlite 都属于"容器重建后要保留"的状态
+  #     （AGENTS.md 6.4）。绑定挂载会在宿主机上留下 root 属主的目录，
+  #     而这两个容器的 uid 与宿主不同，容易出现"能启动、写不进去"。
+  prometheus-data:
+    name: data-platform-prometheus-data
+  grafana-data:
+    name: data-platform-grafana-data
 
 services:
 
@@ -778,3 +787,175 @@ services:
     mem_limit: ${SPARK_SUBMIT_MEMORY:-1280m}
     networks:
       - data-platform
+
+  # ==========================================================
+  # Sprint 11 — 监控（Prometheus + Grafana）
+  # ==========================================================
+  #
+  # 版本（均为查证后钉住的明确版本，禁止 latest —— AGENTS.md 4.4/6.3）：
+  #   prom/prometheus:v3.13.3    —— 3.13 是 Prometheus 的 **LTS 线**
+  #                                 （3.13.0 于 2026-07-01 发布，LTS 支持到 2027-07-31）
+  #   grafana/grafana:13.2.2     —— 13.2 线最新补丁（2026-09-15）
+  #   查证方式与证据见 docs/development-environment.md 第 9 节。
+  #
+  # ----------------------------------------------------------
+  # !! 内存预算：监控总计不得超过 512 MB !!
+  #
+  # 本机 16 GB，实时链路常驻约 13.7 GB，空闲通常只有 2~4 GB。
+  # 这台机器上"内存不是注意一下的问题，而是必须上闸门"
+  # （Sprint 3 事故复盘见 docs/sprint/SPRINT_3.md 第 8 节）。
+  #   本文件所有服务的 mem_limit 合计 = 1735m，其中监控占 512m：
+  #     prometheus 256m + grafana 256m
+  #   Prometheus 另设 --storage.tsdb.retention.time=15d，避免长期运行把
+  #   内存与磁盘一起吃满（TSDB 占用与保留窗口正相关）。
+  #
+  # 为什么不部署 cadvisor / node-exporter / alertmanager：
+  #   每多一个容器就多一份常驻内存，而 512 MB 的预算里塞不下。
+  #   容器级内存实测改用 `docker stats --no-stream` 取证
+  #   （见 scripts/verify-sprint-11.sh 的内存一步）——**取证方式可以换，
+  #   预算是硬约束**。
+  #
+  # 为什么 Prometheus 不做外部数据源认证：
+  #   Prometheus 官方镜像**没有内置鉴权**，这是它的已知设计。
+  #   因此对策不是"配一个假密码"，而是**不对公网暴露**：
+  #   ports 只绑 127.0.0.1（宿主机本机排查用），对外一律经 Nginx 的
+  #   /metrics/（普通用户看板）与 /grafana/（可视化），
+  #   两者都在 Nginx 层加了限制（见 deploy/nginx/data-platform.conf）。
+  # ----------------------------------------------------------
+
+  # ----------------------------------------------------------
+  # Prometheus —— 指标抓取与存储
+  #   容器内：http://prometheus:9090
+  #   宿主机：http://127.0.0.1:9090（**仅回环**，不暴露公网）
+  # ----------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:${PROMETHEUS_VERSION:-v3.13.3}
+    container_name: prometheus
+    restart: unless-stopped
+    user: root
+    # user: root 的理由（实测踩坑型问题）：
+    #   官方镜像默认以 nobody(65534) 运行，而命名卷首次创建时的属主是 root，
+    #   于是 /prometheus 不可写，Prometheus 起来后立刻退出并报
+    #   "opening storage failed: permission denied"。
+    #   这里用 root 跑是权衡后的取舍：单机毕设环境、只读抓取、
+    #   不对公网暴露端口。若要改回非 root，必须先在卷上做 chown，
+    #   而 compose 没有"启动前执行一次 chown"的原生能力
+    #   （需要额外的一次性容器，那就又超预算了）。
+    depends_on:
+      doris-fe:
+        condition: service_healthy
+      doris-be:
+        condition: service_healthy
+    command:
+      # 15 天保留：本机演示不需要长期存储，而 TSDB 的内存与磁盘占用
+      # 与保留窗口正相关（内存预算 256m 的硬约束在这里落地）
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}'
+      # !! 不要写 --web.enable-lifecycle=false / --web.enable-admin-api=false !!
+      #   Prometheus 用的是 kingpin，这两个是**布尔开关**：
+      #   只写开关名表示开启，写 `=false` 会被当成多余的位置参数，
+      #   容器直接以 "Error parsing command line arguments: unexpected false" 退出
+      #   （实测踩坑：容器反复重启、healthcheck 永远 unhealthy、
+      #    表现为"Prometheus 起不来"而日志只有一行看不懂的 parse error）。
+      #   默认就是关闭，因此**不写**才是"关掉它"的正确表达。
+      #
+      # --web.external-url 只影响 Prometheus 自己生成的链接与重定向目标。
+      #
+      # !! 这里**刻意不设** external-url / route-prefix !!
+      #   实测踩坑（两次，值得记下来）：
+      #   1) 写 `--web.enable-lifecycle=false` 会被 kingpin 当成多余位置参数，
+      #      容器直接以 "unexpected false" 退出（布尔开关只能写名字、不能写 =false）；
+      #   2) 设了 `--web.external-url=/metrics` 之后，Prometheus 会把
+      #      `/metrics/` **302 回自己**，Nginx 再转发一次就成了无限重定向
+      #      （症状：公网访问 /metrics/ 看到 ERR_TOO_MANY_REDIRECTS）；
+      #      而设 `--web.route-prefix=/metrics` 又会把 HTTP API 挪到
+      #      /metrics/api/v1/... 并把原始指标挪到 /metrics/metrics，
+      #      与"对外 /metrics/ 就是原始指标"的约定自相矛盾。
+      #
+      #   正确做法：让 Prometheus 老老实实待在根前缀下（默认行为），
+      #   由 Nginx 显式指向 `/metrics` 这个真实路径（见 deploy/nginx/
+      #   data-platform.conf 的 /metrics/ location）。**少一个参数，
+      #   少一层重定向**。
+    ports:
+      # 只绑回环：公网不可达。对外经 Nginx 的 /metrics/
+      - '127.0.0.1:${PROMETHEUS_HOST_PORT:-9090}:9090'
+    volumes:
+      - ./infrastructure/monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    mem_limit: ${PROMETHEUS_MEM_LIMIT:-256m}
+    networks:
+      - data-platform
+    # !! 为什么要给 Prometheus 加这一条 hosts !!
+    #   Grafana 的 root_url 含 %(domain)s（子路径部署必需），
+    #   于是它把 `/metrics` 301 到 `http://localhost:3000/grafana/metrics`。
+    #   Prometheus **会跟随重定向**，而容器里的 localhost 指它自己 →
+    #   抓取永远失败（target 一直 down，lastError 是 dial tcp [::1]:3000
+    #   connection refused）。
+    #   把 localhost 指向 Grafana 的固定 IP 之后，这个重定向就能走通，
+    #   而我们**不必**把 Grafana 的端口从回环改绑到公网。
+    #   这是"跟随上游重定向"与"不暴露端口"之间的最小妥协。
+    extra_hosts:
+      - 'localhost:${GRAFANA_IP:-172.28.0.20}'
+    healthcheck:
+      # prom/prometheus 镜像内没有 curl，只有 busybox wget 与 nc，
+      # 因此这里用 wget（与 MinIO 那次的教训同类：先确认镜像里有什么）
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9090/-/healthy || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ----------------------------------------------------------
+  # Grafana —— 可视化（provisioning 全部来自仓库，UI 改动不回写）
+  #   容器内：http://grafana:3000
+  #   宿主机：http://127.0.0.1:3001（仅回环）
+  #   公网：  http://<IP>/grafana/（Nginx 反代，见 deploy/nginx/data-platform.conf）
+  # ----------------------------------------------------------
+  grafana:
+    image: grafana/grafana:${GRAFANA_VERSION:-13.2.2}
+    container_name: grafana
+    restart: unless-stopped
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      # 管理员口令**只从 .env 注入**（AGENTS.md 7.2）。
+      #   用 :? 而不是 :- 是刻意的：缺少口令时 compose 直接拒绝启动，
+      #   而不是悄悄用一个默认口令起来 —— 后者会在验收时表现为
+      #   "面板能看，但口令是谁设的没人知道"。
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required - 由 scripts/deploy-monitoring.sh 生成}
+      # 只读数据源的密码：Grafana 的 provisioning 文件支持 ${ENV} 插值，
+      # 因此仓库里的 datasources.yml 只写 ${GRAFANA_DORIS_PASSWORD}，
+      # 真实口令由 .env 注入。用只读账号 agent_ro，不用 root。
+      GRAFANA_DORIS_PASSWORD: ${API_DORIS_PASSWORD:?API_DORIS_PASSWORD is required}
+      API_DORIS_USER: ${API_DORIS_USER:-agent_ro}
+      API_DORIS_DATABASE: ${API_DORIS_DATABASE:-ecommerce}
+      # 面板只读浏览（匿名 Viewer），不会因为 UI 误操作改坏供给内容
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+    ports:
+      # 宿主端口用 3001（容器内仍是 3000）：
+      #   8080/8081/8083 已被 Spark 与 Flink 占用，3000 留给将来可能的
+      #   Spring Boot 前端；这里只绑回环，公网走 Nginx。
+      - '127.0.0.1:${GRAFANA_HOST_PORT:-3001}:3000'
+    volumes:
+      - ./infrastructure/monitoring/grafana/grafana.ini:/etc/grafana/grafana.ini:ro
+      - ./infrastructure/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    mem_limit: ${GRAFANA_MEM_LIMIT:-256m}
+    networks:
+      data-platform:
+        # 固定 IP 的理由见 prometheus 服务的 extra_hosts 注释：
+        # Grafana 会把 /metrics 301 到 http://localhost:3000/... ，
+        # 而 Prometheus 容器里的 localhost 必须被指向这里。
+        ipv4_address: ${GRAFANA_IP:-172.28.0.20}
+    healthcheck:
+      # /api/health 在未登录时也返回 200 JSON（含 version/database 字段），
+      # 因此它是"服务就绪"的判据，而不是"端口开了"的判据
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 60s

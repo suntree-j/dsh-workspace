@@ -1,0 +1,3 @@
+-- 交易域关键字段非空：主键 / user_id / amount / event_time / dt
+-- 空一行就少一行钱，所以这些列的 NULL 计数之和必须为 0
+SELECT (SELECT COUNT(*) FROM ecommerce.dwd_trade_order_detail WHERE order_id IS NULL OR user_id IS NULL OR amount IS NULL OR event_time IS NULL OR dt IS NULL) + (SELECT COUNT(*) FROM ecommerce.dwd_trade_payment_detail WHERE payment_id IS NULL OR order_id IS NULL OR user_id IS NULL OR amount IS NULL OR event_time IS NULL OR dt IS NULL) + (SELECT COUNT(*) FROM ecommerce.dwd_trade_refund_detail WHERE refund_id IS NULL OR order_id IS NULL OR refund_amount IS NULL OR event_time IS NULL OR dt IS NULL) AS null_critical;

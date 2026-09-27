@@ -1,0 +1,12 @@
+-- 层间一致（湖仓 Iceberg，engine=spark）：DWD == ODS 逐表
+--
+-- !! 这是本清单里唯一需要读湖仓的校验，因此默认跳过（--with-lake 才跑）!!
+--   一次性 spark-sql 容器要起一个 driver（约 1 GB），
+--   本机可用内存只允许它单独跑（见 scripts/lib/memory-guard.sh）。
+--
+-- !! 表名是写死的，因为 spark-sql -e 不支持参数化 !!
+--   表的集合来自 sql/hive，若将来在湖仓新增 ods_/dwd_ 表，
+--   必须同步改下面两个 IN 列表；否则新表会**静默不参与**层间校验。
+--
+-- 返回"行数不相等的表数"，非 0 即失败
+SELECT COUNT(*) AS mismatch_tables FROM (SELECT COALESCE(o.c, 0) AS oc, COALESCE(d.c, 0) AS dc FROM (SELECT 'ods_user' AS t, COUNT(*) AS c FROM iceberg.lakehouse_iceberg.ods_user UNION ALL SELECT 'ods_product', COUNT(*) FROM iceberg.lakehouse_iceberg.ods_product UNION ALL SELECT 'ods_orders', COUNT(*) FROM iceberg.lakehouse_iceberg.ods_orders UNION ALL SELECT 'ods_payment', COUNT(*) FROM iceberg.lakehouse_iceberg.ods_payment UNION ALL SELECT 'ods_refund', COUNT(*) FROM iceberg.lakehouse_iceberg.ods_refund) o JOIN (SELECT 'ods_user' AS t, COUNT(*) AS c FROM iceberg.lakehouse_iceberg.dwd_user_detail UNION ALL SELECT 'ods_product', COUNT(*) FROM iceberg.lakehouse_iceberg.dwd_product_detail UNION ALL SELECT 'ods_orders', COUNT(*) FROM iceberg.lakehouse_iceberg.dwd_trade_order_detail UNION ALL SELECT 'ods_payment', COUNT(*) FROM iceberg.lakehouse_iceberg.dwd_trade_payment_detail UNION ALL SELECT 'ods_refund', COUNT(*) FROM iceberg.lakehouse_iceberg.dwd_trade_refund_detail) d ON o.t = d.t) x WHERE oc <> dc;

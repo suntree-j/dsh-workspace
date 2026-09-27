@@ -1,0 +1,17 @@
+-- 层间一致：实时 DWD 订单数 == 离线 ADS 订单数合计
+--
+-- !! 这里**不是**在跟 MySQL 源库比，原因值得记下来 !!
+--   本机的 Doris 只有 internal catalog：实测
+--     SHOW CATALOGS;                      → 只有 internal
+--     SELECT COUNT(*) FROM mysql.ecommerce.orders;
+--       → ERROR 1105: Catalog mysql does not exist.
+--     SELECT COUNT(*) FROM ecommerce.orders;
+--       → ERROR 1105: Table [orders] does not exist in database [ecommerce].
+--   也就是说 Doris 侧**看不到 MySQL 的源表**（源库只经 Spark JDBC 被抽取，
+--   按设计不进 Doris）。因此"与源库对账"这件事只能放在湖仓侧做
+--   （见 engine=spark 的 dwd_ods_parity_all）。
+--
+--   这条校验改成"实时 DWD ↔ 离线 ADS"的跨链路一致性：
+--   两条链路算出的订单数必须是同一个数（这也是批流一体的核心断言）。
+-- 返回 0 = 一致
+SELECT ABS((SELECT COUNT(*) FROM ecommerce.dwd_trade_order_detail) - (SELECT SUM(order_cnt) FROM lakehouse_ads.ads_batch_trade_1d)) AS diff_rows;

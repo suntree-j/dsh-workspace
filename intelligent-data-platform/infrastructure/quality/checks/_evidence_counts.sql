@@ -1,0 +1,3 @@
+-- 证据查询：一次给出各域关键行数（供报告尾部打印，便于"回到目标状态验证"）
+-- 这不是校验项，不参与判定，只作为每次运行的实测快照
+SELECT CAST((SELECT COUNT(*) FROM ecommerce.dwd_trade_order_detail) AS CHAR) AS orders, CAST((SELECT COUNT(*) FROM ecommerce.dwd_trade_payment_detail) AS CHAR) AS payments, CAST((SELECT COUNT(*) FROM ecommerce.dwd_trade_refund_detail) AS CHAR) AS refunds, CAST((SELECT COUNT(*) FROM ecommerce.dwd_traffic_behavior_detail) AS CHAR) AS behaviors, CAST((SELECT COUNT(*) FROM lakehouse_ads.ads_batch_trade_1m) AS CHAR) AS ads_trade_1m, CAST((SELECT COUNT(*) FROM lakehouse_ads.ads_traffic_1m) AS CHAR) AS ads_traffic_1m, CAST((SELECT SUM(amount) FROM ecommerce.dwd_trade_order_detail) AS CHAR) AS gmv_realtime, CAST((SELECT SUM(gmv) FROM lakehouse_ads.ads_batch_trade_1d) AS CHAR) AS gmv_batch;

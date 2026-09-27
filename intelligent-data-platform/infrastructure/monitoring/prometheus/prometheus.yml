@@ -1,0 +1,93 @@
+# ============================================================
+# infrastructure/monitoring/prometheus/prometheus.yml
+# Prometheus 抓取配置（Sprint 11）
+# ============================================================
+#
+# 版本：prom/prometheus:v3.13.3（LTS 线；选型依据见 docs/development-environment.md）
+#
+# ------------------------------------------------------------
+# 抓取目标为什么是"静态 IP / 服务名"，而不是 Docker SD
+# ------------------------------------------------------------
+#   1) Doris FE/BE 在本项目里**本来就必须用固定 IP**（172.28.0.10 / 172.28.0.11）：
+#      它们的初始化脚本用正则校验 FE_SERVERS=<name>:<IPv4>:<port>，
+#      不接受主机名（AGENTS.md 6.2 的例外条款）。所以这里写 IP 不是"图省事"，
+#      而是与既有编排保持同一种表达方式。
+#   2) 本项目只有 5 个抓取目标，全都由 docker-compose.yml 静态定义，
+#      用 docker_sd_configs 反而要挂 /var/run/docker.sock（把宿主 root 权限
+#      交给监控容器），为了 5 个静态目标付这个代价不合算。
+#
+# ------------------------------------------------------------
+# 为什么每个 job 都有明确的"为什么抓它"
+# ------------------------------------------------------------
+#   prometheus   —— 自身健康：抓取是否成功、样本量、TSDB 状态
+#   doris-fe     —— 查询侧指标：QPS、连接数、查询错误、JVM 堆
+#   doris-be     —— 存储侧指标：内存/jemalloc、tablet、compaction、导入
+#   grafana      —— 可视化层自身（metrics 端点未开鉴权，见 grafana.ini）
+#   容器级内存 —— 由 cadvisor 提供… **未部署**：那会多一个容器，
+#                 违背"监控总预算 <= 512 MB"的内存纪律。
+#                 容器内存改用 `docker stats` 取证（见 verify-sprint-11.sh）。
+#
+# ⚠️ 时间序列里的 `instance` 标签会暴露内网 IP（172.28.0.x）。
+#    那是 RFC1918 私网地址、且 Grafana 已开匿名只读，
+#    但 Grafana 仍然要求登录后才能改配置（匿名角色是 Viewer，不是 Editor）。
+# ============================================================
+
+global:
+  scrape_interval: 30s
+  scrape_timeout: 10s
+  evaluation_interval: 30s
+  external_labels:
+    monitor: data-platform
+    sprint: sprint-11
+
+scrape_configs:
+
+  # ----------------------------------------------------------
+  # Prometheus 自身
+  # ----------------------------------------------------------
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+        labels:
+          component: prometheus
+
+  # ----------------------------------------------------------
+  # Doris FE（查询入口）
+  #   /metrics 实测 200，约 128 KB，Prometheus 文本格式
+  # ----------------------------------------------------------
+  - job_name: doris-fe
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['172.28.0.10:8030']
+        labels:
+          component: doris
+          role: fe
+
+  # ----------------------------------------------------------
+  # Doris BE（存储与计算）
+  #   /metrics 实测 200，约 112 KB
+  # ----------------------------------------------------------
+  - job_name: doris-be
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['172.28.0.11:8040']
+        labels:
+          component: doris
+          role: be
+
+  # ----------------------------------------------------------
+  # Grafana 自身
+  #   为什么可以匿名抓：grafana.ini 里显式开了
+  #   [metrics] enabled=true + [auth.anonymous] org_role=Viewer，
+  #   只暴露计数器与耗时直方图，不含任何业务数据。
+  #   这里不加 bearer_token：那是"看起来更安全"的做法，
+  #   但会让 prometheus.yml 反过来依赖 Grafana 侧生成的 token
+  #   （启动顺序变成"先 Grafana 再 Prometheus"），
+  #   对一个只读演示面板不划算。
+  # ----------------------------------------------------------
+  - job_name: grafana
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['grafana:3000']
+        labels:
+          component: grafana
