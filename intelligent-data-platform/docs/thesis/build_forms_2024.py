@@ -40,6 +40,11 @@ TOPIC = "基于 Lakehouse 与 AI Agent 的批流一体智能数据分析平台"
 FIELD = "数据湖仓; 批流一体; 智能体"
 TITLE_PREFIX = "湖南工商大学2027届毕业论文(设计)"
 
+# A4 宽 11906 twips（21cm），左右页边距 1418 / 1276 ⇒ 版心 9212 twips。
+# 模板里开题报告表宽 9204，恰好放得下；换成 3.17/3.17 的页边距就只有 8312，
+# 整张表会左右各溢出版心约 0.8cm。
+TEXT_WIDTH_TWIPS = 11906 - 1418 - 1276
+
 W = qn("w:")  # namespace helper prefix
 
 
@@ -156,20 +161,45 @@ def relax_heights(tbl_el):
             h.set(qn("w:hRule"), "atLeast")
 
 
-def set_table_pct(tbl_el):
-    """表格整体宽度设为页宽的 100%，避免模板里错误的绝对宽度导致越界。"""
+def normalize_table_geometry(tbl_el):
+    """保留模板自身的表格几何（tblW 用 dxa、固定布局、居中），只清掉重复项。
+
+    !! 曾经这里把表格改成「页宽 100% + 自动布局」，但模板 tblPr 里本来就有
+    !! tblW(dxa 9204) 与 tblLayout(fixed)，append 之后同一元素出现两个
+    !! tblW、两个 tblLayout。OOXML 不允许重复，Word 取后一个（autofit），
+    !! 于是列宽按内容重算，整张表看起来和模板不一样。模板的固定列宽
+    !! 恰好等于正文宽度（9213 twips >= 9204），原本就不需要改。
+    """
     tblPr = tbl_el.find(qn("w:tblPr"))
     if tblPr is None:
         return
-    for w in tblPr.findall(qn("w:tblW")):
-        tblPr.remove(w)
-    tw = OxmlElement("w:tblW")
-    tw.set(qn("w:type"), "pct")
-    tw.set(qn("w:w"), "5000")
-    tblPr.append(tw)
-    layout = OxmlElement("w:tblLayout")
-    layout.set(qn("w:type"), "autofit")
-    tblPr.append(layout)
+    for tag in ("w:tblW", "w:tblLayout", "w:jc"):
+        found = tblPr.findall(qn(tag))
+        for extra in found[1:]:
+            tblPr.remove(extra)
+
+
+def assert_table_geometry(tbl_el, label: str) -> None:
+    """校验表格几何与模板一致：单一 tblW(dxa)、单一 tblLayout(fixed)、列宽合计相等。"""
+    tblPr = tbl_el.find(qn("w:tblPr"))
+    widths = tblPr.findall(qn("w:tblW"))
+    layouts = tblPr.findall(qn("w:tblLayout"))
+    assert len(widths) == 1, "%s: tblW 出现 %d 次（应恰好 1 次）" % (label, len(widths))
+    assert widths[0].get(qn("w:type")) == "dxa", "%s: tblW 不是 dxa" % label
+    assert len(layouts) == 1, "%s: tblLayout 出现 %d 次（应恰好 1 次）" % (label, len(layouts))
+    assert layouts[0].get(qn("w:type")) == "fixed", "%s: tblLayout 不是 fixed" % label
+    total = sum(int(g.get(qn("w:w"))) for g in tbl_el.find(qn("w:tblGrid")))
+    assert total == int(widths[0].get(qn("w:w"))), (
+        "%s: 列宽合计 %d != tblW %s" % (label, total, widths[0].get(qn("w:w"))))
+    # 表宽必须基本落在版心内。版心 = A4 宽 − 左右页边距 = 11906 − 1418 − 1276。
+    # 模板自身的任务书表格宽 9320，比版心多 108 twips（0.19cm），Word 居中后
+    # 左右各溢出 0.09cm，这是模板原样，故允许 200 twips 的容差；超过就要报错。
+    overflow = total - TEXT_WIDTH_TWIPS
+    assert overflow <= 200, (
+        "%s: 表宽 %d twips 超出模板可容纳宽度 %d twips（溢出 %d twips ≈ %.2fcm），"
+        "页边距或列宽设置有问题" % (label, total, TEXT_WIDTH_TWIPS, overflow, overflow / 567.0))
+    print("  %s 表格几何: tblW=%s dxa, tblLayout=fixed, 列宽合计=%d, 版心=%d（溢出 %+d twips）"
+          % (label, widths[0].get(qn("w:w")), total, TEXT_WIDTH_TWIPS, overflow))
 
 
 def effective_sectpr(body, anchor_el):
@@ -204,7 +234,11 @@ def rebuild(key, tbl_el, out_path):
     for ch in list(body.iterchildren()):
         body.remove(ch)
 
-    # 页面：A4 纵向，页边距 2.54/2.54/2.50/2.25
+    # 页面：A4 纵向。页边距必须用模板里"表格所在那一页"的值
+    # （sec5 = 上2.54 下2.54 左2.50 右2.25，版心 16.25cm = 9213 twips），
+    # 才能容下 9204 twips 宽的表格。若用 sec0 的 3.17/3.17（版心 14.66cm），
+    # 表格会左右各溢出版心约 0.8cm —— 这是"看起来和模板不一样"的直接原因。
+    # 注意：effective_sectpr() 在规范文档里取到的是 sec0（3.17），不能直接用。
     pgSz = sect.find(qn("w:pgSz"))
     if pgSz is None:
         pgSz = OxmlElement("w:pgSz")
@@ -301,7 +335,8 @@ prop_title = spec.paragraphs[205]
 assert "开题报告" in prop_title.text, prop_title.text
 prop_tbl = copy.deepcopy(spec.tables[1]._tbl)
 relax_heights(prop_tbl)
-set_table_pct(prop_tbl)
+normalize_table_geometry(prop_tbl)
+assert_table_geometry(prop_tbl, "开题报告")
 
 trs = prop_tbl.findall(qn("w:tr"))
 # r0: 姓名 / 学院 / 学号
@@ -323,15 +358,15 @@ fill_tc(row_tcs(trs[5])[1], PROP_METHOD)
 fill_tc(row_tcs(trs[6])[1], [""])
 # r7: 签名 / 时间 保持模板空白
 
-rebuild("开题报告", prop_tbl, OUT_PROP)
-print("written", OUT_PROP)
+print("written", rebuild("开题报告", prop_tbl, OUT_PROP))
 
 # ---------------------------------------------------------------- 3. 生成任务书
 task_title = spec.paragraphs[202]
 assert "任务书" in task_title.text, task_title.text
 task_tbl = copy.deepcopy(spec.tables[0]._tbl)
 relax_heights(task_tbl)
-set_table_pct(task_tbl)
+normalize_table_geometry(task_tbl)
+assert_table_geometry(task_tbl, "任务书")
 
 ttrs = task_tbl.findall(qn("w:tr"))
 fill_tc(row_tcs(ttrs[0])[1], [STUDENT], indent=False)
@@ -347,5 +382,4 @@ for i in range(4):
     fill_tc(row_tcs(ttrs[7 + i])[0], [TASK_DATES[i]], indent=False, size=9)
     fill_tc(row_tcs(ttrs[7 + i])[1], [TASK_PLAN[i]], size=10.5)
 
-rebuild("任务书", task_tbl, OUT_TASK)
-print("written", OUT_TASK)
+print("written", rebuild("任务书", task_tbl, OUT_TASK))
