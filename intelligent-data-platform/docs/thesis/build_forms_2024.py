@@ -3,6 +3,8 @@
 
 做法：直接以规范文档为基底（保留其样式/字体/表格 XML），清空正文后
 插入 表题 + 模板表格 + 填充内容，避免重建表格带来的格式漂移。
+
+正文文案在同目录的 forms_content_2024.py，改文案不必改本文件。
 """
 import copy
 import os
@@ -231,78 +233,50 @@ def rebuild(key, tbl_el, out_path):
     body.append(tbl_el)
     body.append(sect)
 
-    d.save(out_path)
+    try:
+        d.save(out_path)
+    except PermissionError:
+        # Word 打开着目标文件时 Windows 会独占它：改写到同目录的 "_新" 文件，
+        # 提醒用户关闭后替换，避免"导出失败"被误当成代码问题。
+        alt = os.path.splitext(out_path)[0] + "_新.docx"
+        d.save(alt)
+        print("目标文件被占用（Word 可能正打开它），已改写到:", alt)
+        return alt
     return out_path
 
 
-# ---------------------------------------------------------------- 1. 读旧稿正文
-cur = docx.Document(CUR_PROP)
-old_table = cur.tables[0]
-LIT = para_texts(old_table.rows[3].cells[-1])
-# 2024 版《任务书》已把“参考文献”行改为“文献资料收集要求”，纠正旧稿的指向
-LIT = [t.replace('"参考文献"栏', '"文献资料收集要求"栏') for t in LIT]
-LIT = [t.replace("附：本课题参考文献", "本课题参考文献") for t in LIT]
-
-
-def collapse_blank(seq):
-    """把连续空行折叠为一个，避免插入内容造成的忽大忽小的段间距。"""
-    out = []
-    for x in seq:
-        if not x.strip() and out and not out[-1].strip():
-            continue
-        out.append(x)
-    return out
-          # 文献综述
-METHOD_ALL = para_texts(old_table.rows[4].cells[-1])   # 研究思路与研究方法
-OUTLINE = para_texts(old_table.rows[5].cells[-1])      # 写作提纲
-
-
-def find_idx(seq, prefix):
-    return next(k for k, t in enumerate(seq) if t.strip().startswith(prefix))
-
-
-def insert_block(seq, prefix, texts):
-    """在某个标题前插入若干段（自动补空行分隔）。"""
-    i = find_idx(seq, prefix)
-    while i > 0 and not seq[i - 1].strip():
-        i -= 1
-    seq[i:i] = [""] + list(texts) + [""]
-
-
-# 2024 版要求文献综述约 3000 字，原稿 2299 字，按三条主线各补一段（不新增文献）
-insert_block(LIT, "二、国内外研究状况", [
-    "从工程实践看，两个同义指标出现分叉的原因往往不是算法错误，而是口径细节：事件时间与处理时间的选择、迟到数据是否回填、去重是精确还是近似、除法分母为 0 时取 0 还是取空、金额用定点数还是浮点数。这些差异在单条链路上都无可指摘，合到同一个看板上就变成无法解释的差额。因此“两条链路是否一致”不能靠代码审查回答，只能靠对两侧同一时间窗口的计算结果做逐项比对来回答。",
-    "",
-    "更进一步，比对本身也有可信度问题。若对账只覆盖“两侧都有数据”的窗口，单边缺失就会被静默跳过；若把全部判据列都要求严格相等，比率列因浮点末位不同就会产生大量假失败。判据设计不当会同时制造假通过与假失败，而这两种错误都不会自己暴露出来。",
-])
-
-insert_block(LIT, "三、发展趋势", [
-    "（5）跨引擎同一指标比对的现状。多数开源数据质量工具以单条链路内部的自洽为目标：规则写在链路自己的流程里，通过与否只反映“这一侧有没有脏数据”。跨引擎、跨链路的同一指标比对往往落在一份自建脚本里：区间起点如何取、尾部要不要留安全边界、单边缺失算不算失败、比率列要不要参与判定，这些决定通常只存在于实现细节中，缺少可复用的判据设计讨论。结果是“对账通过”在公开材料里很少附带它的覆盖范围与失效条件，第三方难以判断一条通过结论究竟验证了什么。",
-])
-
-insert_block(LIT, "四、对本人研究的启发", [
-    "还有一条共同前提贯穿上述三条趋势：无论引擎、表格式还是模型如何演进，结论都必须能被第三方用同一份数据重放。可复现性因此从“工程好习惯”上升为“结论成立的必要条件”——一份无法重放的“一致”与一份无法重放的“高性能”，同样不可采信。",
-])
-
-LIT = collapse_blank(LIT)  # 必须在所有插入之后折叠，否则又会被插出双空行
-
-# 把 r4 的“四、写作提纲”之后的内容切掉（提纲已并入选题价值）
-cut = next(i for i, t in enumerate(METHOD_ALL) if t.strip().startswith("四、写作提纲"))
-METHOD = METHOD_ALL[:cut]
-while METHOD and not METHOD[-1].strip():
-    METHOD.pop()
+# ---------------------------------------------------------------- 1. 正文内容
+# 正文全部来自同目录的 forms_content_2024.py：文案与组装逻辑分开维护，
+# 不再从旧稿 docx 搬运，也不再就地插入段落（旧做法会在二次运行时读到自己的输出）。
+from forms_content_2024 import (  # noqa: E402
+    LIT,
+    METHOD,
+    OUTLINE,
+    TASK_LIT,
+    TASK_REQ,
+    TASK_WORK,
+    VALUE,
+)
 
 cur_task = docx.Document(CUR_TASK)
 old_task = cur_task.tables[0]
-TASK_WORK = para_texts(old_task.rows[3].cells[-1])
-TASK_REQ = para_texts(old_task.rows[4].cells[-1])
+# 参考文献取自基线《任务书》的第 6 行（旧模板该行标题是「参考文献」），
+# 12 条 GB/T 7714 已逐条核对格式与顺序；2024 版已把这一行改为「文献资料收集要求」，
+# 所以参考文献改由《开题报告》的文献综述栏末尾承载。
 TASK_REFS = para_texts(old_task.rows[5].cells[-1])
+
+LIT_CELL = LIT + ["", "附：参考文献"] + TASK_REFS
+PROP_VALUE = VALUE + OUTLINE
+PROP_METHOD = METHOD
+
+
 def _dedup(seq):
     out = []
     for x in seq:
         if not out or out[-1] != x:
             out.append(x)
     return out
+
 
 TASK_DATES = _dedup([
     re.sub(r"\s+", "", "".join(x.strip() for x in para_texts(c))).replace("——", "—")
@@ -314,35 +288,14 @@ TASK_PLAN = _dedup([
     for c in old_task.rows[7].cells[1:]
     if para_texts(c)
 ])
-TASK_PLAN = [t.replace("数据生成器", "真实数据接入与语义映射") for t in TASK_PLAN]
 
 print("文献综述段数=%d 字数=%d" % (len(LIT), sum(len(re.sub(r"\s", "", t)) for t in LIT)))
 print("研究方法段数=%d 写作提纲段数=%d" % (len(METHOD), len(OUTLINE)))
 print("任务书 参考文献条数=%d 进度=%d/%d" % (len(TASK_REFS), len(TASK_DATES), len(TASK_PLAN)))
+assert len(TASK_DATES) == 4, "任务书进度必须是 4 行，实际 %d" % len(TASK_DATES)
+assert len(TASK_PLAN) == 4, "任务书进度必须是 4 行，实际 %d" % len(TASK_PLAN)
 
-# ---------------------------------------------------------------- 2. 组装开题报告
-VALUE = [
-    "一、本课题弥补的空白",
-    "（1）引擎层与存储层已有成熟答案，口径层没有。流批一体解决的是“一套运行时”，湖仓一体解决的是“一份存储”，但“两条链路算出的同一个指标是否相等”仍缺少可证伪的验证方法。本课题补的正是这一层：以唯一的口径文件作为单一事实源，用按窗口全外连接的对账把“一致”变成可复现的断言，而不是一句声称。",
-    "（2）对账的判据本身也需要被检验。多数工程实践把“对账通过”当作结论，本课题把判据也当作对象：区分可加指标与去重指标，把比率列由“两侧相等”改为“每侧按自己的计数重算”，并引入尾部安全边界与静默窗口的显式声明，使一条“通过”的结论同时携带它的覆盖范围与失效条件。",
-    "（3）合成数据上的对账容易“恰好相等”。本课题改用两个公开真实数据集，二者形态互不相同（一方有金额无行为流，一方有行为流无金额），且在用户、商品与时间上互不重叠。真实数据必然带来缺失用户标识、取消发票、负数量退货与整行重复，这些恰恰是口径分叉的真实来源；在它们之上仍能逐处归因，结论才有分量。",
-    "",
-    "二、论文结构与写作提纲",
-    "全文共 7 章，另有参考文献、致谢与附录，结构如下（章下为节）：",
-]
-PROP_VALUE = VALUE + OUTLINE
-
-LIT_CELL = LIT + ["", "附：参考文献"] + TASK_REFS
-
-PROP_METHOD = METHOD
-
-# ---------------------------------------------------------------- 3. 组装任务书补充内容
-TASK_LIT = [
-    "围绕流批一体计算、湖仓开放表格式、批流一致性校验与大模型数据问答四个方向收集文献，共 12 条：国外期刊与会议论文 7 篇（Kafka 分布式消息系统、Flink 流批统一引擎、Spark 弹性分布式数据集、Lakehouse 体系、BM25 相关度框架、检索增强生成、ReAct 推理与行动协同），技术规范与官方文档 3 份（Apache Iceberg v2 表规范、Model Context Protocol 规范、Apache Flink 事件时间与水位线文档），公开真实数据集 2 套（UCI Online Retail II、天池淘宝用户行为数据集）。",
-    "检索以中国知网、IEEE Xplore、ACM Digital Library 及各项目官方网站为主，检索截至 2026 年 11 月。全部文献按 GB/T 7714—2015 著录，列于《开题报告》“文献综述”栏之后；其中两条为公开数据集的出处，用于支撑本设计的数据来源可查证。",
-]
-
-# ---------------------------------------------------------------- 4. 生成开题报告
+# ---------------------------------------------------------------- 2. 生成开题报告
 spec = docx.Document(SPEC)
 prop_title = spec.paragraphs[205]
 assert "开题报告" in prop_title.text, prop_title.text
@@ -373,7 +326,7 @@ fill_tc(row_tcs(trs[6])[1], [""])
 rebuild("开题报告", prop_tbl, OUT_PROP)
 print("written", OUT_PROP)
 
-# ---------------------------------------------------------------- 5. 生成任务书
+# ---------------------------------------------------------------- 3. 生成任务书
 task_title = spec.paragraphs[202]
 assert "任务书" in task_title.text, task_title.text
 task_tbl = copy.deepcopy(spec.tables[0]._tbl)
