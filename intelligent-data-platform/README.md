@@ -1122,7 +1122,7 @@ grep -E '^SITE_SCHEME=' .env                 # 当前值 http
 docs/thesis/REPORT_DRAFT.md          论文正文草稿（含摘要 / 正文 / 不足）
 docs/thesis/REPORT_OUTLINE.md        章节大纲
 docs/thesis/md_to_thesis_docx.py     正文导出脚本（默认输出到交付目录）
-docs/thesis/build_appendix_docs.py   任务书 / 开题报告导出脚本
+docs/thesis/build_forms_2024.py      任务书 / 开题报告导出脚本（2024 修订版规范）
 docs/thesis/毕业论文材料_蒋树阳/        ★ 提交/打印用（正文 + 附件1 + 附件2 + 材料清单）
 docs/thesis/答辩材料/                   ★ 答辩用
     README.md                        材料清单 + 准备顺序 + 现场口径
