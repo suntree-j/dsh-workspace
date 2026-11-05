@@ -894,7 +894,7 @@ def _cover(doc) -> None:
 
     # 字段名照抄学校模板（含模板里的空格排版），值为占位符
     cover_rows = (
-        ("题    目", _COVER_MAIN),
+        ("题    目", _COVER_FULL or _COVER_MAIN),
         ("学生姓名", COVER_FIELDS.get("name", "")),
         ("学    号", COVER_FIELDS.get("sid", "")),
         ("学    院", COVER_FIELDS.get("college", "")),
@@ -1146,6 +1146,9 @@ def _enable_update_fields(doc) -> None:
 
 _COVER_MAIN = ""
 _COVER_SUB = ""
+# 「题 目」栏必须写**完整**题目：主/副标题拆分只用于封面顶部的大字排版，
+# 表格里若只填主标题，形式审查会认为题目与任务书/开题报告不一致。
+_COVER_FULL = ""
 
 # ---------------------------------------------------------------- 封面/声明 填表信息
 # 由学生本人提供，来源为答辩与附件材料填报；改这里即可同时更新
@@ -1155,8 +1158,9 @@ COVER_FIELDS: dict[str, str] = {
     "sid": "2325010007",
     "college": "前沿交叉学院",
     "cls": "大数据2303",
-    "teacher": "陈杰",
-    "title": "副教授",
+    "teacher": "郭挺",
+    # 职称留空待手写：学校模板该格本来就留给本人填写，改为全角横线做书写位
+    "title": "＿＿＿＿",
     "grade": "2027",          # 届别
     "date": "2027 年   月",   # 封面底部「年  月」
 }
@@ -1177,8 +1181,9 @@ def build_document(blocks: list[Block], title: str) -> "Document":
        每个节点用 `add_section(NEW_PAGE)` 真正**分节**（不是靠空段落顶开），
        这样"页眉页脚从正文页开始"才有可挂靠的节边界。
     """
-    global _COVER_MAIN, _COVER_SUB
+    global _COVER_MAIN, _COVER_SUB, _COVER_FULL
     _COVER_MAIN, _COVER_SUB = _split_cover_title(title)
+    _COVER_FULL = title.strip()
 
     doc = Document()
     _setup_styles(doc)
