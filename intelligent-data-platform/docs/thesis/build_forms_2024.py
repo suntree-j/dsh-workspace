@@ -161,6 +161,66 @@ def relax_heights(tbl_el):
             h.set(qn("w:hRule"), "atLeast")
 
 
+def allow_row_split(tbl_el, rows=None):
+    """删掉 w:cantSplit。
+
+    !! 模板给「选题价值」「文献综述」两行加了 w:cantSplit（空白表单用，保证
+    !! 一行不被分页切开）。一旦填满内容，行高超过一页，Word 的处置是**把超出
+    !! 一页的部分直接丢掉**，不是续到下一页：实测文献综述 4786 字只印出约
+    !! 1/3，三、发展趋势、四、对本人研究的启发、参考文献 12 条全部缺失，而且
+    !! 页面上看不出任何异常。所以填内容的行必须允许跨页。
+    """
+    for i, tr in enumerate(tbl_el.findall(qn("w:tr"))):
+        if rows is not None and i not in rows:
+            continue
+        trPr = tr.find(qn("w:trPr"))
+        if trPr is None:
+            continue
+        for cs in trPr.findall(qn("w:cantSplit")):
+            trPr.remove(cs)
+
+
+def keep_row_together(tbl_el, index):
+    """给指定行加回 w:cantSplit，让这一行整行移动，不在中间被分页切开。
+
+    用于签名/日期这类矮行：一旦被切开，标签留在上一页、签名线掉到下一页。
+    """
+    trs = tbl_el.findall(qn("w:tr"))
+    if index >= len(trs):
+        return
+    trPr = trs[index].find(qn("w:trPr"))
+    if trPr is None:
+        trPr = OxmlElement("w:trPr")
+        trs[index].insert(0, trPr)
+    if trPr.find(qn("w:cantSplit")) is None:
+        trPr.insert(0, OxmlElement("w:cantSplit"))
+
+
+def top_align_label(tbl_el, rows):
+    """把跨页长行左侧的行标签改为顶端对齐。
+
+    模板里行标签是垂直居中（vAlign=center），这在单页表单上好看；行一旦跨页，
+    居中的标签正好落在分页处被切成两半。改顶端对齐后标签从行首开始，符合
+    手填/打印表单的习惯。
+    """
+    trs = tbl_el.findall(qn("w:tr"))
+    for i in rows:
+        if i >= len(trs):
+            continue
+        tcs = trs[i].findall(qn("w:tc"))
+        if not tcs:
+            continue
+        tcPr = tcs[0].find(qn("w:tcPr"))
+        if tcPr is None:
+            tcPr = OxmlElement("w:tcPr")
+            tcs[0].insert(0, tcPr)
+        va = tcPr.find(qn("w:vAlign"))
+        if va is None:
+            va = OxmlElement("w:vAlign")
+            tcPr.append(va)
+        va.set(qn("w:val"), "top")
+
+
 def normalize_table_geometry(tbl_el):
     """保留模板自身的表格几何（tblW 用 dxa、固定布局、居中），只清掉重复项。
 
@@ -288,6 +348,7 @@ from forms_content_2024 import (  # noqa: E402
     OUTLINE,
     TASK_LIT,
     TASK_REQ,
+    TASK_SCHEDULE,
     TASK_WORK,
     VALUE,
 )
@@ -317,17 +378,20 @@ TASK_DATES = _dedup([
     for c in old_task.rows[6].cells[1:]
     if para_texts(c)
 ])
-TASK_PLAN = _dedup([
-    " ".join(x.strip() for x in para_texts(c))
-    for c in old_task.rows[7].cells[1:]
-    if para_texts(c)
-])
+# "应该完成的内容"一列用 forms_content_2024.TASK_SCHEDULE（见那里的注释），
+# 不再从基线稿搬运：基线稿里那四句话太长，每行折两行会把表顶到第二页。
+TASK_PLAN = list(TASK_SCHEDULE)
 
 print("文献综述段数=%d 字数=%d" % (len(LIT), sum(len(re.sub(r"\s", "", t)) for t in LIT)))
 print("研究方法段数=%d 写作提纲段数=%d" % (len(METHOD), len(OUTLINE)))
 print("任务书 参考文献条数=%d 进度=%d/%d" % (len(TASK_REFS), len(TASK_DATES), len(TASK_PLAN)))
 assert len(TASK_DATES) == 4, "任务书进度必须是 4 行，实际 %d" % len(TASK_DATES)
 assert len(TASK_PLAN) == 4, "任务书进度必须是 4 行，实际 %d" % len(TASK_PLAN)
+
+# 同一段话不能既出现在「选题价值」又出现在「文献综述」——两栏曾经整段重复，
+# 讲的是同一件事（离线/实时双链路的历史），老师在纸面上并排一看就会发现。
+_dup = [v for v in VALUE if len(v) > 40 and v in LIT]
+assert not _dup, "选题价值与文献综述存在重复段落：%s…" % _dup[0][:30]
 
 # ---------------------------------------------------------------- 2. 生成开题报告
 spec = docx.Document(SPEC)
@@ -336,6 +400,8 @@ assert "开题报告" in prop_title.text, prop_title.text
 prop_tbl = copy.deepcopy(spec.tables[1]._tbl)
 relax_heights(prop_tbl)
 normalize_table_geometry(prop_tbl)
+allow_row_split(prop_tbl)
+top_align_label(prop_tbl, (3, 4, 5))
 assert_table_geometry(prop_tbl, "开题报告")
 
 trs = prop_tbl.findall(qn("w:tr"))
@@ -366,6 +432,9 @@ assert "任务书" in task_title.text, task_title.text
 task_tbl = copy.deepcopy(spec.tables[0]._tbl)
 relax_heights(task_tbl)
 normalize_table_geometry(task_tbl)
+allow_row_split(task_tbl)
+top_align_label(task_tbl, (3, 4, 5))
+keep_row_together(task_tbl, 11)
 assert_table_geometry(task_tbl, "任务书")
 
 ttrs = task_tbl.findall(qn("w:tr"))
