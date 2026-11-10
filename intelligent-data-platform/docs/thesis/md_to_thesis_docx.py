@@ -799,6 +799,106 @@ def _fill_cell(cell, text: str, *, bold: bool, align: int | None = None) -> None
     _add_inline_runs(paragraph, text, size=TABLE_PT, bold=bold)
 
 
+def _three_line_borders(table: Table) -> None:
+    """把数据表改成三线表（规范 2024 ㈦.6：表格用三线表，两端开放）。
+
+    Table Grid 样式给每个单元格加四边框，而三线表要的恰好是"没有竖线、
+    没有内部横线"：只有顶线、表头下线和底线。这里在 tblPr 上显式写
+    `w:tblBorders` 覆盖样式，再给表头行加下框线；不改 styles.xml，
+    因为封面那张表单共用 Table Grid，需要保留完整边框。
+    """
+    tblPr = table._tbl.tblPr
+    for old in tblPr.findall(qn("w:tblBorders")):
+        tblPr.remove(old)
+    borders = OxmlElement("w:tblBorders")
+    for edge, size in (("top", "12"), ("bottom", "12")):
+        el = OxmlElement(f"w:{edge}")
+        el.set(qn("w:val"), "single")
+        el.set(qn("w:sz"), size)          # 1/8 磅：12 = 1.5 磅
+        el.set(qn("w:space"), "0")
+        el.set(qn("w:color"), "000000")
+        borders.append(el)
+    for edge in ("left", "right", "insideH", "insideV"):
+        el = OxmlElement(f"w:{edge}")
+        el.set(qn("w:val"), "none")
+        el.set(qn("w:sz"), "0")
+        el.set(qn("w:space"), "0")
+        el.set(qn("w:color"), "auto")
+        borders.append(el)
+    tblPr.insert_element_before(borders, *_TBLPR_TAIL)
+
+    if not table.rows:
+        return
+    for cell in table.rows[0].cells:
+        tcPr = cell._tc.get_or_add_tcPr()
+        tc_borders = tcPr.find(qn("w:tcBorders"))
+        if tc_borders is None:
+            tc_borders = OxmlElement("w:tcBorders")
+            tcPr.insert_element_before(tc_borders, *_TCPR_TAIL)
+        bottom = OxmlElement("w:bottom")
+        bottom.set(qn("w:val"), "single")
+        bottom.set(qn("w:sz"), "6")       # 0.75 磅
+        bottom.set(qn("w:space"), "0")
+        bottom.set(qn("w:color"), "000000")
+        tc_borders.append(bottom)
+
+
+TABLE_CAPTIONS: tuple[str, ...] = (
+    '批流两类数据的形态差异',
+    '本文主要工作与可信依据',
+    '技术栈与版本',
+    '功能性需求与验收证据',
+    '约束与假设',
+    '数据层与服务层的部署边界',
+    '数仓分层职责',
+    '关键选型与取舍',
+    '指标口径的分类与空值约定',
+    '安全防线',
+    '内存预算与错峰措施',
+    '实时链路逐层实测',
+    '离线分层建模的表规模',
+    '实时事件到离线表的映射规则',
+    '交易域逐窗口对账结果',
+    '流量域口径差异与处置',
+    'Iceberg 迁移结果',
+    'Airflow 调度障碍与根因',
+    'Agent 反思重试的实测记录',
+    'MCP 能力声明的落点',
+    '数据质量校验的引擎分工',
+    '测试结果的时间线',
+    '核心结论与判据',
+    'Sprint 验收矩阵',
+    '性能基线的运行条件',
+    '只读接口查询延迟',
+    '实时侧与离线侧查询延迟对比',
+    '批量作业耗时',
+    'Agent 单次问答端到端耗时',
+    '工作总结与依据',
+    '本设计的不足与现状',
+    '第二版修订记录',
+    '术语与缩略语',
+    '复现命令清单',
+)
+"正文数据表题名，按出现顺序一一对应；表序自动编号。"
+
+
+def _caption_paragraph(doc, number: int, name: str) -> Paragraph:
+    """表题：五号宋体加粗居中，置于表上方（规范 2024 ㈦.6）。"""
+    paragraph = doc.add_paragraph()
+    pf = paragraph.paragraph_format
+    pf.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    pf.line_spacing = Pt(BODY_LINE_PT)
+    pf.space_before = Pt(6)
+    pf.space_after = Pt(6)
+    pf.keep_with_next = True
+    _set_indent(paragraph, left_cm=0.0, right_cm=0.0,
+                first_line_pt=0.0, first_line_chars=0)
+    run = paragraph.add_run(f"表{number}  {name}")
+    apply_run_format(run, size=TABLE_PT, cn=FONT_BODY_CN, en=FONT_BODY_EN,
+                     bold=True, color=RGBColor(0, 0, 0))
+    return paragraph
+
+
 def _table_block(doc, block: Block) -> None:
     """真正的 Word 表格：Table Grid 边框、表头加粗+浅灰底纹、跨页时重复表头。"""
     all_rows: list[list[str]] = ([block.header] if block.header else []) + block.rows
@@ -833,6 +933,9 @@ def _table_block(doc, block: Block) -> None:
             for cell in table.rows[ri].cells:
                 tcPr = cell._tc.get_or_add_tcPr()
                 _shade(tcPr, HEADER_FILL, _TCPR_TAIL)
+
+    # 数据表一律三线表（规范 2024 ㈦.6）
+    _three_line_borders(table)
 
 
 def _heading_paragraph(doc, block: Block) -> Paragraph:
@@ -953,8 +1056,50 @@ def _integrity_page(doc) -> None:
                     align=WD_ALIGN_PARAGRAPH.RIGHT, line_spacing=1.5)
 
 
+def _copyright_page(doc) -> None:
+    """版权使用授权书（2024 修订版装订顺序第 3 项，**页脚不标页码**）。
+
+    !! 文本来源 !!
+        2024 修订版《湖南工商大学本科生毕业论文管理规范汇总》只规定"装订顺序新增
+        版权使用授权书、且页脚不标页码"，正文措辞沿用学校近年通行的授权书表述。
+        作者签名 / 导师签名 / 日期全部留空待手写。
+
+    !! 交付前请核对 !!
+        若学院下发了单独的授权书模板，请以学院模板为准替换本函数里的正文；
+        位置与"不标页码"的节设置不需要改。
+    """
+    _rich_paragraph(doc, "湖南工商大学本科毕业论文（设计）版权使用授权书", size=16,
+                    cn=FONT_HEADING, en=FONT_HEADING, bold=True,
+                    align=WD_ALIGN_PARAGRAPH.CENTER, line_spacing=1.5,
+                    space_before=12, space_after=12)
+    _rich_paragraph(
+        doc,
+        "本人同意将本人在校学习期间完成的毕业论文（设计）"
+        "《基于 Lakehouse 与 AI Agent 的批流一体智能数据分析平台》"
+        "的使用权授予湖南工商大学。学校有权保留并向国家有关部门或机构送交论文（设计）的"
+        "复印件和电子版，允许论文（设计）被查阅和借阅；学校可以公布论文（设计）的全部或"
+        "部分内容，可以采用影印、缩印或其他复制手段保存、汇编论文（设计）。",
+        size=BODY_PT, line_spacing=Pt(BODY_LINE_PT),
+    )
+    _rich_paragraph(
+        doc,
+        "本人保证论文（设计）中不涉及国家秘密、商业秘密及他人知识产权等保密内容，"
+        "同意论文（设计）按学校有关规定公开发布。",
+        size=BODY_PT, line_spacing=Pt(BODY_LINE_PT),
+    )
+    for _ in range(3):
+        _empty_paragraph(doc)
+    _rich_paragraph(doc, "作者签名：________________", size=BODY_PT,
+                    align=WD_ALIGN_PARAGRAPH.RIGHT, line_spacing=1.5)
+    _rich_paragraph(doc, "指导教师签名：________________", size=BODY_PT,
+                    align=WD_ALIGN_PARAGRAPH.RIGHT, line_spacing=1.5)
+    _rich_paragraph(doc, "日期：        年     月     日", size=BODY_PT,
+                    align=WD_ALIGN_PARAGRAPH.RIGHT, line_spacing=1.5)
+
+
 def _toc_page(doc, notes: list[Block]) -> None:
-    _rich_paragraph(doc, "目录", size=16, cn=FONT_HEADING, en=FONT_HEADING, bold=True,
+    # 规范㈥.2：目录标题写作「目　　录」（黑体三号加粗、两字之间空两个全角空格）
+    _rich_paragraph(doc, "目　　录", size=16, cn=FONT_HEADING, en=FONT_HEADING, bold=True,
                     align=WD_ALIGN_PARAGRAPH.CENTER, line_spacing=1.5,
                     space_before=6, space_after=6)
     hint = _rich_paragraph(
@@ -983,6 +1128,7 @@ def _toc_page(doc, notes: list[Block]) -> None:
 
 def _body(doc, blocks: list[Block]) -> None:
     previous: str = ""
+    table_no: int = 0
     for block in blocks:
         if block.kind == "rule":
             continue
@@ -1001,9 +1147,10 @@ def _body(doc, blocks: list[Block]) -> None:
         elif block.kind == "code":
             _code_block(doc, block.lines)
         elif block.kind == "table":
-            if previous not in ("", "table"):
-                pass
+            table_no += 1
             _empty_paragraph(doc)          # 表前空段
+            name = TABLE_CAPTIONS[table_no - 1] if table_no <= len(TABLE_CAPTIONS) else ""
+            _caption_paragraph(doc, table_no, name)
             _table_block(doc, block)
             _empty_paragraph(doc)          # 表后空段
         previous = block.kind
@@ -1064,7 +1211,8 @@ def _body_section_index(doc) -> int:
     return len(doc.sections) - 1
 
 
-def _setup_sections(doc) -> None:
+def _setup_sections(doc, *, sec_abs_zh: int = -1, sec_abs_en: int = -1,
+                    sec_toc: int = -1) -> None:
     for section in doc.sections:
         section.page_width = Cm(PAGE_W_CM)
         section.page_height = Cm(PAGE_H_CM)
@@ -1110,10 +1258,17 @@ def _setup_sections(doc) -> None:
     _add_field(footer_para, " NUMPAGES ", "1", size=FOOTER_PT, cn=FONT_BODY_CN, en=FONT_BODY_EN)
     _rich_paragraph_into(footer_para, " 页", size=FOOTER_PT, cn=FONT_BODY_CN, en=FONT_BODY_EN)
 
-    # 前置节（封面 / 诚信声明 / 摘要 / 目录）不继承正文节的页眉页脚。
-    # 规范㈦.10 只要求"页眉页脚从正文所在页开始"，**并未要求前置部分编页码**；
-    # 因此这里让前置节页眉页脚全空（含封面的"页脚不标页码"，见二㈢.2）。
-    # 注意：本文件没有实现前置部分的罗马数字页码，前置页就是无页码，这是有意为之。
+    # 前置节（封面 / 诚信声明 / 版权使用授权书 / 摘要 / 目录）不继承正文节的页眉页脚。
+    #
+    # !! 2024 修订版规范对前置部分的页码有明确要求 !!
+    #     ㈢.2 封面与诚信声明"页脚不标页码"，版权使用授权书同；
+    #     ㈣.10/㈤.8 中文摘要与英文摘要"连续用罗马数字 Ⅰ、Ⅱ…"；
+    #     ㈥.2 目录"独立排序 Ⅰ、Ⅱ…"，即目录节要**重新**从 Ⅰ 起。
+    #   所以这里分成两档：前三节页脚全空；摘要节与目录节页脚只放一个 PAGE 域，
+    #   并用 `w:pgNumType` 的 fmt=upperRoman 控制显示为罗马数字
+    #   （Word 的 PAGE 域按所在节的编号格式渲染）。
+    #   正文节仍为阿拉伯数字、从 1 起（见函数末尾的 pgNumType start=1）。
+    roman_sections = [i for i in (sec_abs_zh, sec_abs_en, sec_toc) if i >= 0]
     for i, section in enumerate(doc.sections):
         if i == body_idx:
             continue
@@ -1123,6 +1278,22 @@ def _setup_sections(doc) -> None:
             p.text = ""
         for p in list(section.footer.paragraphs):
             p.text = ""
+        if i not in roman_sections:
+            continue
+        # 罗马数字页码：页脚只放页码本身，规范只在正文页要求「第 页 共 页」
+        roman_para = section.footer.paragraphs[0]
+        roman_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        roman_para.paragraph_format.line_spacing = 1.0
+        _set_indent(roman_para, left_cm=0.0, right_cm=0.0,
+                    first_line_pt=0.0, first_line_chars=0)
+        _add_field(roman_para, " PAGE ", "I", size=FOOTER_PT,
+                   cn=FONT_BODY_CN, en=FONT_BODY_EN)
+        pg_num = OxmlElement("w:pgNumType")
+        if i in (sec_abs_zh, sec_toc):
+            # 摘要节从 Ⅰ 起；目录节**独立**重新从 Ⅰ 起
+            pg_num.set(qn("w:start"), "1")
+        pg_num.set(qn("w:fmt"), "upperRoman")
+        section._sectPr.insert_element_before(pg_num, *_SECTPR_TAIL)
 
     sectPr = body_section._sectPr
     pg_num = OxmlElement("w:pgNumType")
@@ -1202,6 +1373,14 @@ def build_document(blocks: list[Block], title: str) -> "Document":
     _integrity_page(doc)
     doc.add_section(WD_SECTION.NEW_PAGE)
 
+    # ---- ②.5 版权使用授权书（2024 修订版装订顺序第 3 项，页脚不标页码）----
+    #   2024 修订版把装订顺序改成：封面 → 诚信声明 → **版权使用授权书** →
+    #   中文摘要 → 英文摘要 → 目录 → 正文 …。它同样要求"页脚不标页码"，
+    #   所以与诚信声明一样单独分节、由 `_setup_sections` 统一清空页眉页脚。
+    _copyright_page(doc)
+    doc.add_section(WD_SECTION.NEW_PAGE)
+    sec_abs_zh = len(doc.sections) - 1      # 中文摘要所在节（罗马数字页码起点）
+
     # ---- 定位正文章节：首个 "N. " 形式的一级标题（工科编号）----
     #   兼容两种写法：新的 "1. 绪论" 与旧的 "第 1 章 绪论"，
     #   这样即使正文还没改编号，也不会把摘要当成正文起点。
@@ -1238,14 +1417,19 @@ def build_document(blocks: list[Block], title: str) -> "Document":
     zh = front[:abs_split] if abs_split >= 0 else front
     en = front[abs_split:] if abs_split >= 0 else []
 
+    sec_abs_en = -1
+    if not zh:
+        sec_abs_zh = -1
     if zh:
         _body(doc, zh)
     if en:
         doc.add_section(WD_SECTION.NEW_PAGE)
+        sec_abs_en = len(doc.sections) - 1
         _body(doc, en)
 
     # ---- ⑤ 目录 ----
     doc.add_section(WD_SECTION.NEW_PAGE)
+    sec_toc = len(doc.sections) - 1          # 目录节独自从 Ⅰ 起编号
     _toc_page(doc, notes)
 
     # ---- ⑥~⑨ 正文（含参考文献/附录/致谢，它们本身是正文的一级标题）----
@@ -1264,7 +1448,7 @@ def build_document(blocks: list[Block], title: str) -> "Document":
         body[first_h1] = replace(body[first_h1], page_break=False)
     _body(doc, body)
 
-    _setup_sections(doc)
+    _setup_sections(doc, sec_abs_zh=sec_abs_zh, sec_abs_en=sec_abs_en, sec_toc=sec_toc)
     _enable_update_fields(doc)
     return doc
 
@@ -1365,16 +1549,37 @@ def verify(path: Path, sample: int = 200) -> None:
     # ---- 前置部分不得带正文页眉页脚（规范：页眉页脚从正文所在页开始）----
     #  判据要覆盖**所有非正文节**，并且页脚域也要查 —— 只查页眉会漏掉
     #  "页码域挂到了封面/摘要节"这类错误。
+    # ---- 前置部分的页眉页脚（2024 修订版规范）----
+    #   判据分两档，避免"一刀切"：
+    #     · 页眉：所有前置节必须为空（规范㈦.10 页眉从正文页开始）；
+    #     · 页脚：要么全空（封面/诚信声明/版权使用授权书），
+    #             要么只有一个 PAGE 域、**不含**「第 页 共 页」字样（摘要/目录）。
+    #   !! 只查页眉会漏掉"页码域挂到了封面"这类错误；只查"有没有页脚文字"
+    #      又会把合规的罗马数字页码误判为泄漏 —— 所以两条都要查，且要分开判。
     leaked = []
+    roman_seen = 0
     for i, s in enumerate(doc.sections):
         if i == body_idx_v:
             continue
         h = "".join(p.text for p in s.header.paragraphs)
         f = "".join(p.text for p in s.footer.paragraphs)
         fxml = "".join(p._p.xml for p in s.footer.paragraphs)
-        if "湖南工商大学毕业论文（设计）" in h or "PAGE" in fxml or f.strip():
-            leaked.append((i + 1, h.strip(), f.strip()))
-    assert not leaked, f"前置节泄漏了正文页眉/页脚：{leaked}"
+        has_page = "PAGE" in fxml
+        pg_num = s._sectPr.find(qn("w:pgNumType"))
+        fmt = pg_num.get(qn("w:fmt")) if pg_num is not None else ""
+        if "湖南工商大学毕业论文（设计）" in h:
+            leaked.append(("页眉", i + 1, h.strip()))
+        if "第" in f or "共" in f:
+            # 正文式样「第 页 共 页」出现在前置部分 —— 不允许
+            leaked.append(("页脚", i + 1, f.strip()))
+        elif has_page:
+            roman_seen += 1
+            if fmt != "upperRoman":
+                leaked.append(("页码格式", i + 1, fmt or "(默认阿拉伯数字)"))
+        elif f.strip():
+            leaked.append(("页脚", i + 1, f.strip()))
+    LOG.info("前置页脚        : %d 节带罗马数字页码，其余为无页码", roman_seen)
+    assert not leaked, f"前置节页眉/页脚不符合规范：{leaked}"
 
     # ---- 表格：Table Grid / 表头重复 / 底纹 ----
     # !! 封面表与数据表是**两类**表，判据必须分开 !!
@@ -1408,6 +1613,36 @@ def verify(path: Path, sample: int = 200) -> None:
              grid, len(tables), repeats, len(data_tables), shaded, len(data_tables))
     assert grid == len(tables), "有表格没有套用 Table Grid"
     assert repeats == len(data_tables), "存在未设置 tblHeader 的数据表表头"
+
+    # ---- 表题（规范 2024 ㈦.6）：五号宋体加粗居中，置于表上方，编号连续 ----
+    caption_paras = [p for p in doc.paragraphs
+                     if re.match(r"^表\d+\s", p.text.strip())]
+    cap_nums = [int(re.match(r"^表(\d+)", p.text.strip()).group(1))
+                for p in caption_paras]
+    cap_bad = []
+    for para in caption_paras:
+        runs = [r for r in para.runs if r.text.strip()]
+        if not runs:
+            cap_bad.append((para.text.strip()[:14], "无文字"))
+            continue
+        run = runs[0]
+        size = run.font.size.pt if run.font.size else None
+        if size != TABLE_PT or not run.bold:
+            cap_bad.append((para.text.strip()[:14], (size, run.bold)))
+        if para.paragraph_format.alignment != WD_ALIGN_PARAGRAPH.CENTER:
+            cap_bad.append((para.text.strip()[:14], "未居中"))
+    LOG.info("表题            : %d 条（表%s…表%s），格式异常 %d",
+             len(caption_paras),
+             cap_nums[0] if cap_nums else "-",
+             cap_nums[-1] if cap_nums else "-",
+             len(cap_bad))
+    if len(caption_paras) != len(TABLE_CAPTIONS):
+        raise AssertionError("表题 {} 条，应为 {} 条".format(
+            len(caption_paras), len(TABLE_CAPTIONS)))
+    if cap_nums != list(range(1, len(caption_paras) + 1)):
+        raise AssertionError("表题编号不连续：{}".format(cap_nums))
+    if cap_bad:
+        raise AssertionError("表题格式不符（应为五号宋体加粗居中）：{}".format(cap_bad[:3]))
 
     # ---- 正文版式：**行距固定值 22 磅** + 首行缩进 2 字符 + 宋体/Times New Roman ----
     #   规范㈥.4 / ㈦.4 写的是"行间距为固定值 22 磅"。
