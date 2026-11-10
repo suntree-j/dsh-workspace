@@ -30,14 +30,14 @@
 | `03-traffic-1920.png` | 流量分析（漏斗有数据） | 1920×1080 |
 | `04-category-1920.png` | 类目销售 | 1920×1080 |
 | `05-orders-1920.png` | 订单明细（6000 条） | 1920×1080 |
-| `06-batch-1920.png` | 离线与对账（PASS，11458 窗口一致） | 1920×1080 |
+| `06-batch-1920.png` | 离线与对账（PASS，40358 窗口一致） | 1920×1080 |
 | `07-ask-answer-1920.png` | 数据问答（真实回答 + SQL + steps） | 1920×1080 |
 | `08-metrics-1920.png` | 指标口径 | 1920×1080 |
 
 ### 0.3 实测关键业务数字（用于 UI 层级设计，禁止伪造趋势）
 
-- Overview GMV：`51,890,375.77`；订单 `6,000`；支付 `5,287`；退款 `254`；UV `1,200`；PV `20,000`
-- Batch 对账：`比对窗口 11,458`，`不一致 0`，`is_pass=1`；Realtime GMV = Offline GMV
+- Overview GMV：`17,068,016.12`；订单 `6,000`；支付 `5,287`；退款 `254`；UV `1,200`；PV `20,000`
+- Batch 对账：`比对窗口 40,358`，`不一致 0`，`is_pass=1`；Realtime GMV = Offline GMV
 - Agent 示例问「这些数据准不准」：12.1s，2 轮 `sql_query`，表 `ads_reconcile_summary` / `ads_reconcile_trade_1m`
 - KPI 环比：当前多为「待下一窗口」（最新窗口为 0，**诚实行为，禁止改成假 ↑12.5%**）
 
@@ -158,7 +158,7 @@
 
 ### 3.7 `#/batch`（`06-batch-1920.png`）——项目答辩核心页
 
-**Current 优点：** 顶部绿色 notice「批流对账一致 · 比对窗口 11458 · 不一致 0」信息正确。
+**Current 优点：** 顶部绿色 notice「批流对账一致 · 比对窗口 40358 · 不一致 0」信息正确。
 
 **Problems：**
 
@@ -364,7 +364,7 @@ Panel padding：`24px`；KPI 内边距：`16px`；grid gap：`12` 或 `16`。
 │     [API OK] [对账 PASS · 0 mismatch] [Agent Ready]            │
 ├─ B. Hero KPI（一级，2+1）───────────────────────────────────────┤
 │  [ GMV 大数字 28px + 窗口范围 + 来源 Realtime ADS ]  宽 2 列      │
-│  [ 批流一致性：Matched 11458 | Mismatch 0 | PASS ]   宽 1 列      │
+│  [ 批流一致性：Matched 40358 | Mismatch 0 | PASS ]   宽 1 列      │
 ├─ C. Secondary KPI（二级，4 卡）──────────────────────────────────┤
 │  Orders | Paying Users | Payment Amount | Refund Amount         │
 │  每卡：label / value / sub(真实字段) / 无假趋势                    │

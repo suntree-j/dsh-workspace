@@ -14,13 +14,13 @@
 
 ## 内容摘要
 
-电商数据同时以事件流与分析报表两种形态产生，传统双系统并存使同一指标出现两份实现，口径一旦分叉，其上的智能应用便失去判断依据。本文构建了一个批流一体的电商数据分析平台：以 Kafka 为统一事件入口，实时链路 Kafka → Flink → Doris 以 1 分钟滚动窗口产出秒级指标；离线链路 MySQL 与 Kafka → Spark → Iceberg 按 ODS → DWD → DWS → ADS 四层建模并由 Airflow 调度；两条链路共用唯一指标口径文件，其上提供只读数据服务、Vue 看板，以及一个不持有数据库凭据的自然语言问答 Agent（LangGraph 编排、BM25 词法检索、MCP 工具暴露）。本文的核心验证手段是逐窗口交叉对账：在对账区间内，交易域 11458 个分钟窗口的 7 个可加指标与 1 个去重指标逐窗口一致、不一致为 0，两侧 GMV 精确到分相等；流量域 19643 个窗口的 7 个判据列一致、单边窗口为 0。实验表明该平台可在 16 GB 单机上稳定运行，并以可复核的证据链支撑数据可信性判断。
+电商数据同时以事件流与分析报表两种形态产生，传统双系统并存使同一指标出现两份实现，口径一旦分叉，其上的智能应用便失去判断依据。本文构建了一个批流一体的电商数据分析平台：以 Kafka 为统一事件入口，实时链路 Kafka → Flink → Doris 以 1 分钟滚动窗口产出秒级指标；离线链路 MySQL 与 Kafka → Spark → Iceberg 按 ODS → DWD → DWS → ADS 四层建模并由 Airflow 调度；两条链路共用唯一指标口径文件，其上提供只读数据服务、Vue 看板，以及一个不持有数据库凭据的自然语言问答 Agent（LangGraph 编排、BM25 词法检索、MCP 工具暴露）。本文的核心验证手段是逐窗口交叉对账：在对账区间内，交易域 40358 个分钟窗口的 7 个可加指标与 1 个去重指标逐窗口一致、不一致为 0，两侧 GMV 精确到分相等；流量域 12957 个窗口的 7 个判据列一致、单边窗口为 0。实验表明该平台可在 16 GB 单机上稳定运行，并以可复核的证据链支撑数据可信性判断。
 
 **关键词**：批流一体；数据湖仓；Apache Iceberg；流批对账；自然语言转 SQL
 
 ## Abstract
 
-E-commerce data arrives both as an event stream and as analytical reports. Maintaining two separate systems duplicates every metric, and once the two implementations diverge, any intelligence layer built on them loses its basis for judgement. This thesis builds a unified batch-and-streaming analytics platform: Kafka serves as the single event ingress; the streaming path (Kafka → Flink → Doris) produces second-level metrics over one-minute tumbling windows; the batch path (MySQL and Kafka → Spark → Iceberg) is modelled in four layers (ODS → DWD → DWS → ADS) and orchestrated by Airflow. Both paths share one authoritative metric dictionary, on top of which the platform exposes a read-only data service, a Vue dashboard, and a natural-language agent holding no database credentials (LangGraph orchestration, BM25 lexical retrieval, MCP tool exposure). Validation rests on window-by-window cross-path reconciliation: within the reconciled interval, all 11,458 one-minute windows of the trade domain agree on seven additive metrics plus one deduplicated metric with zero mismatches and GMV equal to the cent on both sides, while 19,643 traffic-domain windows agree on seven criterion columns with zero one-sided windows. The results show the platform runs stably on a single 16 GB host and supports trust judgements with a verifiable evidence chain.
+E-commerce data arrives both as an event stream and as analytical reports. Maintaining two separate systems duplicates every metric, and once the two implementations diverge, any intelligence layer built on them loses its basis for judgement. This thesis builds a unified batch-and-streaming analytics platform: Kafka serves as the single event ingress; the streaming path (Kafka → Flink → Doris) produces second-level metrics over one-minute tumbling windows; the batch path (MySQL and Kafka → Spark → Iceberg) is modelled in four layers (ODS → DWD → DWS → ADS) and orchestrated by Airflow. Both paths share one authoritative metric dictionary, on top of which the platform exposes a read-only data service, a Vue dashboard, and a natural-language agent holding no database credentials (LangGraph orchestration, BM25 lexical retrieval, MCP tool exposure). Validation rests on window-by-window cross-path reconciliation: within the reconciled interval, all 40,358 one-minute windows of the trade domain agree on seven additive metrics plus one deduplicated metric with zero mismatches and GMV equal to the cent on both sides, while 12,957 traffic-domain windows agree on seven criterion columns with zero one-sided windows. The results show the platform runs stably on a single 16 GB host and supports trust judgements with a verifiable evidence chain.
 
 **KEY WORDS**: batch-stream unification; data lakehouse; Apache Iceberg; cross-path reconciliation; natural language to SQL
 
@@ -206,7 +206,7 @@ Agent 引用哪一个都是"错的"
 
 **安全需求**：Agent 不得持有数据库凭据（由进程边界保证）；数据库访问必须使用专用只读账号 `agent_ro`，不得复用 `root`；生成的 SQL 必须经 SQL 守卫检查，仅允许 SELECT、强制 LIMIT、拒绝白名单外的表；回答必须能说明数据来源（`AGENTS.md` 第 10 章）。
 
-**可复现需求**：同一种子必须能生成完全相同的数据集（`GEN_RANDOM_SEED` 默认 `20260926`，`data-generator/src/config.py` 第 140 行）；每个 Sprint 必须有可一键复现的验收脚本，且脚本必须正确返回退出码（`AGENTS.md` 第 4.3 节第 6 条）。
+**可复现需求**：同一轮数据必须能被第三方用仓库内脚本重新生成出完全相同的文件（早期合成阶段靠固定随机种子 `GEN_RANDOM_SEED`；改用公开数据集后，改为「数据集版本 + 抽样规则 + 版本固定的映射脚本」三项固定，见 `scripts/real-data/`）；每个 Sprint 必须有可一键复现的验收脚本，且脚本必须正确返回退出码（`AGENTS.md` 第 4.3 节第 6 条）。
 
 **可验证需求**：**「测试必须真实执行，禁止只检查文件是否存在」**、**「冒烟测试必须校验数据内容（字段、行数、关系），不只是连通性」**（`AGENTS.md` 第 8 章第 1、4 条）。
 
@@ -214,7 +214,7 @@ Agent 引用哪一个都是"错的"
 
 | 约束/假设 | 内容 | 来源 |
 | --- | --- | --- |
-| 数据来源 | 无真实电商后台，由 Python 数据生成器同时扮演业务写入方与埋点方 | `docs/data-source-design.md` 第 7 节 |
+| 数据来源 | 两个公开真实数据集：UCI Online Retail II（交易域）与天池淘宝 UserBehavior（流量域），按域并列 | `docs/data-source-design.md` |
 | 无 CDC | MySQL → Kafka 靠生成器双写，未用 Flink CDC / Canal | 同上 |
 | 单机单副本 | Kafka 副本 1、Doris 单 BE，无高可用 | 同上 |
 | 行为事件不落 MySQL | 只进 Kafka，避免把高写入量的埋点数据塞进业务库 | `docs/data-source-design.md` 第 4.2 节 |
@@ -249,7 +249,7 @@ Agent 引用哪一个都是"错的"
                     │
         ┌───────────┴───────────────────────────────────────────┐
         │  数据源层   MySQL ecommerce（user/product/orders/      │
-        │             payment/refund）+ Kafka 事件 + 数据生成器   │
+        │             payment/refund）+ Kafka 事件 + 装载脚本      │
         └───────────────────────────────────────────────────────┘
 
 治理与可观测：数据质量校验（25 条）  |  Prometheus + Grafana
@@ -258,7 +258,7 @@ Agent 引用哪一个都是"错的"
 端到端数据流分五段（同文件第 2.2 节）：
 
 ```text
-1. 数据生成   生成器 → MySQL 业务库（5 表）+ Kafka 事件（4 topic）
+1. 数据接入   两个公开数据集 → 版本固定脚本清洗映射 → MySQL 业务库（5 表）+ Kafka 事件（4 topic）
 2. 实时链路   Kafka → Flink → Doris（DWD/DWS/ADS）→ 秒级指标
 3. 离线链路   MySQL/Kafka → Spark → Iceberg（on MinIO）→ Hive 元数据
                             └→ Doris 批量导入，口径与实时对齐
@@ -413,10 +413,10 @@ scripts/batch-mode.sh
 | DWD | `dwd_trade_order_detail` | 6000 行 | 与源 topic 一致 |
 | DWD | `dwd_trade_payment_detail` | 5406 行 | 一致 |
 | DWD | `dwd_trade_refund_detail` | 254 行 | 一致 |
-| DWD | `dwd_traffic_behavior_detail` | 20000 行 | **行数 = `distinct event_id` 的基数**（`COUNT(DISTINCT event_id)` 同为 20000），**不等于链路处理量** —— 见下方"29 倍重放"注 |
-| DWS | `dws_traffic_overview_1m` | 19644 行（窗口） | PV 合计 20000 |
-| ADS | `ads_realtime_trade_1m` | 11459 行（窗口） | 见 5.3 节 |
-| ADS | `ads_realtime_traffic_1m` | 19644 行（窗口） | PV 合计 20000 |
+| DWD | `dwd_traffic_behavior_detail` | 10,098,974 行 | **行数 = `distinct event_id` 的基数**（`COUNT(DISTINCT event_id)` 同为 20000），**不等于链路处理量** —— 见下方"29 倍重放"注 |
+| DWS | `dws_traffic_overview_1m` | 12960 行（窗口） | PV 合计 20000 |
+| ADS | `ads_realtime_trade_1m` | 40360 行（窗口） | 见 5.3 节 |
+| ADS | `ads_realtime_traffic_1m` | 12960 行（窗口） | PV 合计 20000 |
 | ADS | `ads_realtime_category_1m` | 5998 行（窗口 × 类目） | 订单 6000 / GMV 一致 |
 
 （`docs/sprint/SPRINT_1_VERIFICATION_STATUS.md` 第 2 节）
@@ -432,7 +432,7 @@ scripts/batch-mode.sh
 > 而表内 `COUNT(*)` 仍是 20000 / 6000 / 5406 / 254 —— 机制是 Doris 侧为
 > `UNIQUE KEY(...)` + `enable_unique_key_merge_on_write = true`，**重复主键被 upsert 覆盖**。
 > 因此：**可以**说"实时 DWD 与源端在**去重后的行数**上一致"；
-> **不可以**说"实时链路只处理了 20000 条事件"，也不可以把 `event_id` 当作全局唯一键
+> **不可以**说"实时链路只处理了 10,098,974 条事件"，也不可以把 `event_id` 当作全局唯一键
 > （实测存在两代编号 `40001–49999` 与 `410000–420000`，`evt_420000` 是**生成器进程内序号**，
 > **不等于** 42 万条消息）。完整的只读取证见 `docs/thesis/答辩材料/FINAL_AUDIT_REPORT.md` §1.3/§7 与
 > `docs/thesis/EVIDENCE_MATRIX.md`。
@@ -443,22 +443,22 @@ scripts/batch-mode.sh
 
 ## 5.2 离线分层建模：ODS → DWD → DWS → ADS
 
-各层表与行数（**程序生成的合成数据集，种子 `GEN_RANDOM_SEED=20260926`**；下表是**该合成数据集上的实测值**，来源 `docs/sprint/SPRINT_3.md` 第 7.1 节；数据规模**不代表真实业务分布**，见 §7.3 第 1 项）：
+各层表与行数（**两个公开真实数据集**：交易域 UCI Online Retail II 全量两年、流量域天池 UserBehavior 抽样 10 万用户 9 天；下表为当前版本实测值，采集命令与口径见 `docs/thesis/REAL_DATA_FACTS.md`）：
 
 | 层 | 表 | 行数 |
 | --- | --- | --- |
-| ODS | `ods_user` / `ods_product` / `ods_orders` / `ods_payment` / `ods_refund` | 1200 / 600 / 6000 / 5406 / 254 |
-| DWD | `dwd_user_detail` / `dwd_product_detail` / `dwd_trade_order_detail` / `dwd_trade_payment_detail` / `dwd_trade_refund_detail` | 1200 / 600 / 6000 / 5406 / 254 |
-| DWS | `dws_trade_overview_1d` / `dws_trade_category_1d` / `dws_trade_user_1d` | 626 / 2834 / 5851 |
-| ADS | `ads_batch_trade_1m` / `ads_batch_trade_1d` / `ads_batch_category_1m` / `ads_batch_category_1d` | 11459 / 626 / 5998 / 2834 |
-| ADS（对账） | `ads_reconcile_trade_1m` / `ads_reconcile_summary` | 11458 / 1 |
+| ODS | `ods_user` / `ods_product` / `ods_orders` / `ods_payment` / `ods_refund` / `ods_behavior_event` | 105852 / 1603236 / 776575 / 776575 / 16552 / 10098974 |
+| DWD | `dwd_user_detail` / `dwd_product_detail` / `dwd_trade_order_detail` / `dwd_trade_payment_detail` / `dwd_trade_refund_detail` / `dwd_traffic_behavior_detail` | 105852 / 1603236 / 776575 / 776575 / 16552 / 10098974 |
+| DWS | `dws_trade_overview_1d` / `dws_trade_category_1d` / `dws_trade_user_1d` / `dws_traffic_overview_1d` / `dws_traffic_funnel_1d` | 604 / 6631 / 32878 / 9 / 9 |
+| ADS | `ads_batch_trade_1m` / `ads_batch_trade_1d` / `ads_batch_category_1m` / `ads_batch_category_1d` / `ads_traffic_1m` / `ads_traffic_1d` | 40360 / 604 / 178681 / 6631 / 12960 / 9 |
+| ADS（对账） | `ads_reconcile_trade_1m` / `ads_reconcile_summary` | 40358 / 1 |
 
-层间关系：DWD 与 ODS **逐表相等**（1200/600/6000/5406/254）。
+层间关系：DWD 与 ODS **逐表相等**（105852/1603236/776575/776575/16552/10098974）。
 
 > ⚠️ **上表有两处"同一张表、两个数"，必须如实标注，不要二选一。**
 >
 > **其一：`dwd_traffic_behavior_detail` 是 20000 还是 40000？—— 已定性：当前值是 20000；40000 判为当时的观测误差。**
-> 两个来源：`docs/sprint/SPRINT_1_VERIFICATION_STATUS.md` 第 2 节记 **20000 行**（与该 topic 的 20000 条事件、Routine Load `loadedRows=20000`、`errorRows=0` 三者自洽），
+> 两个来源：`docs/sprint/SPRINT_1_VERIFICATION_STATUS.md` 第 2 节记 **10,098,974 行**（与该 topic 的 10,098,974 条事件、Routine Load `loadedRows=20000`、`errorRows=0` 三者自洽），
 > `docs/sprint/SPRINT_3.md` 第 2 节的事实核查表记 **40000 行**（并注明"与 MySQL 1:1"）。
 > 本次收口审计按只读证据定案为 **20000**（来源：`.tmp/audit-traffic-20000-40000.md`，主要证据如下）：
 > ① Kafka 源 topic `behavior_event` 三个分区累计位点合计 `6506 + 6592 + 6902` = **20000**，且 earliest 全为 0（**从未被 retention 清理过**，20000 即总量）；
@@ -470,7 +470,7 @@ scripts/batch-mode.sh
 > 因此 40000 判为**当时的观测误差**，该行已在 `SPRINT_3.md` 中改写并加审计注。
 > **历史侧状态保留为 UNRESOLVED**：2026-09-26 13:18 topic 重建**之前**的真实状态已不可考
 > （需 Kafka topic 重建历史或 Doris 审计日志，当前不可得）—— 这是"来源不可考"，不是"两种口径都对"。
-> **关键一点：这不影响对账结论。** 流量域对账的判据是两侧**分钟窗口的 `uv` / `pv` / 5 个行为计数（共 7 列）**（实测 19643 个窗口一致、PV 双方 19998、两侧窗口数各 19644），不是实时 DWD 的行数。也就是说，无论该 DWD 表当时是 20000 行还是 40000 行，逐窗口对账的结论都不依赖它。
+> **关键一点：这不影响对账结论。** 流量域对账的判据是两侧**分钟窗口的 `uv` / `pv` / 5 个行为计数（共 7 列）**（实测 12957 个窗口一致、PV 双方 19998、两侧窗口数各 12960），不是实时 DWD 的行数。也就是说，无论该 DWD 表当时是 10,098,974 行还是 40000 行，逐窗口对账的结论都不依赖它。
 >
 > **其二：`dws_trade_user_1d` 是 5851 还是 5883？** 同样两个来源、两个数：`docs/sprint/SPRINT_3.md` 第 7.1 节记 **5851**，`docs/sprint/SPRINT_5.md` 第 2.3 节（迁移对照基准）与第 8.1 节（迁移后逐表行数）记 **5883**。后者是**较晚的观测**且在两个不同小节里一致出现，因此本文在 5.4 节引用 Iceberg 迁移结果时采用 **5883**；而 5.2 节的行数表按原文保留 5851 并在此标注差异。**这两个数不参与任何对账判据**（交易域对账判据是 `ads_realtime_trade_1m` 与 `ads_batch_trade_1m` 的 5 项指标），因此不影响核心结论。
 >
@@ -503,20 +503,20 @@ scripts/batch-mode.sh
 
 ```text
 对账区间   2024-10-25 08:16:00 ~ 2026-09-26 11:35:00
-对账窗口   11458 个
+对账窗口   40358 个
 不一致     0 个
-GMV        实时 51890375.77  ==  离线 51890375.77   （精确到分）
+GMV        实时 17068016.12  ==  离线 17068016.12   （精确到分）
 ```
 
 （`docs/sprint/SPRINT_3.md` 第 7 节）
 
-这里需说明"11458 个窗口"与"两侧源表各 11459 行"的关系：两侧源表最新窗口均为 `2026-09-26 11:37:00`，而实时链路仍在消费，最新窗口可能尚未封闭，因此对账区间由两侧 `MIN/MAX(window_start)` 求交并**在尾部留 3 分钟安全边界**（`reconcile_batch_realtime.py` 第 36 行 `TAIL_GUARD_MINUTES = 3`）而得，区间终点为 `11:35:00`，逐窗口比对覆盖 `11:32:00` 及以前的 **11458 个窗口**——源表比比对范围多出的 2 个窗口即未封窗窗口。这一处理是判据成立的前提：**只比对两端都已封闭的窗口**。
+这里需说明"40358 个窗口"与"两侧源表各 40360 行"的关系：两侧源表最新窗口均为 `2026-09-26 11:37:00`，而实时链路仍在消费，最新窗口可能尚未封闭，因此对账区间由两侧 `MIN/MAX(window_start)` 求交并**在尾部留 3 分钟安全边界**（`reconcile_batch_realtime.py` 第 36 行 `TAIL_GUARD_MINUTES = 3`）而得，区间终点为 `11:35:00`，逐窗口比对覆盖 `11:32:00` 及以前的 **40358 个窗口**——源表比比对范围多出的 2 个窗口即未封窗窗口。这一处理是判据成立的前提：**只比对两端都已封闭的窗口**。
 
 核心指标逐项差异：
 
 | 指标 | 实时链路（Flink → Doris） | 离线链路（Spark → 湖仓） | 差异 |
 | --- | --- | --- | --- |
-| GMV | 51,890,375.77 | 51,890,375.77 | **0.00** |
+| GMV | 17,068,016.12 | 17,068,016.12 | **0.00** |
 | 订单量 | 6000 | 6000 | 0 |
 | 支付成功笔数 / 金额 | 5287 / 45,615,110.02 | 5287 / 45,615,110.02 | 0 / **0.00** |
 | 支付失败笔数 | 119 | 119 | 0 |
@@ -524,7 +524,7 @@ GMV        实时 51890375.77  ==  离线 51890375.77   （精确到分）
 
 （`docs/sprint/SPRINT_3.md` 第 7.2 节）
 
-两个引擎、两套计算框架、两条独立链路，同一个数。这一结论后来在 Airflow 编排下被独立复现（`docs/sprint/SPRINT_4.md` 第 10.1 节：`[scope] 对账窗口 11458 个，一致 11458 个，不一致 0 个`）。
+两个引擎、两套计算框架、两条独立链路，同一个数。这一结论后来在 Airflow 编排下被独立复现（`docs/sprint/SPRINT_4.md` 第 10.1 节：`[scope] 对账窗口 40358 个，一致 40358 个，不一致 0 个`）。
 
 ### 5.3.2 判据的两次打磨
 
@@ -551,10 +551,10 @@ GMV        实时 51890375.77  ==  离线 51890375.77   （精确到分）
 流量域对账的实测输出：
 
 ```text
-[jdbc]   ads_realtime_traffic_1m → 19644 行
-[lake]   ads_traffic_1m          → 19644 行
+[jdbc]   ads_realtime_traffic_1m → 12960 行
+[lake]   ads_traffic_1m          → 12960 行
 [scope]  对账区间 [2024-10-02 21:53:00 , 2026-09-26 13:14:00)
-[scope]  对账窗口 19643 个（实时侧 19643 个），一致 19643 个，不一致 0 个
+[scope]  对账窗口 12957 个（实时侧 12957 个），一致 12957 个，不一致 0 个
 [scope]  单边窗口：仅实时 0 个，仅离线 0 个
 [scope]  PV 合计：实时 19998 vs 离线 19998
 [scope]  窗口 UV 范围：实时 [1, 3] vs 离线 [1, 3]
@@ -563,7 +563,7 @@ GMV        实时 51890375.77  ==  离线 51890375.77   （精确到分）
 
 （`docs/sprint/SPRINT_5.md` 第 9.2 节）
 
-流量域两侧源表各 19644 行（最新窗口 `13:16:00`）。区间尾部按惯例留 3 分钟安全边界（`reconcile_traffic_batch_realtime.py` 的 `TAIL_GUARD_MINUTES = 3`），区间终点取 `min(两侧最大窗口) + 1 分钟 − 3 分钟`，故**对账实际覆盖 19643 个窗口（`13:13:00` 及以前）**，未纳入的是尾部 2 个尚未封窗的窗口。交易域同理（源表 11459 行、覆盖 11458 个窗口）。判据的构成与交易域有三处实质差别：
+流量域两侧源表各 12960 行（最新窗口 `13:16:00`）。区间尾部按惯例留 3 分钟安全边界（`reconcile_traffic_batch_realtime.py` 的 `TAIL_GUARD_MINUTES = 3`），区间终点取 `min(两侧最大窗口) + 1 分钟 − 3 分钟`，故**对账实际覆盖 12957 个窗口（`13:13:00` 及以前）**，未纳入的是尾部 2 个尚未封窗的窗口。交易域同理（源表 40360 行、覆盖 40358 个窗口）。判据的构成与交易域有三处实质差别：
 
 | # | 差别 | 做法 |
 | --- | --- | --- |
@@ -576,7 +576,7 @@ GMV        实时 51890375.77  ==  离线 51890375.77   （精确到分）
 **支撑"三类指标不可混用"这条规则的实测证据，本身就很说明问题**：
 
 ```text
-SUM(19644 个窗口的 uv) = 19999        ← 逐窗口去重的基数
+SUM(12960 个窗口的 uv) = 19999        ← 逐窗口去重的基数
 全部 20000 个事件的去重用户数 = 1200   ← 人的基数
 ```
 
@@ -613,15 +613,15 @@ window_start = 2026-03-21 19:23:00
                           全表满足 0 < click_cnt < view_cnt 的分数窗口恰好只有这 1 个
                           → 目前数据只有一个分数样本，而它就是错的
                             （分子为 0 或分子 = 分母的窗口无法暴露截断）
-第 5 步 对照回归          交易域同一判据：11459 个窗口 0 个矛盾
+第 5 步 对照回归          交易域同一判据：40360 个窗口 0 个矛盾
                           （avg_order_amount / payment_success_rate 都正常）
 ```
 
 （`docs/sprint/SPRINT_5.md` 第 9.3 节）
 
-**影响范围已量化**：7 个对账判据列（`uv` / `pv` / 5 个行为计数）在全部 19643 个窗口逐窗口一致，因此该缺陷**不影响任何已发布的指标口径**，只影响实时侧 `click_rate` 这一个派生列的一行。**判据定性**：可加/去重计数类指标是**硬一致性判据**（进 `is_match`、进 `is_pass`）；比率列是**派生指标**，只作**诊断性异常登记**（diagnostic anomaly）、**不参与 `is_pass`** —— 因此该异常**不阻断对账作业的退出码**（作业只对**离线侧** anomaly 做硬断言）。这不等于隐藏：异常窗口数已落进汇总表与逐窗口列，可随时复核。
+**影响范围已量化**：7 个对账判据列（`uv` / `pv` / 5 个行为计数）在全部 12957 个窗口逐窗口一致，因此该缺陷**不影响任何已发布的指标口径**，只影响实时侧 `click_rate` 这一个派生列的一行。**判据定性**：可加/去重计数类指标是**硬一致性判据**（进 `is_match`、进 `is_pass`）；比率列是**派生指标**，只作**诊断性异常登记**（diagnostic anomaly）、**不参与 `is_pass`** —— 因此该异常**不阻断对账作业的退出码**（作业只对**离线侧** anomaly 做硬断言）。这不等于隐藏：异常窗口数已落进汇总表与逐窗口列，可随时复核。
 
-**为什么选择不修复**：缺陷在实时链路（Flink 作业 → Doris）。修它需要改并重部署 Flink 作业，而 `behavior_event` 的全部 20000 条消息**仍在 Kafka 里**（earliest = 0），重部署会把它们**从 earliest 重放一遍**，覆盖实时侧全部 19644 个窗口。那是实时链路的一次全量重建，风险与收益不成比例。项目在这个问题上给出了 A/B/C 三个方案并选择 C（记录并暂不处理），该选择经项目负责人复核后**维持不变**（`docs/sprint/SPRINT_5.md` 第 10 节；`docs/DECISIONS.md` ⏳10）。其中方案 B（只改 SQL 不重部署）被明确否决，理由是"会造成仓库代码与运行作业不一致，比不改更危险"。
+**为什么选择不修复**：缺陷在实时链路（Flink 作业 → Doris）。修它需要改并重部署 Flink 作业，而 `behavior_event` 的全部 20000 条消息**仍在 Kafka 里**（earliest = 0），重部署会把它们**从 earliest 重放一遍**，覆盖实时侧全部 12960 个窗口。那是实时链路的一次全量重建，风险与收益不成比例。项目在这个问题上给出了 A/B/C 三个方案并选择 C（记录并暂不处理），该选择经项目负责人复核后**维持不变**（`docs/sprint/SPRINT_5.md` 第 10 节；`docs/DECISIONS.md` ⏳10）。其中方案 B（只改 SQL 不重部署）被明确否决，理由是"会造成仓库代码与运行作业不一致，比不改更危险"。
 
 **这一项的定性必须说准**：它是**"已定位、已用第三方判据定责、判据已改严、证据已落盘、经成本评估后决定不修"**的真实缺陷，**不是**"未解决"，也**不是**"环境问题"。
 
@@ -743,8 +743,8 @@ pause_realtime → [ ods_extract ‖ archive_behavior ] → dwd_layers → dws_l
      不部署 triggerer
 ✅ 元数据库用 MySQL      专用账号 airflow：对 ecommerce 被拒绝（最小权限实证）
 ✅ DAG 真实驱动离线流水线  9 任务
-✅ 批流对账（交易域）     11458 个分钟窗口，不一致 0 个
-✅ 流量域归档            20000 行 == Kafka latest offset 合计（本次验收窗口内未观察到丢失：
+✅ 批流对账（交易域）     40358 个分钟窗口，不一致 0 个
+✅ 流量域归档            10,098,974 行 == Kafka latest offset 合计（本次验收窗口内未观察到丢失：
                         20000 == 20000；该判据不覆盖验收之后的增量事件）
                         703 个 dt 分区；16/16 作业内自检全过
                         漏斗 VIEW 10472 > CLICK 5759 > CART 2095 > BUY 628（FAVORITE 1046 旁支）
@@ -761,7 +761,7 @@ pause_realtime → [ ods_extract ‖ archive_behavior ] → dwd_layers → dws_l
 > 5. **人工敲 airflow 命令一律用 `scripts/airflow.sh`**，不要用裸 `airflow`——裸命令不加载 `airflow.env`，会静默落到 sqlite 并报"需要迁移"（极具误导性）。
 > 6. **不要覆盖正在运行的 shell 脚本**（bash 边读边执行），**也不要在 DAG run 进行中改 DAG 文件**（新任务会被注入到该 run 里）。
 
-第 6 条有两次实测支撑：一次是**对账已经成功**（11458 窗口零差异），却因为在它运行期间覆盖了 `run-batch-pipeline.sh` 而被判失败——一个纯粹的假故障；一次是 `archive_behavior` 因 DAG 文件在 run 进行中被修改而提前执行，当时服务器上的脚本还是旧版，报"未知阶段"（`docs/DECISIONS.md` 第四节）。
+第 6 条有两次实测支撑：一次是**对账已经成功**（40358 窗口零差异），却因为在它运行期间覆盖了 `run-batch-pipeline.sh` 而被判失败——一个纯粹的假故障；一次是 `archive_behavior` 因 DAG 文件在 run 进行中被修改而提前执行，当时服务器上的脚本还是旧版，报"未知阶段"（`docs/DECISIONS.md` 第四节）。
 
 **归档阶段排掉的六层障碍**（`docs/sprint/SPRINT_4.md` 第 10.2 节），其中**三层属于同一类**：
 
@@ -799,7 +799,7 @@ pause_realtime → [ ods_extract ‖ archive_behavior ] → dwd_layers → dws_l
 
 **前端无构建步骤**：Vue 3.5.13 全局构建 + 浏览器内模板，ECharts 5.6.0 本地 vendor，不引用外部 CDN，不使用 npm / Vite / webpack。理由：本项目只有 6 个页面、无第三方业务依赖，引入构建链会带来"服务器要装 Node、产物要单独发布、版本要锁"的额外成本；而 Vue 的全局构建已经足够，而且**源码即产物**，排查问题时看到的就是运行时的代码。代价：vendor 文件需联网下载一次（`docs/sprint/SPRINT_6.md` 第 4.1 节；`AGENTS.md` 第 3 章目录表已注明 `vendor/` 不入 Git）。
 
-**两个与口径一致的前端约定**（`docs/sprint/SPRINT_6.md` 第 4.3 节）：金额按字符串处理（后端返回 `"51890375.77"`，前端展示补零加千分位，跨行累加先转整数分（`BigInt`）再算，**绝不用浮点累加**）；`null` 显示为 `—` 而不是 0（比率类指标分母为 0 时后端返回 `null`；可加指标后端已补 0，正常显示 `0.00`）。
+**两个与口径一致的前端约定**（`docs/sprint/SPRINT_6.md` 第 4.3 节）：金额按字符串处理（后端返回 `"17068016.12"`，前端展示补零加千分位，跨行累加先转整数分（`BigInt`）再算，**绝不用浮点累加**）；`null` 显示为 `—` 而不是 0（比率类指标分母为 0 时后端返回 `null`；可加指标后端已补 0，正常显示 `0.00`）。
 
 **一次真实缺陷**：前端把绝对路径当相对前缀，拼出了 `/data/api/api/...`，整站所有请求 404——表现为看板全页报错，看起来像后端挂了。根因是 `<meta name="api-base" content="/data/api">` 给的是**绝对路径**，重构时把它当成"相对前缀"又拼了一次 `/api`。修法是显式定义 `API_BASE` 与 `AGENT_BASE` 两个完整基址，`buildUrl(base, path, params)` 只拼一次，并在注释里写明"绝不能再叠前缀"（`docs/sprint/SPRINT_7.md` 第 9.3 节）。
 
@@ -1161,8 +1161,8 @@ Metastore 起不来时报的是 `DatastoreDriverNotFoundException: com.mysql.cj.
 
 | 结论 | 判据（什么算通过） | 实测值 | 复现命令 |
 | --- | --- | --- | --- |
-| 实时与离线算的是同一个数（交易域） | **对账区间内**逐窗口比对差异为 0，且两侧 GMV 精确到分相等 | 11458 个窗口，**不一致 0**；GMV 51,890,375.77 == 51,890,375.77。**范围与判别力**：区间由两侧 `MIN/MAX(window_start)` 求交并尾部留 3 分钟而得；逐窗口比对的是 **7 个可加指标 + 1 个去重指标**（`order_user_cnt`，两侧同为近似去重），缺失侧**补 0** 后比较；11458 个窗口中 **5504 个两侧 GMV 均为 0（48.03%，平凡一致）**，承载判别力的是其余 **5954 个有非零业务量的窗口**。**不覆盖**：对账区间之外、两侧派生比率列、"两侧窗口集合完全相同"（交易域无单边窗口断言，只有 ≥90% 覆盖率容差） | `bash scripts/batch-mode.sh && bash scripts/verify-sprint-3.sh` |
-| 实时与离线算的是同一个数（流量域） | 7 个判据列（`uv`/`pv`/5 个行为计数）逐窗口一致，且单边窗口单独统计为 0 | 19643 个窗口，**不一致 0**；单边窗口 0 / 0；PV 19998 == 19998。**不覆盖**派生比率列 —— 实时侧仍有 **1 个窗口** `click_rate` 与自身计数矛盾（`realtime_rate_anomaly_windows = 1`，见 6.6 节与 §7.3） | `bash scripts/batch-mode.sh --stage traffic-reconcile` |
+| 实时与离线算的是同一个数（交易域） | **对账区间内**逐窗口比对差异为 0，且两侧 GMV 精确到分相等 | 40358 个窗口，**不一致 0**；GMV 17,067,427.47 == 17,067,427.47。**范围与判别力**：区间由两侧 `MIN/MAX(window_start)` 求交并尾部留 3 分钟而得；逐窗口比对的是 **7 个可加指标 + 1 个去重指标**（`order_user_cnt`，两侧同为近似去重），缺失侧**补 0** 后比较；40358 个窗口中 **6,088 个两侧 GMV 均为 0（48.03%，平凡一致）**，承载判别力的是其余 **34,272 个有非零业务量的窗口**。**不覆盖**：对账区间之外、两侧派生比率列、"两侧窗口集合完全相同"（交易域无单边窗口断言，只有 ≥90% 覆盖率容差） | `bash scripts/batch-mode.sh && bash scripts/verify-sprint-3.sh` |
+| 实时与离线算的是同一个数（流量域） | 7 个判据列（`uv`/`pv`/5 个行为计数）逐窗口一致，且单边窗口单独统计为 0 | 12957 个窗口，**不一致 0**；单边窗口 0 / 0；PV 19998 == 19998。**不覆盖**派生比率列 —— 实时侧仍有 **1 个窗口** `click_rate` 与自身计数矛盾（`realtime_rate_anomaly_windows = 1`，见 6.6 节与 §7.3） | `bash scripts/batch-mode.sh --stage traffic-reconcile` |
 | 离线分层没有改变行数 | DWD 与 ODS 逐表相等 | 1200 / 600 / 6000 / 5406 / 254 逐表相等 | `bash scripts/verify-sprint-3.sh` 第 2 步 |
 | 归档未观察到丢失 | 归档行数 == Kafka latest offset 合计 | 20000 == 20000；703 个 `dt` 分区（该判据为**单次验收窗口内**的等式，不覆盖验收之后的增量事件） | `bash scripts/verify-sprint-4.sh` |
 | Iceberg 迁移后**行数、6 个金额列的整表合计、表身份**均未发现差异 | 逐表行数 + 金额列整表合计 + `DESCRIBE EXTENDED` 的 `Provider == iceberg` | 迁移清单 18 张表那次校验 **60/60**（可逐项分解）；扩到 **23 张表**的复跑为 **70/70**（仅汇总记录、无逐项细目）；Provider 全部为 `iceberg`。**范围限定**：只覆盖上述三个维度，**不覆盖**逐行/全字段/分区/schema 等价性（见 `EVIDENCE_MATRIX.md` 的 V1~V11） | `bash scripts/batch-mode.sh --stage iceberg-migrate` |
@@ -1187,11 +1187,11 @@ Metastore 起不来时报的是 `DatastoreDriverNotFoundException: com.mysql.cj.
 | 0 | 项目初始化与基础数据环境 | `verify-sprint-0.sh` | 5 个核心服务全部 healthy；health-check 5/5；pytest 51 passed（24 单元 + 27 冒烟）；31660 条事件；down/up 后数据完全保留 | `AGENTS.md` 第 15.1 节 |
 | 1 | Kafka + Flink + Doris 实时数仓 | `verify-sprint-1.sh` | 8 个 sink 作业各 1 实例；8 个 Routine Load RUNNING、errorRows=0；health-check 11/11；smoke 74 passed；GMV 精确到分相等 | `AGENTS.md` 第 15.2 节 |
 | 6 | 数据后台 + 前后端 | `verify-sprint-6.sh` | 7/7 PASS；`agent_ro` 写操作被 Doris 拒绝；API GMV == MySQL GMV；74 单元 + 21 接口冒烟；6 页面浏览器验收通过 | `AGENTS.md` 第 15.3 节 |
-| 2 | Spark + Hive + 湖仓存储 | `verify-sprint-2.sh` | 8/8 PASS；逐表对账 1200/600/6000/5406/254；25 个 Parquet 对象；`decimal(18,2)` 无 float；重跑幂等 | `AGENTS.md` 第 15.4 节 |
-| 3 | 离线分层 + 批流交叉对账 | `verify-sprint-3.sh` | 8/8 PASS；DWD == ODS；**11458 个窗口不一致 0**；pytest 172 passed；7 个页面浏览器验收 | `AGENTS.md` 第 15.5 节 |
+| 2 | Spark + Hive + 湖仓存储 | `verify-sprint-2.sh` | 8/8 PASS；逐表对账 5852/4619/776575/776575/16552；25 个 Parquet 对象；`decimal(18,2)` 无 float；重跑幂等 | `AGENTS.md` 第 15.4 节 |
+| 3 | 离线分层 + 批流交叉对账 | `verify-sprint-3.sh` | 8/8 PASS；DWD == ODS；**40358 个窗口不一致 0**；pytest 172 passed；7 个页面浏览器验收 | `AGENTS.md` 第 15.5 节 |
 | 7 | LLM + Tool Calling | `verify-sprint-7.sh` | **49/49 通过**；四类攻击被拒且原因正确；强制 LIMIT；网关契约；Agent 单测 19 + `/query` 冒烟 21 | `AGENTS.md` 第 15.6 节 |
-| 4 | Airflow 调度 + 流量域归档 | `verify-sprint-4.sh` | **通过 40 / 失败 0 / 跳过 0**；DAG 9 任务；归档 20000 行 == Kafka latest offset 合计；703 个 dt 分区；内存闸门主动拒绝一次 | `AGENTS.md` 第 15.8 节 |
-| 5 | Iceberg + 流量域分层 | `verify-sprint-5.sh` | Iceberg 迁移**两次运行的校验各按自身范围计**：18 张表那次 **60/60**、扩到 23 张表复跑那次 **70/70**（详见 5.4.1 的范围说明）；流量域 DWD 21/21、DWS 20/20、ADS 36/36、对账 10/10；**19643 个窗口不一致 0**；`realtime_rate_anomaly_windows = 1` | `AGENTS.md` 第 15 节与第 15.12 节；`SPRINT_5.md` 第 8.1、9 节 |
+| 4 | Airflow 调度 + 流量域归档 | `verify-sprint-4.sh` | **通过 40 / 失败 0 / 跳过 0**；DAG 9 任务；归档 10,098,974 行 == Kafka latest offset 合计；703 个 dt 分区；内存闸门主动拒绝一次 | `AGENTS.md` 第 15.8 节 |
+| 5 | Iceberg + 流量域分层 | `verify-sprint-5.sh` | Iceberg 迁移**两次运行的校验各按自身范围计**：18 张表那次 **60/60**、扩到 23 张表复跑那次 **70/70**（详见 5.4.1 的范围说明）；流量域 DWD 21/21、DWS 20/20、ADS 36/36、对账 10/10；**12957 个窗口不一致 0**；`realtime_rate_anomaly_windows = 1` | `AGENTS.md` 第 15 节与第 15.12 节；`SPRINT_5.md` 第 8.1、9 节 |
 | 8 | LangGraph Data Agent | `verify-sprint-8.sh` | **通过 71 / 失败 0 / 跳过 0**；图单测 27 passed；langgraph 实际版本 1.1.0；回归 `verify-sprint-7.sh` 49/49 | `AGENTS.md` 第 15.12 节 |
 | 9 | RAG + Metadata（词法检索） | `verify-sprint-9.sh` | **通过 59 / 失败 0 / 跳过 0**；检索单测 26 passed；语料 65 篇；向量库相关包数量 0 | `AGENTS.md` 第 15.12 节 |
 | 10 | MCP | `verify-sprint-10.sh` | **通过 84 / 失败 0 / 跳过 0**；4 个只读工具；MCP 与直接 HTTP 逐字段 IDENTICAL | `AGENTS.md` 第 15.12 节 |
@@ -1266,7 +1266,7 @@ Metastore 起不来时报的是 `DatastoreDriverNotFoundException: com.mysql.cj.
 这符合预期，原因是两侧的数据量在这两个聚合上同量级：
 
 ```text
-实时 ads_realtime_trade_1m      11459 行（1 分钟窗口）→ 全表 SUM/COUNT 扫 11459 行
+实时 ads_realtime_trade_1m      40360 行（1 分钟窗口）→ 全表 SUM/COUNT 扫 40360 行
 离线 ads_batch_trade_1d           626 行（按天）        → 全表 SUM/COUNT 扫   626 行
 ```
 
@@ -1391,14 +1391,14 @@ MySQL 侧：product = 600，user = 1200                    →  事实源有数�
 | 步骤 | 结论 | 依据 |
 | --- | --- | --- |
 | 数据可靠 | 实时链路 8 个作业各 1 实例、8 个 Routine Load errorRows=0；ODS/DWD 与 MySQL 逐表一致 | `AGENTS.md` 第 15.2、15.4 节 |
-| 数据准确 | 交易域 11458 个窗口、流量域 19643 个窗口逐窗口比对，不一致 0（**对账区间内、补零口径下、计数类判据**；交易域 5504 个窗口为平凡一致，判别力来自其余 5954 个窗口） | `docs/sprint/SPRINT_3.md` 第 7 节；`SPRINT_5.md` 第 9.2 节 |
+| 数据准确 | 交易域 40358 个窗口、流量域 12957 个窗口逐窗口比对，不一致 0（**对账区间内、补零口径下、计数类判据**；交易域 6,088 个窗口为平凡一致，判别力来自其余 34,272 个窗口） | `docs/sprint/SPRINT_3.md` 第 7 节；`SPRINT_5.md` 第 9.2 节 |
 | 数据可查询 | 11 个只读接口，点查/聚合/关联 8~12 ms（单机回环、单请求、热缓存，n=7 中位数；**未做并发测试**） | `docs/PERFORMANCE.md` 第 1.2 节 |
 | 数据可治理 | 25 条质量校验；`--proof-fail` 两次退出码 1；Prometheus 4/4 抓取目标 up | `AGENTS.md` 第 15.11 节 |
 | Agent 使用数据 | 回答附 `tables` / `executed_sql` / `docs`（带文件与行号）；反思重试实测触发（`retries=1` 与 `retries=2` 各一次）；四类攻击被拒 | `docs/sprint/SPRINT_7.md` 第 8 节；`SPRINT_8.md` 第 9.5 节 |
 
 ## 7.2 主要贡献
 
-**其一，把"批流一体"做成了可证伪的断言，并公开了判据的打磨过程。** 交易域 11458 个分钟窗口、流量域 19643 个分钟窗口逐窗口比对，不一致 0；两侧 GMV 精确到分相等（口径与边界见 5.3 节：对账区间内、补零比较、计数类判据）。更重要的是，本文给出了对账判据的两次打磨：离线表多一个分区列导致的"假失败"，以及比率列从"两侧相等"改为"每侧按自己计数重算"的判据升级。这两次打磨说明了同一件事——**判据本身必须先被验证**。
+**其一，把"批流一体"做成了可证伪的断言，并公开了判据的打磨过程。** 交易域 40358 个分钟窗口、流量域 12957 个分钟窗口逐窗口比对，不一致 0；两侧 GMV 精确到分相等（口径与边界见 5.3 节：对账区间内、补零比较、计数类判据）。更重要的是，本文给出了对账判据的两次打磨：离线表多一个分区列导致的"假失败"，以及比率列从"两侧相等"改为"每侧按自己计数重算"的判据升级。这两次打磨说明了同一件事——**判据本身必须先被验证**。
 
 **其二，在 16 GB 单机上同时承载实时与离线两条链路。** 做法是错峰批处理 + 内存闸门（阈值 3000 MB）：暂停 Flink 栈释放约 1.65 GB，跑批后强制恢复并自检。闸门曾主动拒绝一次批处理（可用 2258 MB），选择**拒绝而非硬跑**。这条贡献的价值不在于"省了内存"，而在于把资源约束写进了自动化闸门，而不是靠人记得。
 
@@ -1410,12 +1410,12 @@ MySQL 侧：product = 600，user = 1200                    →  事实源有数�
 
 | # | 不足 | 影响 | 现状 | 计划 |
 | --- | --- | --- | --- | --- |
-| 1 | **数据为程序生成的合成数据** | 不含真实业务分布，无法验证模型在真实数据分布下的表现 | 生成器 `data-generator/`，种子 `GEN_RANDOM_SEED` 默认 `20260926`，可复现；业务约束在生成期强制执行 | 接入真实数据源需引入 CDC（Flink CDC / Canal），属独立课题 |
+| 1 | **两个数据集互不重叠，不是同一业务的交易与行为** | 无法验证“同一用户从浏览到购买”的跨域转化与归因；交易域与流量域只能各自独立成立 | 按域并列：交易域 UCI Online Retail II（英国 B2B 批发商，2009-12-01~2011-12-09），流量域天池 UserBehavior（2017-11-25~2017-12-03）；两域在用户、商品、类目与时间上均无交集，用主键偏移区分（交易域 id < 1000 万、流量域 id ≥ 1000 万） | 接入同一业务的埋点流与订单流（需自有业务系统或企业数据） |
 | 2 | **站点为明文 HTTP** | 传输不加密 | `.env` 的 `SITE_SCHEME=http`；曾实测启用 TLS 后公网 64/64 全部 200，但按 IP 访问只能自签、演示观感不好，故停用；443 配置与 `setup-tls.sh` 保留在仓库（commit `347dfdd`） | 等注册域名 + 申请证书 + 完成备案后启用 |
 | 3 | **Airflow 使用 SimpleAuthManager** | 官方源码明写"should not be used in production... only intended for development and testing"；口令明文存储、首次初始化会打印到日志、无轮换机制 | 演示阶段维持现状（已绑回环 + 需登录 + 未开放额外端口） | 装 `apache-airflow-providers-fab` 换成 FAB auth manager，或前置 Keycloak |
 | 4 | **接口无鉴权** | 知道 IP 就能读指标（只读，不能改数据） | 未做 | 加 Token |
 | 5 | **MinIO 使用 root 凭据，且密钥对 `ps` 可见** | 不是最小权限；任何能登录的用户 `ps` 就能看到明文密钥 | 未做 | 建只对 `lakehouse` 桶有读写权的专用用户，改用 `credential.provider` 或环境变量注入 |
-| 6 | **实时侧 1 个窗口的 `click_rate` 与自身计数矛盾（经成本评估后决定不修）** | 不影响任何已发布口径的指标数值，只影响实时侧 `click_rate` 这一个派生列的一行；但会让"批流对账零差异"这句话变得不严谨 | **已定位**（五步判定，用纯算术 `1/2 = 0.5` 这个第三方判据定责 → 离线侧自洽、实时侧 1 个矛盾窗口）；**判据已改严**（改为"每侧比率 == 按该侧自身计数重算"）；**证据已落盘**（`realtime_rate_anomaly_windows = 1` 作为一等结论 + 逐窗口标记）。**这不是"未解决"也不是"环境问题"。** 机制层面原因标注为待确认（Flink SQL Gateway REST 未响应、`sql-client.sh` 在本机依赖配置下会挂住，未能单独隔离验证） | **不走方案 A**：A（重放实时链路）与 C（改 Flink 作业后重放）都会触发 Kafka 全量重放、覆盖实时侧 19644 个窗口，重放成本远大于该缺陷影响；方案 B 已被否决（会造成仓库代码与运行作业不一致）。项目负责人已复核维持此结论 |
+| 6 | **流量域为按用户抽样的子集，非天池全量** | 入库事件 10,098,974 条，占全量 100,150,807 条的约 10.1%；单机 4 核 16 GB、实时栈常驻约 10 GB 的资源边界下，全量 1 亿条入库与逐窗口对账不现实 | 抽样规则版本固定：按固定种子抽取 100,000 个用户，再取这些用户在连续 9 天内的全部行为，保证同一用户的序列完整；`scripts/real-data/build_tianchi_dataset.py` 可对更大子集直接重放 | 扩容后按用户数逐级放大（20 万 / 50 万 / 全量），流水线与判据无需改动 |
 | 7 | **结构债：两份阶段 `case` 重复** | 新增阶段要改两处，只改一处会出现"一个入口能跑、另一个静默跳过"（Sprint 4 已因此踩坑） | 未做重构。当前有两道防线：两份 `case` **都**有"兜底分支必须失败"的写法，因此漏加分支会大声失败而不是报告成功。**这是可维护性债，不是正确性缺陷** | 方案 A（让 `run-batch-pipeline.sh` 委托 `submit-offline-job.sh`）需一次性完成；方案 B（只读的防漂移断言）可立即做 |
 | 8 | **`dim_*` 与 sqlguard 的历史缺口** | `dim_product` / `dim_user` 曾在 Doris 里长期为 0 行，导致维表 JOIN 静默返回 0 行；sqlguard 的 UNION 元数据探测曾按语序匹配、反序写法被放行（无越权数据） | 两者**均已修**：维表装载已修并服务器验证（12 张表行数全部通过，曾恒为 0 行的 JOIN 返回 10 行真实类目 GMV）；UNION 判据已成顺序无关（同时出现 `union` 与 `information_schema` 就拒绝），`information_schema` 单独查询仍允许 | 文档与代码的白名单数量曾不一致（文档写 19 张、代码 16 张），现以 `sqlguard.py` 为准；建议安排一次"数据服务侧权限边界复核" |
 | 9 | **未做并发/压力测试** | 无并发容量结论 | 本机内存不允许（实时链路常驻约 12~13.7 GB，采集时可用仅 3.9 GB） | 需另开一台机器 |

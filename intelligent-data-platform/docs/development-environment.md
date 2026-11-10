@@ -454,7 +454,7 @@ Sprint 0 启动前已实测以上宿主端口**全部空闲**。
 | `data-platform-doris-fe-log` | `/opt/apache-doris/fe/log` | FE 日志 |
 | `data-platform-doris-be-storage` | `/opt/apache-doris/be/storage` | BE 数据存储 |
 | `data-platform-doris-be-log` | `/opt/apache-doris/be/log` | BE 日志 |
-| `data-platform-data-generator-state` | `/app/state` | 数据生成器快照（保证 Kafka 事件与 MySQL 数据一致） |
+| `data-platform-data-generator-state` | `/app/state` | 历史合成生成器的快照卷（当前链路不再使用，可清理） |
 | `data-platform-flink-checkpoints` | `/opt/flink/checkpoints` | Flink 检查点（作业恢复用） |
 
 > `docker compose down -v` 会**删除全部数据**，仅在需要完全重置环境时使用。
@@ -501,7 +501,7 @@ cp .env.example .env
 | Doris BE 每 ~15 秒重启 | 上游 `be-4.1.4` 的 `entry_point.sh` 在 `check_be_status` 成功后即返回，容器 PID 1 退出 | `infrastructure/doris/be-keepalive.sh` 保活包装；已验证 150 秒 0 重启 |
 | Doris 初始化 SQL 中断 | `ALTER SYSTEM SET default_replication_num` 在 4.1.4 不存在该系统变量 | 删除该语句，改为每张表显式 `PROPERTIES("replication_num"="1")` |
 | MinIO 初始化失败 | minio 镜像基于 BusyBox，**无 sed/awk/grep/curl/tar** | init 脚本改 POSIX 参数展开；healthcheck 改用 `mc ls` |
-| 数据生成器写快照失败 | 非 root 用户 + 宿主机属主挂载 | 快照目录改用命名卷 |
+| 历史合成生成器写快照失败 | 非 root 用户 + 宿主机属主挂载 | 快照目录改用命名卷（当前链路已不使用） |
 | `vm.max_map_count` 偏低 | 默认 1048576 < Doris 要求 2000000 | `/etc/sysctl.d/99-data-platform.conf` |
 | Docker Hub 不可达 | 中国大陆网络 | 国内 registry mirror + SSH 反向隧道代理 |
 | Doris FE 占用 5.93 GB 内存 | FE JVM 默认堆无上限 | ~~`.env` 的 `DORIS_FE_JAVA_OPTS` 限制堆与 Metaspace~~ **此结论有误，见下一条**；`JAVA_OPTS` 环境变量被 `start_fe.sh:350` 用 `fe.conf` 的 `JAVA_OPTS_FOR_JDK_17` 覆盖，实际无效 |

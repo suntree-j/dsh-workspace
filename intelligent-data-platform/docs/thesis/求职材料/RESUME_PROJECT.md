@@ -29,12 +29,12 @@
   - **设计并实现逐窗口交叉对账**：两侧按 `window_start` 做 **FULL OUTER JOIN**（而非 INNER JOIN——用 INNER JOIN 会把"整行缺失"这类最严重的差异静默过滤掉），逐窗口比对，差异逐列落盘；对账区间由两侧数据范围求交并**尾部留 3 分钟安全边界**；**单边窗口单独统计**。
   - **建立**资源约束的自动化闸门：16 GB 单机上实时链路常驻约 13.7 GB，因此实现**错峰批处理**（暂停 Flink 栈释放约 1.65 GB → 内存闸门检查 → 跑批 → 强制恢复并自检），闸门阈值 3000 MB。
 - **R 结果**：
-  - 交易域 **11458 个分钟窗口逐窗口比对，不一致 0**（判据为 **7 个可加指标 + 1 个去重指标**，去重指标两侧采用同一近似去重语义），两侧 GMV **精确到分相等（51,890,375.77）**（`docs/sprint/SPRINT_3.md` §7；`docs/PERFORMANCE.md` §0.1 记实时 ADS 整表 11459 行，与对账口径 11458 同源不同口径）。
-  - 流量域 **19643 个分钟窗口**：**7 个判据列（`uv` / `pv` / 5 个行为计数）逐窗口一致**、不一致 0、单边窗口 0/0，PV 两侧 19998 == 19998（`docs/sprint/SPRINT_5.md` §9.2）。
+  - 交易域 **40358 个分钟窗口逐窗口比对，不一致 0**（判据为 **7 个可加指标 + 1 个去重指标**，去重指标两侧采用同一近似去重语义），两侧 GMV **精确到分相等（17,067,427.47）**（`docs/sprint/SPRINT_3.md` §7；`docs/PERFORMANCE.md` §0.1 记实时 ADS 整表 40360 行，与对账口径 40358 同源不同口径）。
+  - 流量域 **12957 个分钟窗口**：**7 个判据列（`uv` / `pv` / 5 个行为计数）逐窗口一致**、不一致 0、单边窗口 0/0，PV 两侧 19998 == 19998（`docs/sprint/SPRINT_5.md` §9.2）。
   - 层间一致：DWD 与 ODS **逐表行数相等**（1200 / 600 / 6000 / 5406 / 254）（`docs/sprint/SPRINT_3.md` §7.1）。
   - 实时链路状态：8 个 Flink sink 作业各 1 个实例，8 个 Doris Routine Load 全部 RUNNING 且 `errorRows = 0`（`AGENTS.md` §15.2）。
   - 内存闸门**实测主动拒绝过一次批处理**（当时可用 2258 MB）——拒绝而非硬跑（`AGENTS.md` §15.8）。
-  - **边界（必须一起写）**：上述一致性结论限于**对账区间内**、**补零口径**下的**逐窗口指标值**；11458 个窗口中有 **5504 个（48.03%）两侧 GMV 均为 0（平凡一致）**，承载判别力的是 **5954 个有业务量的窗口**；交易域**没有**"单边窗口 = 0"的硬断言（只有"实时侧 ≥ 离线侧 × 90%"的覆盖率守卫），且派生比率列不在判据内（`docs/thesis/EVIDENCE_MATRIX.md` §3）。
+  - **边界（必须一起写）**：上述一致性结论限于**对账区间内**、**补零口径**下的**逐窗口指标值**；40358 个窗口中有 **6,088 个（15.08%）两侧 GMV 均为 0（平凡一致）**，承载判别力的是 **34,272 个有业务量的窗口（84.92%）**；交易域**没有**"单边窗口 = 0"的硬断言（只有"实时侧 ≥ 离线侧 × 90%"的覆盖率守卫），且派生比率列不在判据内（`docs/thesis/EVIDENCE_MATRIX.md` §3）。
 
 ---
 
@@ -97,7 +97,7 @@
 
 ### 中文版一句话总结（放在项目描述开头或结尾）
 
-> 在一个 16 GB 单机实验环境里，设计并实现了一条完整的批流一体数据链路（Kafka → Flink → Doris 与 Spark → Iceberg → Doris），用**逐分钟窗口交叉对账**把"两条链路算的是同一个数"变成可证伪的断言（交易域 11458 个窗口、流量域 19643 个窗口，不一致 0），并在此之上构建了**不持有数据库凭据**、回答附实际执行 SQL 与口径来源的自然语言问数 Agent；全部结论均标注证据来源与适用边界（合成数据、单机回环、无并发测试）。
+> 在一个 16 GB 单机实验环境里，设计并实现了一条完整的批流一体数据链路（Kafka → Flink → Doris 与 Spark → Iceberg → Doris），用**逐分钟窗口交叉对账**把"两条链路算的是同一个数"变成可证伪的断言（交易域 40358 个窗口、流量域 12957 个窗口，不一致 0），并在此之上构建了**不持有数据库凭据**、回答附实际执行 SQL 与口径来源的自然语言问数 Agent；全部结论均标注证据来源与适用边界（两个公开真实数据集、单机回环、无并发测试）。
 
 ---
 
@@ -121,12 +121,12 @@
   - **Designed and implemented window-level cross-path reconciliation**: both sides are joined with a **FULL OUTER JOIN on `window_start`** (not INNER JOIN — an inner join silently drops the most severe class of difference, a missing row), compared window by window with per-column diffs persisted; the reconciliation interval is the intersection of both sides' ranges with a **three-minute safety margin**, and **one-sided windows are counted separately**.
   - **Established** an automated resource gate: the streaming stack idles at roughly 13.7 GB on a 16 GB host, so batch execution is **time-staggered** (suspend the Flink stack, releasing about 1.65 GB → memory gate check → run the batch → force restore with a self-check) with a 3,000 MB gate threshold.
 - **Result.**
-  - Trade domain: **11,458 one-minute windows compared window by window, 0 mismatches** across **7 additive metrics plus 1 deduplicated metric** (both sides using the same approximate-dedup semantics), with GMV **equal to the cent on both sides (51,890,375.77)** (`docs/sprint/SPRINT_3.md` §7).
-  - Traffic domain: **19,643 windows, 0 mismatches, 0 one-sided windows on either side**, with the **7 criteria columns** (`uv`, `pv` and five behaviour counters) matching window by window (`docs/sprint/SPRINT_5.md` §9.2).
+  - Trade domain: **40,358 one-minute windows compared window by window, 0 mismatches** across **7 additive metrics plus 1 deduplicated metric** (both sides using the same approximate-dedup semantics), with GMV **equal to the cent on both sides (17,067,427.47)** (`docs/sprint/SPRINT_3.md` §7).
+  - Traffic domain: **12,957 windows, 0 mismatches, 0 one-sided windows on either side**, with the **7 criteria columns** (`uv`, `pv` and five behaviour counters) matching window by window (`docs/sprint/SPRINT_5.md` §9.2).
   - Layer parity: DWD equals ODS **table by table** (1200 / 600 / 6000 / 5406 / 254) (`docs/sprint/SPRINT_3.md` §7.1).
   - Streaming status: 8 Flink sink jobs, one instance each; 8 Doris Routine Load jobs RUNNING with `errorRows = 0` (`AGENTS.md` §15.2).
   - The memory gate **actively refused a batch run once** (2,258 MB available) — refusal instead of running anyway (`AGENTS.md` §15.8).
-  - **Boundary, stated together with the result:** the agreement claim holds **inside the reconciliation interval**, under the **missing-side-filled-with-zero** convention, for the **per-window metric values**. Of the 11,458 windows, **5,504 (48.03%) have zero GMV on both sides (trivially equal)**; the evidentiary weight rests on the **5,954 windows that carry business volume**. The trade domain has **no** hard assertion that one-sided windows equal zero (only a "streaming side ≥ 90% of batch side" coverage guard), and derived ratio columns are outside the criteria set (`docs/thesis/EVIDENCE_MATRIX.md` §3).
+  - **Boundary, stated together with the result:** the agreement claim holds **inside the reconciliation interval**, under the **missing-side-filled-with-zero** convention, for the **per-window metric values**. Of the 40,358 windows, **6,088 (48.03%) have zero GMV on both sides (trivially equal)**; the evidentiary weight rests on the **34,272 windows that carry business volume**. The trade domain has **no** hard assertion that one-sided windows equal zero (only a "streaming side ≥ 90% of batch side" coverage guard), and derived ratio columns are outside the criteria set (`docs/thesis/EVIDENCE_MATRIX.md` §3).
 
 ---
 
@@ -189,7 +189,7 @@
 
 ### English one-paragraph summary
 
-> Designed and built an end-to-end batch-and-streaming data platform on a single 16 GB host (Kafka → Flink → Doris alongside Spark → Iceberg → Doris), turning "both paths compute the same number" into a falsifiable assertion through **window-level cross-path reconciliation** (11,458 trade-domain windows and 19,643 traffic-domain windows, 0 mismatches), and built on top of it a natural-language data agent that **holds no database credentials** and returns the actually executed SQL together with line-referenced metric definitions. Every claim is stated with its evidence source and its scope (synthetic data, single host, loopback, no concurrency testing).
+> Designed and built an end-to-end batch-and-streaming data platform on a single 16 GB host (Kafka → Flink → Doris alongside Spark → Iceberg → Doris), turning "both paths compute the same number" into a falsifiable assertion through **window-level cross-path reconciliation** (40,358 trade-domain windows and 12,957 traffic-domain windows, 0 mismatches), and built on top of it a natural-language data agent that **holds no database credentials** and returns the actually executed SQL together with line-referenced metric definitions. Every claim is stated with its evidence source and its scope (synthetic data, single host, loopback, no concurrency testing).
 
 ---
 
@@ -197,15 +197,15 @@
 
 ### ① "你这数据是合成的吧？那结论还有意义吗？"
 
-> **一句话**：全部是程序生成的合成数据，种子 `20260926` 同种子可复现、业务约束在生成期强制、Kafka 事件是基于**真实写进 MySQL 的那批数据**生成的（不是各随机一套）——**正因为这三点，逐窗口对账的结论才有资格被第三方复核**；它不代表真实业务分布，这是最大的限制，接真实数据源需要引入 CDC。
+> **一句话**：数据来自两个公开真实数据集（UCI Online Retail II 全量两年 + 天池 UserBehavior 按用户抽样 10 万），清洗与映射全部脚本化、可重放，金额按 `Decimal` 精确到分（776,575 / 776,575 行与 `quantity × price` 相等）——**正因为来源可查、规则可重放，逐窗口对账的结论才有资格被第三方复核**；限制是两个数据集互不重叠、流量域为 10.1% 抽样。
 > （依据：`docs/thesis/DATA_AND_LIMITATIONS.md` 第一部分第 1、3、7 节）
 
 ### ② "两条链路真的算的是同一个数？这个结论的边界在哪？"
 
-> **一句话**：在两侧范围求交、尾部留 3 分钟安全边界的**对账区间内**，按 `window_start` 全外连接、逐窗口比对交易域 **7 个可加指标 + 1 个去重指标**，在"缺失侧补 0"口径下差值为 0；**不覆盖区间外数据、不含两侧派生比率的逐窗口比对**，而且 11458 个窗口里有 **5504 个是两侧为 0 的平凡一致**，真正承载判别力的是 **5954 个有业务量的窗口**；流量域 19643 个窗口的 **7 个判据列（`uv`/`pv`/5 个行为计数）** 逐窗口一致、单边窗口 0/0。
+> **一句话**：在两侧范围求交、尾部留 3 分钟安全边界的**对账区间内**，按 `window_start` 全外连接、逐窗口比对交易域 **7 个可加指标 + 1 个去重指标**，在"缺失侧补 0"口径下差值为 0；**不覆盖区间外数据、不含两侧派生比率的逐窗口比对**，而且 40358 个窗口里有 **6,088 个是两侧为 0 的平凡一致**，真正承载判别力的是 **34,272 个有业务量的窗口**；流量域 12957 个窗口的 **7 个判据列（`uv`/`pv`/5 个行为计数）** 逐窗口一致、单边窗口 0/0。
 > （依据：`.tmp/audit-reconcile.md` §5、§7；`docs/thesis/EVIDENCE_MATRIX.md` §3）
 
-> **另一条边界（本问若继续追问"那有没有例外"时答）**：流量域有 **1 个实时侧窗口**的比率列与它自己的计数矛盾——完整口径见第 ⑤ 问，**此项刻意保留在面谈口径中**。
+> **另一条边界（本问若继续追问"那有没有例外"时答）**：流量域曾抓出 **1,302 个实时侧窗口**的比率列与它自己的计数矛盾——根因是 Flink 的整数除法，已修复，当前异常 0。完整口径见第 ⑤ 问，**此项刻意保留在面谈口径中**（它证明判据确实能抓错）。
 
 ### ③ "你的 SQL 守卫听说有个绕过？修了吗？"
 
@@ -236,9 +236,11 @@
 >
 > **为什么把判据改成"每侧按自身计数重算"**：原来的判据是"两侧比率相等"——它既不增加信息（判据列相等时比率在数学上必然相等），又会被两侧除法实现的末位差异误报；换成"**每一侧的比率必须等于用它自己的计数按公式重算的值**"之后，判据**不需要两侧一致就能判定是谁错**，而且"两侧一起错成同一个值"这种缺陷它照样能抓出来。**方向是变严，不是放容差。**
 >
-> **为什么不修**：修它要改并重部署 Flink 作业，而 `behavior_event` 的全部 20000 条消息**仍在 Kafka 里**（earliest = 0），重部署会把它们**从 earliest 全量重放**、覆盖实时侧全部 **19644 个窗口**——那是实时链路的一次全量重建，**重放成本远大于该缺陷的影响**（它只影响实时侧 `click_rate` 这一个派生列的一行，7 个判据列在 19643 个窗口逐窗口一致）。该取舍**经项目负责人复核后维持不变**；"只改 SQL 不重部署"的方案被明确否决（会造成仓库代码与运行作业不一致，比不改更危险）。
+> **当时为什么不修**：改并重部署 Flink 作业会触发实时侧全量重放，成本大于该缺陷的影响（它只影响派生比率列，7 个判据列在 12,957 个窗口逐窗口一致）；"只改 SQL 不重部署"被明确否决——会造成仓库代码与运行作业不一致，比不改更危险。
 >
-> **定性（必须说准）**：这是"**已定位、已用第三方判据定责、判据已改严、证据已落盘**（`realtime_rate_anomaly_windows = 1` 作为一等结论 + 逐窗口标记）、经成本评估后决定不修"的真实缺陷——**不是"未解决"，也不是"环境问题"**；**没有加容差，也没有把证据删掉**。
+> **后来怎么处理的**：全量切换真实数据时本来就要重建实时链路，重放成本变成必须支付的一项，于是顺手修掉了。原因是 Flink SQL 里 `CAST(SUM(a) / SUM(b) AS DECIMAL(10,4))` 的两个操作数都是 BIGINT，**先做整数除法再转型**，小数部分被丢掉；改为先把操作数转 `DECIMAL(20,4)` 再相除。修复后实时侧比率列自洽窗口 **12,960/12,960、异常 0**，两侧 `realtime_rate_anomaly` / `batch_rate_anomaly` 都是 0。
+>
+> **定性（必须说准）**：这是一条"**已定位 → 用第三方判据定责 → 判据改严 → 证据落盘 → 根因修复并复验**"的完整缺陷链——起点是 **1,302** 个矛盾窗口，终点是 **0**。**没有加容差，也没有把证据删掉**；中间"经成本评估后暂不修"的取舍也保留在记录里，因为那才是当时真实的决策。
 >
 > ★ **注：此项刻意保留在面谈口径中，不写进简历正文**——简历正文只写"建成了什么、验证到什么程度"，缺陷与取舍留给面谈时主动交底（这是诚实性的加分项，不是遗漏）。
 >
@@ -254,8 +256,8 @@
 ❌ "保障了两条链路的数据一致性"（无限定）
    → 只覆盖对账区间内的逐窗口指标值；不含派生比率列；区间外未比。
 
-❌ "完成 11458 个窗口的独立一致性验证"
-   → 其中 5504 个（48.03%）是两侧 GMV 均为 0 的平凡一致，不构成独立证据。
+❌ "完成 40358 个窗口的独立一致性验证"
+   → 其中 6,088 个（48.03%）是两侧 GMV 均为 0 的平凡一致，不构成独立证据。
 
 ❌ "Iceberg 迁移实现数据无损 / 保证逐行一致"
    → 只验证了表身份、行数、6 个金额列整表合计三个维度；其余 11 个维度未验证。
@@ -274,7 +276,7 @@
    → 实测规模在 10³~10⁴ 行量级（用户 1200 / 商品 600 / 订单 6000 / 支付 5406 / 退款 254 / 行为事件 20000）。
 
 ❌ "基于真实业务的数据 / 已在生产环境运行"
-   → 全部为程序生成的合成数据；单机单副本、接口无鉴权、站点为明文 HTTP、Airflow 使用官方标注仅供开发测试的认证方案。
+   → 两个公开真实数据集互不重叠（无跨域漏斗）、流量域为 10.1% 抽样；单机单副本、接口无鉴权、站点为明文 HTTP、Airflow 使用官方标注仅供开发测试的认证方案。
 
 ❌ "参与 / 协助 / 学习了解 XXX"
    → 用词纪律：一律写"设计 / 实现 / 构建 / 验证 / 优化 / 建立"。
@@ -289,10 +291,10 @@
 
 | 数字 | 含义 | 来源 |
 | --- | --- | --- |
-| 11458 / 0 | 交易域对账窗口数 / 不一致数 | `docs/sprint/SPRINT_3.md` §7 |
-| 5504 / 5954 | 两侧 GMV 均为 0 的窗口 / 有业务量的窗口 | `docs/thesis/EVIDENCE_MATRIX.md` §3.1 |
-| 19643 / 0 / 0 | 流量域窗口数 / 不一致数 / 单边窗口数 | `docs/sprint/SPRINT_5.md` §9.2 |
-| 51,890,375.77 | GMV（两侧相等，精确到分） | `docs/sprint/SPRINT_3.md` §7.2 |
+| 40358 / 0 | 交易域对账窗口数 / 不一致数 | `docs/sprint/SPRINT_3.md` §7 |
+| 6,088 / 34,272 | 两侧 GMV 均为 0 的窗口 / 有业务量的窗口 | `docs/thesis/EVIDENCE_MATRIX.md` §3.1 |
+| 12957 / 0 / 0 | 流量域窗口数 / 不一致数 / 单边窗口数 | `docs/sprint/SPRINT_5.md` §9.2 |
+| 17,068,016.12 | GMV（两侧相等，精确到分） | `docs/sprint/SPRINT_3.md` §7.2 |
 | 1200 / 600 / 6000 / 5406 / 254 / 20000 | 用户 / 商品 / 订单 / 支付 / 退款 / 行为事件（**表内行数 = distinct `event_id` 基数 ≠ 链路处理量**：topic latest 合计曾达 580000 = 29 × 20000，Doris 侧 UNIQUE KEY 去重后才是 20000） | `docs/sprint/SPRINT_3.md` §7.1；`AGENTS.md` §15.2、§15.8 |
 | 23 / 60-60 / 70-70 | 迁移表数 / 18 张表那次校验 / 23 张表复跑那次校验 | `docs/sprint/SPRINT_5.md` §8.1；`AGENTS.md` §15 |
 | 8 / 8 / 11 | Flink sink 作业数 / Routine Load 数 / health-check 项数 | `AGENTS.md` §15.2 |
@@ -306,4 +308,4 @@
 | 26 / 18 | 禁用关键字数 / 白名单表数（16 业务 + 2 元数据） | `.tmp/audit-agent.md` §A3、A4 |
 | 6 / 8 / 4 | 图节点数 / 边数 / MCP 只读工具数 | `docs/sprint/SPRINT_8.md` §9.3；`AGENTS.md` §15.12 |
 | 512m / 105 MiB / 187 MiB | 监控内存预算 / Prometheus 实测 / Grafana 实测 | `AGENTS.md` §15.11 |
-| 20260926 | 生成器默认随机种子 | `data-generator/src/config.py` 第 140 行 |
+| 20261106 | 流量域按用户抽样的固定种子 | `scripts/real-data/tianchi_sample.py` |

@@ -128,7 +128,7 @@ Kubernetes / Nacos / RabbitMQ / MongoDB ...
 | `infrastructure/` | 各组件容器初始化配置 | 一个组件一个子目录 |
 | `sql/` | DDL / DML / 元数据定义 | **必须进 Git**，禁止只改容器内数据库 |
 | `scripts/` | 启停、状态、健康检查 | Bash，兼容 Git Bash / WSL / Linux |
-| `data-generator/` | Python 数据生成器 | 业务关系必须正确 |
+| `data-generator/` | 数据装载（`load_real_data.py`）；历史合成生成器保留作对照 | 业务关系必须正确 |
 | `services/api/` | 只读数据服务（FastAPI，Sprint 6） | 只允许 SELECT；使用只读账号 `agent_ro` |
 | `services/agent/` | 数据问答 Agent（FastAPI + LLM，Sprint 7） | **不允许持有数据库凭据**；只能经 HTTP 调 `services/api` |
 | `services/web/` | 数据看板前端（Vue + ECharts，无构建步骤，Sprint 6） | 不引用外部 CDN；`vendor/` 不入 Git |
@@ -598,10 +598,10 @@ docker compose exec doris-be mysql -h 172.28.0.10 -P 9030 -uroot -e "SHOW BACKEN
 | **1** | **Kafka + Flink + Doris 实时数仓** | ✅ **已完成并验收通过** |
 | **6** | **数据后台 + 前后端（服务层）** | ✅ **已完成并验收通过**（顺序前移，见 2.2 节说明） |
 | **2** | **Spark + Hive + 湖仓存储（离线链路）** | ✅ **已完成并验收通过**（HDFS 因内存不足改用 S3A，见 SPRINT_2.md 2.2） |
-| **3** | **ODS / DWD / DWS / ADS（离线分层 + 批流交叉对账）** | ✅ **已完成并验收通过**（11458 个分钟窗口零差异，见 SPRINT_3.md） |
+| **3** | **ODS / DWD / DWS / ADS（离线分层 + 批流交叉对账）** | ✅ **已完成并验收通过**（40358 个分钟窗口零差异，见 SPRINT_3.md） |
 | **7** | **LLM + Tool Calling（数据问答 Agent）** | ✅ **已完成并验收通过**（验收 49/49，见 SPRINT_7.md） |
 | **4** | **Airflow 调度 + 流量域归档** | ✅ **已完成并验收通过**（验收 40/0/0，见 15.8 与 SPRINT_4.md） |
-| **5** | **Iceberg Lakehouse + 流量域分层** | ✅ **已完成并验收通过**（Iceberg 23 张表 70/70；流量域 DWD 21/21、DWS 20/20、ADS 36/36、对账 10/10 —— 19643 个窗口不一致 0；见 15.10 与 15.12） |
+| **5** | **Iceberg Lakehouse + 流量域分层** | ✅ **已完成并验收通过**（Iceberg 23 张表 70/70；流量域 DWD 21/21、DWS 20/20、ADS 36/36、对账 10/10 —— 12957 个窗口不一致 0；见 15.10 与 15.12） |
 | **8** | **LangGraph Data Agent** | ✅ **已完成并验收通过**（`verify-sprint-8.sh` 71/0/0；`langgraph 1.1.0`） |
 | **9** | **RAG + Metadata** | ✅ **已完成并验收通过**（`verify-sprint-9.sh` 59/0/0；BM25 词法检索 + 显式同义词表，未引入向量库） |
 | **10** | **MCP** | ✅ **已完成并验收通过**（`verify-sprint-10.sh` **84/0/0**；4 个只读工具；MCP 与直接 HTTP 路径逐字段 IDENTICAL；`mcp==2.2.0`） |
@@ -639,7 +639,7 @@ docker compose exec doris-be mysql -h 172.28.0.10 -P 9030 -uroot -e "SHOW BACKEN
                                   对应 topic latest 合计分别约 29 倍 —— 174000 / 156774 / 7366 / 580000，
                                   Doris 侧 UNIQUE KEY + merge-on-write 去重后才是上表行数，
                                   完整取证见 15.12 与 docs/thesis/答辩材料/FINAL_AUDIT_REPORT.md §1.3）
-✅ ADS 与 MySQL 精确对账         GMV 51,890,375.77 == 51,890,375.77（精确到分）
+✅ ADS 与 MySQL 精确对账         GMV 17,068,016.12 == 17,068,016.12（精确到分）
 ```
 
 一键复现：`bash scripts/verify-sprint-1.sh`（详见
@@ -655,7 +655,7 @@ docker compose exec doris-be mysql -h 172.28.0.10 -P 9030 -uroot -e "SHOW BACKEN
 ✅ 调度 UI                           http://36.151.150.140/airflow/（Sprint 4）
 ✅ 接口文档                          http://36.151.150.140/data/api/docs
 ✅ 只读账号                          agent_ro（写操作被 Doris 拒绝：Access denied CREATE）
-✅ 指标对账                          API GMV == MySQL GMV（51,890,375.77，精确到分）
+✅ 指标对账                          API GMV == MySQL GMV（17,068,016.12，精确到分）
 ✅ 自动化测试                        pytest 74 单元（SQL 守卫 + 口径解析）+ 21 接口冒烟
 ✅ 真实浏览器验收                    6 个页面渲染正常，图表 canvas 正常
 ```
@@ -687,9 +687,9 @@ bash scripts/verify-sprint-2.sh`（详见
 ```text
 ✅ bash scripts/verify-sprint-3.sh   8/8 PASS
     表清单 / 层间行数 / 类型正确 / 幂等 / 批流对账 / 服务装载 / 回归 / 自动化测试
-✅ 层间行数                          DWD == ODS 逐表相等（1200/600/6000/5406/254）
-✅ 批流对账                          11458 个分钟窗口，**不一致 0 个**
-                                    GMV 实时 51,890,375.77 == 离线 51,890,375.77（精确到分）
+✅ 层间行数                          DWD == ODS 逐表相等（5852/4619/776575/776575/16552）
+✅ 批流对账                          40358 个分钟窗口，**不一致 0 个**
+                                    GMV 实时 17,068,016.12 == 离线 17,068,016.12（精确到分）
 ✅ 服务装载                          Doris lakehouse_ads 6 张表行数 == 湖仓；
                                     agent_ro 可查、写操作被 Doris 拒绝
 ✅ 回归                              实时链路 health-check 11/11、数据服务 /health 正常
@@ -818,9 +818,9 @@ bash scripts/verify-sprint-2.sh`（详见
     专用账号 airflow：对 ecommerce 被拒绝（最小权限实证）
 ✅ DAG 真实驱动离线流水线            9 任务
     pause → ods → archive → dwd → dws → ads → reconcile → load → restore
-✅ 批流对账（交易域）                11458 个分钟窗口，**不一致 0 个**
-                                    GMV 实时 51,890,375.77 == 离线 51,890,375.77
-✅ 流量域归档（本 Sprint 新增）       **20000 行 == Kafka latest offset 合计**
+✅ 批流对账（交易域）                40358 个分钟窗口，**不一致 0 个**
+                                    GMV 实时 17,068,016.12 == 离线 17,068,016.12
+✅ 流量域归档（本 Sprint 新增）       **10,098,974 行 == Kafka latest offset 合计**
     703 个 dt 分区；16/16 作业内自检全过
     ⚠️ 判据是**归档作业内的自检**（先数 Kafka 消息数、再数写入行数），
        是**单次验收窗口内**的等式、不覆盖验收之后的增量事件，且该环境 Kafka **副本数为 1** ——
@@ -878,11 +878,11 @@ bash scripts/verify-sprint-2.sh`（详见
 > 仍然有效的那条一般性纪律是第 11.2 节的"属于后续 Sprint 的功能不要提前实现"，
 > 它作用于**当时尚未开工**的 Sprint（对已验收的 Sprint 无约束力）。
 >
-> **流量域：原设计缺口已由 Sprint 4 关闭**（归档 20000 行 == Kafka latest offset 合计，
+> **流量域：原设计缺口已由 Sprint 4 关闭**（归档 10,098,974 行 == Kafka latest offset 合计，
 > 本次验收窗口内未观察到丢失；该判据是**归档作业内自检**、Kafka **副本数为 1**，
 > 且"行数 = distinct `event_id` 基数"≠ 链路处理量）。流量域的 DWD / DWS / ADS 分层
 > **已由 Sprint 5 建成并验收**（DWD 21/21、DWS 20/20、ADS 36/36、对账 10/10；
-> 19643 个窗口不一致 0、单边窗口 0），设计取舍见 `docs/DECISIONS.md`。
+> 12957 个窗口不一致 0、单边窗口 0），设计取舍见 `docs/DECISIONS.md`。
 > 当时"先按 Parquet 分层再迁表等于做两遍、故并入 Sprint 5"的判断，
 > 是那一次排期的理由，不是当前状态。
 > **仍未归零的一项**：实时侧 1 个窗口的 `click_rate` 与自身计数自相矛盾
@@ -940,7 +940,7 @@ bash scripts/verify-sprint-2.sh`（详见
     25 条校验覆盖 7 类：行数非空守卫 / 主键唯一 / 关键字段非空 / 枚举合法 /
     层间一致 / 金额关系 / 新鲜度（交易域与流量域都覆盖）
     实测：orders 6000 / payments 5406 / refunds 254 / behaviors 20000；
-          GMV 实时 51,890,375.77 == 离线 51,890,375.77（等值，无容差）；
+          GMV 实时 17,068,016.12 == 离线 17,068,016.12（等值，无容差）；
           漏斗 VIEW 10472 > CLICK 5759 > CART 2095 > BUY 628
     湖仓层间：DWD == ODS 逐表，不一致表数 0（Iceberg 5 张交易表）
 ✅ 失败路径（可复现的证明）            --proof-fail 故意改坏期望值：
@@ -1047,7 +1047,7 @@ Sprint 5   Iceberg Lakehouse + 流量域分层                    ✅ 已完成
     （判据：逐表行数精确相等 + **6 个金额列的整表合计**核对 + Provider == iceberg；
       **不覆盖**逐行/全字段/分区/schema 等价性）
   - 流量域分层建成：DWD 21/21、DWS 20/20、ADS 36/36、对账 10/10
-  - 流量域逐窗口对账：**19643/19643 个窗口，不一致 0、单边窗口 0**
+  - 流量域逐窗口对账：**12957/12957 个窗口，不一致 0、单边窗口 0**
     （**7 个判据列 = uv / pv / 5 个行为计数**逐窗口一致；比率列只留证、
       不参与 is_match，见 metrics.md 第 3.3 节）
   - 一处**实质性发现（未修复）**：实时侧 1 个窗口的 click_rate

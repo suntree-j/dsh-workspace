@@ -1,8 +1,8 @@
 # 数据来源设计（Data Source Design）
 
 > 项目：基于 Lakehouse 与 AI Agent 的批流一体智能数据分析平台
-> 版本：V1.1（Sprint 1 实现后同步更新）
-> 更新日期：2026-09-26
+> 版本：V2.0（改用两个公开真实数据集后重写）
+> 更新日期：2026-11-11
 > 适用 Sprint：0 起
 >
 > 本文回答一个核心问题：**这个平台的数据是从哪来的，怎么保证它可靠、准确、可追溯。**
@@ -12,7 +12,10 @@
 > 变更记录：
 > V1.0 建立数据来源分层与可靠性保证；
 > V1.1 按 Sprint 1 实际实现更新（ADS 表名、事件时间格式、维度来源、
-> 测试与健康检查项数、新增"重复生产会让指标累加"这一已知局限）。
+> 测试与健康检查项数、新增"重复生产会让指标累加"这一已知局限）；
+> V2.0 数据来源由"程序生成的合成数据"整体切换为两个公开真实数据集
+> （交易域 UCI Online Retail II、流量域天池 Taobao UserBehavior），
+> 新增第 3.1 节的数据集与清洗规则说明，第 1/2/3/6/7 节相应改写。
 
 ---
 
@@ -21,7 +24,8 @@
 ```text
 MySQL 是业务事实的唯一来源（Source of Truth）；
 Kafka 是业务事件与行为事件的实时通道；
-Python 数据生成器是当前阶段的「业务系统替身」；
+两个公开真实数据集（UCI Online Retail II / 天池 Taobao UserBehavior）
+       经版本固定的映射脚本清洗后，扮演「业务系统」的角色；
 Flink 负责把 Kafka 事件加工成实时指标写入 Doris；
 后续 Spark/Iceberg 负责把 MySQL 与 Kafka 沉淀成可信的离线湖仓；
 Agent 只读 Doris（Sprint 7 起），且只允许 SELECT。
@@ -33,14 +37,16 @@ Agent 只读 Doris（Sprint 7 起），且只允许 SELECT。
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────┐
-│ 第 0 层：业务系统（现实中是电商后台，本项目由数据生成器扮演）           │
+│ 第 0 层：公开真实数据集（业务系统的替身）                              │
 │                                                                      │
-│   Python Data Generator  (data-generator/)                           │
-│     ├── generate_mysql_data  ──► 写 MySQL 业务库                      │
-│     └── generate_events      ──► 写 Kafka 事件                        │
+│   UCI Online Retail II  交易域，全量两年（2009-12 ~ 2011-12）            │
+│     └── build_uci_dataset.py   ──► user/product/orders/payment/refund  │
+│   天池 Taobao UserBehavior  流量域，10 万用户 × 9 天                    │
+│     └── build_tianchi_dataset.py ──► behavior 事件                     │
+│   装载：load_real_data.py  ──► 写 MySQL 业务库 与 发 Kafka 事件        │
 │                                                                      │
-│   关键约束：事件不是凭空造的，而是基于「真实写进 MySQL 的那批订单/支付」  │
-│             生成的（通过 state/dataset_snapshot.json 传递）            │
+│   关键约束：两个数据集互不重叠，按域并列；主键加固定偏移               │
+│             （交易域 < 1000 万、流量域 ≥ 1000 万），避免跨域撞键        │
 └───────────────┬──────────────────────────────┬───────────────────────┘
                 │                              │
                 ▼                              ▼
@@ -95,15 +101,45 @@ Agent 只读 Doris（Sprint 7 起），且只允许 SELECT。
 
 | 数据 | 来源 | 写入方式 | 最终去向 | 引入 Sprint |
 | --- | --- | --- | --- | --- |
-| 用户主数据 | 数据生成器 | 批量 INSERT | MySQL → （未来）DWD 维表 | 0 |
-| 商品主数据 | 数据生成器 | 批量 INSERT | MySQL → （未来）DWD 维表 | 0 |
-| 订单事实 | 数据生成器 | 批量 INSERT | MySQL + Kafka `order_event` | 0 |
-| 支付事实 | 数据生成器 | 批量 INSERT | MySQL + Kafka `payment_event` | 0 |
-| 退款事实 | 数据生成器 | 批量 INSERT | MySQL + Kafka `refund_event` | 0 |
-| 用户行为 | 数据生成器 | 仅事件 | Kafka `behavior_event` | 0 |
+| 用户主数据 | UCI（Customer ID）+ 天池（user_id） | 批量 INSERT | MySQL → DWD 维表 | 0 |
+| 商品主数据 | UCI（StockCode）+ 天池（item_id） | 批量 INSERT | MySQL → DWD 维表 | 0 |
+| 订单事实 | UCI（正向发票明细） | 批量 INSERT | MySQL + Kafka `order_event` | 0 |
+| 支付事实 | UCI（订单即支付成功推定） | 批量 INSERT | MySQL + Kafka `payment_event` | 0 |
+| 退款事实 | UCI（C 前缀取消发票） | 批量 INSERT | MySQL + Kafka `refund_event` | 0 |
+| 用户行为 | 天池（pv/cart/fav/buy） | 仅事件 | Kafka `behavior_event` | 0 |
 | 实时 GMV / 订单 / 用户数 | Flink 聚合 | 流式写入 | Doris ADS | 1 |
 | 离线全量快照 | Spark 抽取 | 批写入 | Iceberg（MinIO/HDFS） | 2 / 5 |
 | 指标定义 / 表结构 | 人工维护 | 文件入库 | `sql/metadata/` → RAG 知识库 | 3 / 9 |
+
+---
+
+### 3.1 两个公开真实数据集与清洗规则
+
+| 项 | 交易域 | 流量域 |
+| --- | --- | --- |
+| 数据集 | UCI Machine Learning Repository，Online Retail II | 天池平台，Taobao User Behavior |
+| 引用 | CHEN D. Online retail II data set[DS/OL]. Irvine: UC Irvine Machine Learning Repository, 2011[2026-11-06]. <https://doi.org/10.24432/C5CG6D>. | Alibaba Group. Taobao user behavior data set[DS/OL]. Hangzhou: Tianchi Platform, 2017[2026-11-06]. <https://tianchi.aliyun.com/dataset/649>. |
+| 许可 | CC BY 4.0 | CC BY-SA-NC 4.0（学术、非商业使用） |
+| 原始规模 | 1,067,371 行 × 8 列，2009-12-01 ~ 2011-12-09 | 100,150,807 行 × 5 列，2017-11-25 ~ 2017-12-03 |
+| 主体 | 英国 B2B 礼品批发商 | 淘宝用户行为（无金额、无订单号、无曝光埋点） |
+| 入库子集 | 全量两年 | 10 万个用户 × 连续 9 天 = 10,098,974 条（占全量约 10.1%） |
+| 映射脚本 | `scripts/real-data/build_uci_dataset.py` | `scripts/real-data/build_tianchi_dataset.py` |
+| 装载脚本 | `data-generator/src/load_real_data.py`（MySQL）+ 同脚本 `--step kafka` | 同左 |
+
+交易域的清洗与映射规则（全部由脚本执行，可重放）：
+
+1. **只保留有客户标识的行**：`orders.user_id` 有非空约束与外键，源数据约 22.77%（243,007 行）缺失 `Customer ID`，这些行无法归属用户，必须丢弃。
+2. **正向发票 → 订单**：`Quantity > 0` 且 `Price > 0` 的明细作为一行订单；`amount = Quantity × Price` 在建集时按当时单价算出，实测 776,575 / 776,575 行与 `quantity × price` 精确相等。
+3. **C 前缀发票 → 退款**：源数据中带 `C` 前缀的 8,292 张发票共 19,494 行为取消/退货。去掉 `C` 前缀后能与普通发票号匹配的有 **0 / 8,292**，因此无法按发票号关联原订单，改为按 `(user_id, product_id)` 关联该用户该商品在窗口内的最早正向订单。
+4. **剔除会计科目**：`StockCode` 形如 `POST` / `DOT` / `M` / `AMAZONFEE` / `BANK CHARGES` 等不是商品，按白名单正则 `^\d{4,5}[A-Z]{0,2}$` 过滤。
+5. **类目派生**：源数据没有类目字段，按 `Description` 的 11 组关键词（节庆装饰 / 厨房餐厨 / 灯饰蜡烛 / 家居装饰 / 收纳整理 / 文具纸品 / 布艺纺织 / 儿童玩具 / 饰品配饰 / 园艺户外 / 其他）派生，首次命中即返回；这是**派生字段**，论文中已显式标注。
+
+流量域的清洗与映射规则：
+
+1. **行为映射**：`pv → VIEW`、`cart → CART`、`fav → FAVORITE`、`buy → BUY`。源数据**没有 CLICK 级事件**，因此项目的漏斗判据由四级降为「VIEW > CART > BUY」（CLICK 存在时要求严格居中），见 `infrastructure/quality/checks/funnel_monotonic.sql`。
+2. **按用户抽样**：以固定种子抽取 100,000 个用户，再取这些用户在连续 9 天内的全部行为，保证同一用户的行为序列完整（而不是按行随机抽样）。
+3. **主键偏移**：`user_id` / `product_id` / `category_id` 统一加 10,000,000，与交易域主键天然隔离，因此**不需要给任何 SQL 加域过滤条件**。
+4. **占位而非编造**：`device` 置 `UNKNOWN`、`province`/`city` 置 `未知`、商品名 `tb_item_<id>`、类目名 `天池类目<id>`——这些都是由 id 派生的标识，不是编造的业务属性，论文与文档中已如实声明。
 
 ---
 
@@ -250,7 +286,7 @@ MySQL (ecommerce)
 | 层次 | 手段 | 落地位置 |
 | --- | --- | --- |
 | 生成期 | 外键关系、金额一致性、时间因果 | `data-generator/src/dataset.py` |
-| 生成期 | 同种子可复现 | `GEN_RANDOM_SEED` |
+| 建集期 | 数据集版本 + 抽样规则 + 版本固定脚本 | `scripts/real-data/` |
 | 入库期 | 外键约束（MySQL FOREIGN KEY） | `sql/mysql/01_schema.sql` |
 | 入库期 | 写入后连表校验 | `generate_mysql_data` 的 `verify()` |
 | 测试期 | 24 个单元测试断言业务关系 | `tests/test_data_generator.py` |
@@ -268,7 +304,7 @@ MySQL (ecommerce)
 
 | 局限 | 说明 | 计划 |
 | --- | --- | --- |
-| 数据生成器是「业务系统替身」 | 没有真实电商后台，生成器同时扮演业务写入方与埋点方 | 论文中说明为仿真数据源 |
+| 两个数据集互不重叠 | 不是同一业务的交易与行为，无法验证跨域转化与归因 | 论文中按“两个并列业务域”表述，不做跨域漏斗 |
 | 无 CDC 实时同步 | MySQL → Kafka 目前靠生成器双写，未用 Flink CDC / Canal | Sprint 3 后视需要引入 |
 | 单机单副本 | Kafka 副本 1、Doris 单 BE，无高可用 | 明确为开发环境；论文中说明生产部署差异 |
 | 行为事件不落库 | 仅存在于 Kafka，未长期存储 | Sprint 2/5 由 Spark 落 Iceberg |

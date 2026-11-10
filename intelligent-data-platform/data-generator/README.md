@@ -1,8 +1,22 @@
-# Data Generator — 电商业务数据与 Kafka 事件生成器
+# Data Generator — 数据装载与（历史）电商数据生成器
 
 > 项目：基于 Lakehouse 与 AI Agent 的批流一体智能数据分析平台
-> Sprint：0
-> 依据：`docs/sprint/SPRINT_0.md` 第 12、13 节
+
+## 现状说明（先读这一段）
+
+**当前链路的入库入口是 `src/load_real_data.py`**：它读取 `data/real/` 下的 8 个 CSV
+（由 `scripts/real-data/build_uci_dataset.py` 与 `build_tianchi_dataset.py` 从两个公开真实数据集生成），
+写入 MySQL 业务库并向 Kafka 发布事件。
+
+```bash
+docker compose --profile tools run --rm data-generator \
+  python -m src.load_real_data --dir data/real --step all
+```
+
+本文档后面 `src.generate_mysql_data` / `src.generate_events` 的用法属于**早期合成数据阶段**，
+代码与文档都保留作对照，当前链路不再使用。
+
+---
 
 用 Python 生成**业务关系正确**的电商数据：写入 MySQL 业务库，并向 Kafka 产生实时事件。
 

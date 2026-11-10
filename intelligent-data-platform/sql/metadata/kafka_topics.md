@@ -249,7 +249,7 @@ count(VIEW) > count(CLICK) > count(CART) > count(BUY)
 | `behavior_event` | `user_id` 必须存在于 `user`；`product_id` 必须存在于 `product` |
 
 **金额一致性**：`product.price × orders.quantity ≈ orders.amount`
-（允许存在少量因优惠导致的偏差，由数据生成器按概率模拟）。
+（真实数据中 UCI 同一商品在不同发票里单价不同，因此 `product.price` 只是代表价，`orders.amount` 按下单当时的真实单价计算，两者不必然相等——这是真实数据的性质，不是缺陷）。
 
 Sprint 0 的冒烟测试会对上述约束做抽样校验。
 

@@ -155,7 +155,7 @@
 | 消息 | Apache Kafka (KRaft) | 统一事件总线 | **Sprint 0** |
 | 对象存储 | MinIO | S3 兼容湖仓存储 | **Sprint 0** |
 | OLAP | Apache Doris (FE + BE) | 统一查询与指标服务 | **Sprint 0** |
-| 工具 | Python 3.13 + Faker | 数据生成器 | **Sprint 0** |
+| 工具 | Python 3.13 + pandas | 数据装载（V1 时期为合成生成器） | **Sprint 0** |
 | 实时计算 | Apache Flink | 流式 ETL 与聚合 | Sprint 1 |
 | 离线计算 | Apache Spark | 批处理 ETL | Sprint 2 |
 | 存储 | HDFS | 分布式文件系统 | Sprint 2 |
