@@ -1,4 +1,4 @@
--- 层间一致：贴源归档行数 == DWD 明细行数 == ADS 窗口 PV 合计（口径 20000 行）
+-- 层间一致：贴源归档行数 == DWD 明细行数 == ADS 窗口 PV 合计
 --
 -- 三者相等才能同时说明两件事：
 --   1) ODS → DWD 的清洗没有丢行（行为白名单/去重在本数据集上是恒等变换）；
@@ -6,6 +6,8 @@
 -- !! 为什么不是与湖仓 ODS 直接比 !!
 --   湖仓 ODS 在 Iceberg 里，Doris 侧读不到（那一条是 engine=spark 的
 --   dwd_ods_parity_all）。这里用"已装载的行数"做等价断言：
---   Sprint 4 已证明归档行数 == Kafka latest offset（零丢失，20000 行）。
+--   归档行数 == Kafka 累计消费条数（零丢失）。
+--   注意：这里**不写死任何行数** —— 合成数据时代这里曾写着"20000 行"，
+--   换真实数据集后那个数字立刻失效；行数相等本身才是断言，具体数值是数据的属性。
 -- 返回两两之差的绝对值之和，必须为 0
 SELECT ABS((SELECT COUNT(*) FROM ecommerce.dwd_traffic_behavior_detail) - (SELECT SUM(pv) FROM lakehouse_ads.ads_traffic_1d)) + ABS((SELECT COUNT(*) FROM ecommerce.dwd_traffic_behavior_detail) - (SELECT SUM(pv) FROM lakehouse_ads.ads_traffic_1m)) AS diff_rows;

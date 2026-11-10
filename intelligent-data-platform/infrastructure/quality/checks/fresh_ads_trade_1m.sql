@@ -1,2 +1,14 @@
--- 新鲜度：交易域离线 ADS（1 分钟）最新窗口距现在的滞后小时数
-SELECT ROUND(TIMESTAMPDIFF(MINUTE, (SELECT MAX(window_start) FROM lakehouse_ads.ads_batch_trade_1m), NOW()) / 60, 2) AS lag_hours;
+-- 推进滞后：交易域离线 ADS（1 分钟）落后实时 ADS 的小时数
+--
+-- !! 为什么不再与 NOW() 比 !!
+--   本项目的数据集是**保留原始事件时间戳的历史数据**（交易域 UCI 2011-11，
+--   流量域天池 2017-11-30~12-03）。若继续与系统时钟比，滞后恒为十几年：
+--   这条判据会永远红，而且它无法区分"批任务没跑"和"数据本身就是旧的"——
+--   一条恒红的校验不会让人更谨慎，只会让人习惯性忽略红色。
+--   换成"批层最新窗口 vs 流层最新窗口"之后，判据回答的是同一个运维问题
+--   （**批任务有没有把流里已有的事件处理完**），却与数据年代无关。
+--   数据陈旧与否是数据集自身的属性，由 build_*_dataset.py 的窗口常量负责，
+--   不该混进运行时健康判据里。
+--
+-- 返回：批层最新窗口落后流层最新窗口的小时数（批层更新时为负）
+SELECT ROUND(TIMESTAMPDIFF(MINUTE, (SELECT MAX(window_start) FROM lakehouse_ads.ads_batch_trade_1m), (SELECT MAX(window_start) FROM ecommerce.ads_realtime_trade_1m)) / 60, 2) AS lag_hours;

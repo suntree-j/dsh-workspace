@@ -228,8 +228,10 @@ def verify(spark: SparkSession, kafka_count: int, events: DataFrame) -> int:
     checker.check("事件类型全部合法", unexpected, [])
 
     # ---- 4. 主漏斗单调收窄 ----
-    # 与 AGENTS.md 8.2 的"行为漏斗 count(VIEW) > count(CLICK) > count(CART) > count(BUY)"
-    # 是同一个断言；漏斗反常说明数据生成或解析出了问题。
+    # 断言 VIEW > CART > BUY，CLICK 为可选中间级（与 build_traffic_dwd.py 同口径）。
+    # 理由：本项目流量域使用真实数据集（天池淘宝用户行为），它只采集
+    # pv / cart / fav / buy，没有独立的 click 埋点。若仍按四级断言，
+    # CLICK=0 会让条件恒假，把"数据源没有这一级"误报成"漏斗坏了"。
     counts = {
         r["event_type"]: r["c"]
         for r in spark.sql(
@@ -237,12 +239,10 @@ def verify(spark: SparkSession, kafka_count: int, events: DataFrame) -> int:
         ).collect()
     }
     funnel_counts = [counts.get(t, 0) for t in FUNNEL]
+    view_n, click_n, cart_n, buy_n = funnel_counts
     checker.check_true(
-        "漏斗逐级收窄 VIEW>CLICK>CART>BUY",
-        all(
-            funnel_counts[i] > funnel_counts[i + 1]
-            for i in range(len(funnel_counts) - 1)
-        ),
+        "漏斗逐级收窄 VIEW>CART>BUY（CLICK 存在时须严格居中）",
+        view_n > cart_n > buy_n and (click_n == 0 or (view_n > click_n > cart_n)),
         f"实际 {dict(zip(FUNNEL, funnel_counts))}",
     )
 

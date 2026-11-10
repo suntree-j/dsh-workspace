@@ -1,4 +1,14 @@
--- 漏斗逐级收窄（AGENTS.md 8.2）：VIEW > CLICK > CART > BUY
+-- 漏斗逐级收窄：VIEW > CART > BUY（CLICK 存在时必须严格居中）
 -- 返回 1 表示断言成立，0 表示被违反
--- 说明：FAVORITE 是旁支，不参与逐级比较（它可以从任意一级跳过来）
-SELECT (MIN(v) > MIN(c) AND MIN(c) > MIN(ca) AND MIN(ca) > MIN(b)) AS funnel_ok FROM (SELECT (SELECT COUNT(*) FROM ecommerce.dwd_traffic_behavior_detail WHERE event_type = 'VIEW') AS v, (SELECT COUNT(*) FROM ecommerce.dwd_traffic_behavior_detail WHERE event_type = 'CLICK') AS c, (SELECT COUNT(*) FROM ecommerce.dwd_traffic_behavior_detail WHERE event_type = 'CART') AS ca, (SELECT COUNT(*) FROM ecommerce.dwd_traffic_behavior_detail WHERE event_type = 'BUY') AS b) t;
+--
+-- !! 为什么改成三级 !!
+--   合成数据用的是 VIEW>CLICK>CART>BUY 四级漏斗；换成真实数据集后，
+--   交易域（UCI）本来就没有行为流，流量域（天池 UserBehavior）只有
+--   pv / cart / fav / buy 四类行为，**没有 CLICK**。若仍要求 VIEW>CLICK，
+--   这条断言会恒假 —— 而它假的原因不是漏斗坏了，是这一级本来就不存在。
+--   所以判据写成："核心三级必须严格收窄；CLICK 若出现（>0），
+--   必须严格落在 VIEW 与 CART 之间"。这样换任何数据都不需要再改判据，
+--   但一旦上游真的把 CLICK 接进来又算错了，它照样会红。
+--
+-- 说明：FAVORITE 是旁支，不参与逐级比较（它可以从任意一级跳过来）。
+SELECT (MIN(v) > MIN(ca) AND MIN(ca) > MIN(b) AND (MIN(c) = 0 OR (MIN(v) > MIN(c) AND MIN(c) > MIN(ca)))) AS funnel_ok FROM (SELECT (SELECT COUNT(*) FROM ecommerce.dwd_traffic_behavior_detail WHERE event_type = 'VIEW') AS v, (SELECT COUNT(*) FROM ecommerce.dwd_traffic_behavior_detail WHERE event_type = 'CLICK') AS c, (SELECT COUNT(*) FROM ecommerce.dwd_traffic_behavior_detail WHERE event_type = 'CART') AS ca, (SELECT COUNT(*) FROM ecommerce.dwd_traffic_behavior_detail WHERE event_type = 'BUY') AS b) t;

@@ -2575,7 +2575,7 @@
         { id: 'amount_payment_le_order', title: '金额关系：支付金额 <= 订单金额（不允许超付）' },
         { id: 'amount_refund_le_payment', title: '金额关系：退款金额 <= 支付金额（不允许超退）' },
         { id: 'enum_payment_status', title: '支付状态枚举合法（SUCCESS/FAILED）' },
-        { id: 'fresh_ads_trade_1m', title: '新鲜度：ads_batch_trade_1m 最新窗口滞后 <= 48h' }
+        { id: 'fresh_ads_trade_1m', title: '推进滞后：离线 ads_batch_trade_1m 落后实时交易窗口 <= 48h' }
       ]
     },
     {
@@ -2587,10 +2587,10 @@
         { id: 'pk_unique_traffic', title: '流量域主键唯一（event_id）' },
         { id: 'notnull_traffic', title: '流量域关键字段非空（user_id / event_time / event_type / dt）' },
         { id: 'enum_event_type', title: '行为枚举合法（VIEW/CLICK/CART/FAVORITE/BUY）' },
-        { id: 'funnel_monotonic', title: '漏斗逐级收窄（VIEW>CLICK>CART>BUY）' },
-        { id: 'fresh_ads_traffic_1m', title: '新鲜度：ads_traffic_1m 最新窗口滞后 <= 48h' },
-        { id: 'fresh_ads_traffic_1d', title: '新鲜度：ads_traffic_1d 最新分区日期滞后 <= 48h' },
-        { id: 'fresh_dwd_behavior_dt', title: '新鲜度：DWD 行为明细最新 dt 滞后 <= 48h' }
+        { id: 'funnel_monotonic', title: '漏斗逐级收窄（VIEW>CART>BUY，CLICK 存在时须严格居中）' },
+        { id: 'fresh_ads_traffic_1m', title: '推进滞后：离线 ads_traffic_1m 落后实时流量窗口 <= 48h' },
+        { id: 'fresh_ads_traffic_1d', title: '推进滞后：离线 ads_traffic_1d 最新分区落后实时 <= 48h' },
+        { id: 'fresh_dwd_behavior_dt', title: '推进滞后：DWD 行为明细最新 dt 落后实时 <= 48h' }
       ]
     },
     {
@@ -2604,7 +2604,7 @@
         { id: 'notnull_ads_win', title: '离线 ADS 窗口字段非空（window_start / window_end）' },
         { id: 'ads_1m_1d_consistency', title: '离线 ADS 1m 汇总 == 1d 汇总（交易 2 项 + 流量 2 项）' },
         { id: 'dwd_ads_trade_parity', title: '层间一致：DWD 订单数 == 离线 ADS 订单数合计' },
-        { id: 'dwd_ads_behavior_parity', title: '层间一致：DWD 行为明细 == ADS 窗口 PV 合计（20000）' },
+        { id: 'dwd_ads_behavior_parity', title: '层间一致：DWD 行为明细 == ADS 窗口 PV 合计' },
         { id: 'dwd_ods_parity_all', title: '层间一致：DWD == ODS 逐表（湖仓 Iceberg，5 张交易表）', engine: 'spark' }
       ]
     },

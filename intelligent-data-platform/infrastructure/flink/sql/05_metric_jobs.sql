@@ -175,17 +175,22 @@ SELECT
     SUM(CASE WHEN event_type = 'CART'     THEN 1 ELSE 0 END) AS cart_cnt,
     SUM(CASE WHEN event_type = 'FAVORITE' THEN 1 ELSE 0 END) AS favorite_cnt,
     SUM(CASE WHEN event_type = 'BUY'      THEN 1 ELSE 0 END) AS buy_cnt,
+    -- 比率必须**先把操作数转定点数再相除**。
+    -- 踩坑（2026-11 实测）：原先写成 CAST(a / b AS DECIMAL(10,4))，a、b 都是
+    -- BIGINT，Flink 按整数相除再转型 ⇒ buy_rate 只会出现 0.0000 / 1.0000 /
+    -- 2.0000 … 这种整数，4,313 个窗口里有 1,302 个与"计数重算"对不上，
+    -- 被 08_traffic_reconcile.sql 的自洽判据如实抓了出来。
     CASE WHEN SUM(CASE WHEN event_type = 'VIEW' THEN 1 ELSE 0 END) > 0
-         THEN CAST(SUM(CASE WHEN event_type = 'CLICK' THEN 1 ELSE 0 END)
-                   / SUM(CASE WHEN event_type = 'VIEW' THEN 1 ELSE 0 END)
+         THEN CAST(CAST(SUM(CASE WHEN event_type = 'CLICK' THEN 1 ELSE 0 END) AS DECIMAL(20, 4))
+                   / CAST(SUM(CASE WHEN event_type = 'VIEW' THEN 1 ELSE 0 END) AS DECIMAL(20, 4))
                    AS DECIMAL(10, 4)) END AS click_rate,
     CASE WHEN SUM(CASE WHEN event_type = 'CLICK' THEN 1 ELSE 0 END) > 0
-         THEN CAST(SUM(CASE WHEN event_type = 'CART' THEN 1 ELSE 0 END)
-                   / SUM(CASE WHEN event_type = 'CLICK' THEN 1 ELSE 0 END)
+         THEN CAST(CAST(SUM(CASE WHEN event_type = 'CART' THEN 1 ELSE 0 END) AS DECIMAL(20, 4))
+                   / CAST(SUM(CASE WHEN event_type = 'CLICK' THEN 1 ELSE 0 END) AS DECIMAL(20, 4))
                    AS DECIMAL(10, 4)) END AS cart_rate,
     CASE WHEN SUM(CASE WHEN event_type = 'CART' THEN 1 ELSE 0 END) > 0
-         THEN CAST(SUM(CASE WHEN event_type = 'BUY' THEN 1 ELSE 0 END)
-                   / SUM(CASE WHEN event_type = 'CART' THEN 1 ELSE 0 END)
+         THEN CAST(CAST(SUM(CASE WHEN event_type = 'BUY' THEN 1 ELSE 0 END) AS DECIMAL(20, 4))
+                   / CAST(SUM(CASE WHEN event_type = 'CART' THEN 1 ELSE 0 END) AS DECIMAL(20, 4))
                    AS DECIMAL(10, 4)) END AS buy_rate
 FROM TABLE(TUMBLE(TABLE src_behavior_event, DESCRIPTOR(event_time), INTERVAL '1' MINUTE))
 GROUP BY window_start;

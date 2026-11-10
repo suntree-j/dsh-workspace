@@ -150,7 +150,16 @@ restore_realtime() {
     while [ "${SECONDS}" -lt "${deadline}" ]; do
         local ok=0
         for c in flink-jobmanager flink-taskmanager; do
-            [ "$(docker inspect -f '{{.State.Health.Status}}' "${c}" 2>/dev/null)" = "healthy" ] && ok=$(( ok + 1 ))
+            # 容器可能**没有** healthcheck（TaskManager 在 2026-11 之前就没有），
+            # 此时 .State.Health 不存在，`docker inspect -f '{{.State.Health.Status}}'`
+            # 只会输出一行 "map has no entry for key \"Health\"" 之类的内容，
+            # 判定永远凑不满 2/2 —— 每次恢复都白等满 120 秒才往下走。
+            # 因此：有 healthcheck 就要求 healthy；没有就退化为「容器在运行」。
+            local state
+            state=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "${c}" 2>/dev/null)
+            case "${state}" in
+                healthy|running) ok=$(( ok + 1 )) ;;
+            esac
         done
         [ "${ok}" -eq 2 ] && break
         printf '\r  等待 Flink 集群就绪 ... %s/2 (%ss)' "${ok}" "${SECONDS}"

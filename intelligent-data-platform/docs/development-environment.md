@@ -504,7 +504,10 @@ cp .env.example .env
 | 数据生成器写快照失败 | 非 root 用户 + 宿主机属主挂载 | 快照目录改用命名卷 |
 | `vm.max_map_count` 偏低 | 默认 1048576 < Doris 要求 2000000 | `/etc/sysctl.d/99-data-platform.conf` |
 | Docker Hub 不可达 | 中国大陆网络 | 国内 registry mirror + SSH 反向隧道代理 |
-| Doris FE 占用 5.93 GB 内存 | FE JVM 默认堆无上限 | `.env` 的 `DORIS_FE_JAVA_OPTS` 限制堆与 Metaspace，可用内存 4.9 GB → 9.9 GB |
+| Doris FE 占用 5.93 GB 内存 | FE JVM 默认堆无上限 | ~~`.env` 的 `DORIS_FE_JAVA_OPTS` 限制堆与 Metaspace~~ **此结论有误，见下一条**；`JAVA_OPTS` 环境变量被 `start_fe.sh:350` 用 `fe.conf` 的 `JAVA_OPTS_FOR_JDK_17` 覆盖，实际无效 |
+| **FE 实际仍以 `-Xmx8192m -Xms8192m` 运行，常驻 6.37 GB，BE 报 `MEM_LIMIT_EXCEEDED` 导致 Routine Load 全部卡在 `OFFSET_ZERO`**（导入任务提交不了，`SHOW ROUTINE LOAD` 里 Lag 一直涨、`OtherMsg` 记 `is_exceed_soft_mem_limit: 1`） | `apache/doris:fe-4.1.4` 镜像的 `fe.conf` 把 `JAVA_OPTS_FOR_JDK_17` 写死为 `-Xmx8192m -Xms8192m`；`start_fe.sh` 第 306–350 行的逻辑是「JDK ≥ 17 就用 fe.conf 里的 `JAVA_OPTS_FOR_JDK_17` 覆盖容器环境变量」，所以 compose 里的 `JAVA_OPTS` 完全不起作用 | 把镜像内 `fe.conf` 复制到仓库 `infrastructure/doris/fe.conf`，只把堆改成 `-Xmx2048m -Xms1024m`，再在 compose 里只读挂载覆盖 `/opt/apache-doris/fe/conf/fe.conf`。改后 FE 常驻 1.09 GB，整机可用内存 1.35 GB → **6.16 GB** |
+| Doris Routine Load 位点无法用 Kafka 工具重置 | Doris 的消费进度存在 **FE 元数据**里，不在 Kafka consumer group 里（`kafka-consumer-groups.sh --group doris-rl_*` 恒报 `GroupIdNotFoundException`），`--reset-offsets` 打印了新位点表头但服务端根本没有这个 group | 重置只能 `STOP ROUTINE LOAD` → `DROP ROUTINE LOAD` → 用 `sql/doris/13_routine_load.sh` 重建（新建作业带 `kafka_default_offsets = OFFSET_BEGINNING`，从起点读）。**注意：作业处于 RUNNING 时 `DROP ROUTINE LOAD` 返回 `errCode = 2` 且不删除，必须先 STOP；STOP 后 DROP 仍会打印同样的错误但实际已删除** |
+| 重置实时链路后 Doris 实时表取到**旧的窗口版本**（GMV 少 18.5%，505/2604 个窗口取到中间值） | 实时 ADS 的输出是**变更流**：同一 `window_start` 会随事件陆续到达而反复更新（实测某窗口在 topic 里有 596~820 条记录）。Doris 侧是 UNIQUE KEY + MERGE ON WRITE 且无 sequence 列，「后写覆盖先写」；Flink 每次重启都从 `earliest-offset` 全量重放，多代变更流叠加后装载顺序无法保证 | 重置时**必须整代重放**：删掉全部下游 topic 并重建 → `TRUNCATE` 全部 Doris 实时表 → DROP+重建 Routine Load → Flink 只重放一次。判定依据：直接从 topic 取某窗口的最后一条记录，`gmv=4391.16 / order_cnt=26` 与批层一致，而 Doris 里是 `0.00` —— 说明 Flink 算对了，是装载结果留下了旧版本 |
 | Doris 拒绝在启用 swap 时启动 | `start_be.sh` 显式检查 swap | 移除 swap；改为限制各组件内存上限 |
 | `flink-sql-connector-kafka:3.2.0-1.20` 下载 404 | 该版本不存在（记录错误） | 改用 Maven Central 上真实存在的 `3.4.0-1.20` |
 | Flink 作业因 slot 不足提交失败 | 8 个作业 × `parallelism.default=3` 远超 8 个 slot | 在 source SQL 中 `SET 'parallelism.default' = '1'` |
@@ -522,7 +525,7 @@ cp .env.example .env
 | MinIO 镜像为社区再托管 | 供应链风险 | 已固定 digest，并记录替代方案 |
 | 服务器**不能加 SWAP** | Doris BE 在有 swap 时拒绝启动，内存只能用「限上限」的方式控制 | 已为 FE/BE/Flink 分别设置内存上限；若后续同时跑 Flink + Spark 内存仍紧张，只能升级内存规格（不可加 swap） |
 | 镜像加速站为第三方服务 | 可用性会变化 | `.deploy/README.md` 记录了可用源清单与切换方法 |
-| 内存 16 GB | Doris FE (JVM) + BE + Kafka + Flink JM/TM 同时运行占用较高（实测已用 12.6 GB / 可用 3.3 GB） | 已限制各组件上限；Flink TaskManager 内存可用 `FLINK_TASKMANAGER_MEMORY` 调节 |
+| 内存 16 GB | Doris FE (JVM) + BE + Kafka + Flink JM/TM 同时运行占用较高。**修掉 FE 堆之后实测已用 9.8 GB / 可用 6.16 GB**（此前 FE 以 8 GB 堆运行时的记录是「已用 12.6 GB / 可用 3.3 GB」） | 已限制各组件上限；Flink TaskManager 内存可用 `FLINK_TASKMANAGER_MEMORY` 调节 |
 | `172.28.0.0/24` 网段冲突 | Doris FE/BE 无法启动 | 通过 `.env` 改子网与静态 IP |
 | Flink slots 只有 8 个，与 8 个作业**刚好相等** | 任何历史作业残留都会让新作业拿不到 slot | 提交前清场（脚本已内置）；如需余量可调大 `FLINK_TASKMANAGER_SLOTS` |
 | 源 topic 采用 `earliest-offset` 可重放 | 重复生产同一批事件会让窗口指标累加（翻倍） | 验收用 `verify-sprint-1.sh --replay` 构造"恰好一代事件"；根治方案（按 `event_id` 去重）记录在 `docs/sprint/SPRINT_1.md` 第 11.1 节 |

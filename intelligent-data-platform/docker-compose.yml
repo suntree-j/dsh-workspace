@@ -264,6 +264,8 @@ services:
     volumes:
       - doris-fe-meta:/opt/apache-doris/fe/doris-meta
       - doris-fe-log:/opt/apache-doris/fe/log
+      # 仓库内 fe.conf 只读覆盖（只改 JVM 堆，详见文件头注释）
+      - ./infrastructure/doris/fe.conf:/opt/apache-doris/fe/conf/fe.conf:ro
     # Doris 需要较高的文件描述符上限。
     # 容器默认 soft nofile 仅 1024，会导致启动或高并发查询失败。
     ulimits:
@@ -462,8 +464,20 @@ services:
       JOB_MANAGER_RPC_ADDRESS: flink-jobmanager
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: flink-jobmanager
-        taskmanager.memory.process.size: ${FLINK_TASKMANAGER_MEMORY:-3072m}
+        taskmanager.memory.process.size: ${FLINK_TASKMANAGER_MEMORY:-6144m}
         taskmanager.numberOfTaskSlots: ${FLINK_TASKMANAGER_SLOTS:-8}
+        # 堆之外的两块内存按固定小比例给，把剩下的都留给堆。
+        # 为什么（2026-11-10 实测）：把流量域放大到 1,010 万条行为事件后，
+        # 原来的 FLINK_TASKMANAGER_MEMORY=2048m 在 8 个 slot 下每个 slot
+        # 只分到 ~200MB 堆，跑到 ~500 万条时 TaskManager 报
+        #   java.lang.OutOfMemoryError: Java heap space
+        # 导致 sink_dwd_traffic_behavior_detail / sink_dws_traffic_overview_1m
+        # 两个作业 FAILED，DWD 计数卡死在 4,964,900。
+        # managed 默认要吃掉 process 的 40%，而本项目没有任何需要 managed
+        # 内存的算子（无 batch/无 sort-merge），因此压到 0.1。
+        taskmanager.memory.managed.fraction: 0.1
+        taskmanager.memory.network.fraction: 0.1
+        taskmanager.memory.jvm-metaspace.size: 256m
         # 说明：Sprint 1 共有 8 个常驻作业（4 个 DWD + 4 个指标），
         # 每个作业至少占 1 个 slot，因此默认给 8 个 slot。
         # slot 不足时新作业会报
@@ -471,6 +485,23 @@ services:
         parallelism.default: 3
     volumes:
       - flink-checkpoints:/opt/flink/checkpoints
+    # 健康检查：TaskManager 是否已向 ResourceManager 注册成功。
+    # 为什么需要（2026-11 实测）：`scripts/batch-mode.sh` 的 restore_realtime()
+    # 要等 jobmanager 与 taskmanager 双双 healthy 才继续提交作业；此前
+    # TaskManager 没有 healthcheck，`docker inspect .State.Health` 取不到值，
+    # 判定永远是 1/2，每次恢复都白等满 120 秒。
+    #
+    # 注意（2026-11 第二次实测）：第一版把探针写成
+    # `curl -fsS http://localhost:8081/taskmanagers` 是**错的**——8081 是
+    # JobManager 的 REST 端口，TaskManager 不监听任何 HTTP 端口，
+    # 容器内实测 `curl: (7) Failed to connect to localhost port 8081`，
+    # 于是本容器长期 `Up (unhealthy)`。TaskManager 的存活只能按进程判。
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f org.apache.flink.runtime.taskexecutor.TaskManagerRunner >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 40s
     networks:
       - data-platform
 
