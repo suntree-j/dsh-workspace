@@ -1726,12 +1726,16 @@
       var series = ref([]);
       var chartEl = ref(null);
       var funnelEl = ref(null);
+      var funnelServer = ref(null);
 
       function load() {
         return panel.run(function () {
-          // 漏斗与趋势共用同一批窗口数据，避免两个接口口径错位
-          return Promise.all([api.traffic(60), api.funnel(60)]).then(function (res) {
+          // 趋势看"形状"，只看最近 60 个窗口；漏斗看"总量"，必须覆盖数据集全区间。
+          // 两者口径不同但都必要，所以分别取，不能再用同一批窗口数据凑。
+          // 20160 分钟（14 天）是接口允许的上限，大于本数据集 9 天，等价于"全部窗口"。
+          return Promise.all([api.traffic(60), api.funnel(20160)]).then(function (res) {
             series.value = res[0] || [];
+            funnelServer.value = res[1] || null;
             return series.value;
           });
         }, function () { return []; });
@@ -1739,9 +1743,18 @@
       panel.setReload(load);
       onMounted(load);
 
-      // 漏斗层级以"所选窗口累计"重算，不用后端返回的窗口均值，
-      // 保证 view > click > cart > buy 的单调性与 metrics.md 的公式一致。
+      // 漏斗层级以服务端全量聚合为准（/funnel 内部对 dws_traffic_overview_1m 做 SUM），
+      // 不用前端把窗口逐条相加——那样既受"取几个窗口"影响，又会和大盘 KPI 对不上。
       var funnelTotal = computed(function () {
+        var s = funnelServer.value;
+        if (s && numberOrNull(s.view_cnt) != null) {
+          return {
+            view_cnt: numberOrNull(s.view_cnt) || 0,
+            click_cnt: numberOrNull(s.click_cnt) || 0,
+            cart_cnt: numberOrNull(s.cart_cnt) || 0,
+            buy_cnt: numberOrNull(s.buy_cnt) || 0
+          };
+        }
         var t = { view_cnt: 0, click_cnt: 0, cart_cnt: 0, buy_cnt: 0 };
         series.value.forEach(function (r) {
           t.view_cnt += numberOrNull(r.view_cnt) || 0;
@@ -1750,6 +1763,22 @@
           t.buy_cnt += numberOrNull(r.buy_cnt) || 0;
         });
         return t;
+      });
+
+      // 四级漏斗的前提是数据里真的采到了 CLICK 事件。天池只采集 pv / cart / fav / buy，
+      // 没有 CLICK 这一级：硬画四层会让"浏览→点击"恒为 0、"加购率"（加购÷点击）恒为 NULL，
+      // 看上去像漏斗坏了，其实这一级根本不存在。所以层级由数据决定，不由模板决定。
+      var hasClick = computed(function () {
+        return (funnelTotal.value.click_cnt || 0) > 0;
+      });
+
+      var levels = computed(function () {
+        var f = funnelTotal.value;
+        var out = [{ name: '浏览', value: f.view_cnt }];
+        if (hasClick.value) out.push({ name: '点击', value: f.click_cnt });
+        out.push({ name: '加购', value: f.cart_cnt });
+        out.push({ name: '购买', value: f.buy_cnt });
+        return out;
       });
 
       var sizeTotals = computed(function () {
@@ -1766,16 +1795,28 @@
       var sizeCards = computed(function () {
         var s = sizeTotals.value;
         var f = funnelTotal.value;
+        // 三张卡片混用两种口径，所以标签里把范围写死，避免读者把"近 60 窗口"当成全量：
+        // UV 与 PV 来自趋势序列（最近 60 个窗口），漏斗三项来自服务端全量聚合。
         return [
           { label: 'UV（单窗口峰值）', value: formatInt(s.uv), unit: '人', domain: 'traffic', sub: '去重用户不可跨窗口相加', tip: definitionOf('uv') },
-          { label: 'PV 合计', value: formatInt(s.pv), unit: '次', domain: 'traffic', sub: '全部行为事件数', tip: definitionOf('pv') },
-          { label: '浏览次数', value: formatInt(f.view_cnt), unit: '次', domain: 'traffic', sub: '漏斗第一层', tip: definitionOf('view_cnt') },
-          { label: '购买次数', value: formatInt(f.buy_cnt), unit: '次', domain: 'traffic', sub: '收藏 ' + formatInt(s.favorite) + ' 次', tip: definitionOf('buy_cnt') }
+          { label: 'PV 合计（近 60 窗口）', value: formatInt(s.pv), unit: '次', domain: 'traffic', sub: '趋势图所选窗口内的行为事件数', tip: definitionOf('pv') },
+          { label: '浏览次数（全量）', value: formatInt(f.view_cnt), unit: '次', domain: 'traffic', sub: '漏斗第一层，与下方漏斗同口径', tip: definitionOf('view_cnt') },
+          { label: '购买次数（全量）', value: formatInt(f.buy_cnt), unit: '次', domain: 'traffic', sub: '收藏 ' + formatInt(s.favorite) + ' 次（近 60 窗口）', tip: definitionOf('buy_cnt') }
         ];
       });
 
       var rateCards = computed(function () {
         var f = funnelTotal.value;
+        if (!hasClick.value) {
+          // 三级漏斗（浏览 → 加购 → 购买）：加购率的分母是浏览数，
+          // 并在卡片上写明"数据不含点击事件"，避免读者以为是漏采。
+          return [
+            { label: '浏览 → 加购', value: formatRate(ratioOf(f.cart_cnt, f.view_cnt)), unit: '', domain: 'traffic', sub: '加购 ÷ 浏览（无点击层）', tip: '本数据集不含 CLICK 事件，漏斗从浏览直接进入加购，故加购率的分母取浏览数。' },
+            { label: '加购 → 购买', value: formatRate(ratioOf(f.buy_cnt, f.cart_cnt)), unit: '', domain: 'traffic', sub: '购买 ÷ 加购', tip: definitionOf('buy_rate') },
+            { label: '端到端转化率', value: formatRate(ratioOf(f.buy_cnt, f.view_cnt)), unit: '', domain: 'traffic', sub: '购买 ÷ 浏览', tip: '端到端转化率 = buy_cnt / view_cnt，用于衡量整条链路的漏损。' },
+            { label: '未购买占比', value: formatRate(ratioOf(f.view_cnt - f.buy_cnt, f.view_cnt)), unit: '', domain: 'traffic', sub: '（浏览 − 购买）÷ 浏览', tip: '1 − 端到端转化率，即浏览后没有产生购买的比例。' }
+          ];
+        }
         return [
           { label: '点击率', value: formatRate(ratioOf(f.click_cnt, f.view_cnt)), unit: '', domain: 'traffic', sub: '点击 ÷ 浏览', tip: definitionOf('click_rate') },
           { label: '加购率', value: formatRate(ratioOf(f.cart_cnt, f.click_cnt)), unit: '', domain: 'traffic', sub: '加购 ÷ 点击', tip: definitionOf('cart_rate') },
@@ -1786,11 +1827,14 @@
 
       var steps = computed(function () {
         var f = funnelTotal.value;
-        var pairs = [
-          { label: '浏览 → 点击', from: '浏览', to: '点击', a: f.view_cnt, b: f.click_cnt },
-          { label: '点击 → 加购', from: '点击', to: '加购', a: f.click_cnt, b: f.cart_cnt },
-          { label: '加购 → 购买', from: '加购', to: '购买', a: f.cart_cnt, b: f.buy_cnt }
-        ];
+        var pairs = [];
+        if (hasClick.value) {
+          pairs.push({ label: '浏览 → 点击', from: '浏览', to: '点击', a: f.view_cnt, b: f.click_cnt });
+          pairs.push({ label: '点击 → 加购', from: '点击', to: '加购', a: f.click_cnt, b: f.cart_cnt });
+        } else {
+          pairs.push({ label: '浏览 → 加购', from: '浏览', to: '加购', a: f.view_cnt, b: f.cart_cnt });
+        }
+        pairs.push({ label: '加购 → 购买', from: '加购', to: '购买', a: f.cart_cnt, b: f.buy_cnt });
         return pairs.map(function (p) {
           return {
             label: p.label,
@@ -1808,13 +1852,7 @@
       // 为什么只报第一个：后面的必然也为 0，全部报出来只是噪声；
       // 修的人只需要知道"从哪一级开始断的"。
       var funnelBreak = computed(function () {
-        var f = funnelTotal.value;
-        var chain = [
-          { name: '浏览', v: f.view_cnt },
-          { name: '点击', v: f.click_cnt },
-          { name: '加购', v: f.cart_cnt },
-          { name: '购买', v: f.buy_cnt }
-        ];
+        var chain = levels.value.map(function (l) { return { name: l.name, v: l.value }; });
         for (var i = 0; i < chain.length - 1; i++) {
           if (!chain[i].v) {
             return { from: chain[i].name, to: chain[chain.length - 1].name };
@@ -1854,12 +1892,7 @@
             labelLine: { length: 10, lineStyle: { color: C.grid } },
             itemStyle: { borderColor: 'transparent', borderWidth: 0, opacity: 0.9 },
             emphasis: { label: { color: C.text, fontWeight: 'bold' } },
-            data: [
-              { name: '浏览', value: f.view_cnt },
-              { name: '点击', value: f.click_cnt },
-              { name: '加购', value: f.cart_cnt },
-              { name: '购买', value: f.buy_cnt }
-            ]
+            data: levels.value
           }]
         };
       });
@@ -1887,6 +1920,8 @@
         error: panel.error,
         series: series,
         funnelTotal: funnelTotal,
+        hasClick: hasClick,
+        levels: levels,
         sizeCards: sizeCards,
         rateCards: rateCards,
         steps: steps,

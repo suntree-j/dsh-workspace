@@ -539,10 +539,10 @@
         <section class="panel">
           <div class="panel__head">
             <h2 class="panel__title">行为漏斗</h2>
-            <p class="panel__meta">浏览 → 点击 → 加购 → 购买（所选窗口累计）</p>
+            <p class="panel__meta">{{ hasClick ? '浏览 → 点击 → 加购 → 购买' : '浏览 → 加购 → 购买（本数据集不含点击事件）' }}（全量窗口累计）</p>
           </div>
           <div class="chart chart--md" ref="funnelEl" v-show="funnelTotal.view_cnt"
-               role="img" aria-label="行为转化漏斗图：浏览、点击、加购、购买四层累计量"></div>
+               role="img" :aria-label="'行为转化漏斗图：' + levels.length + ' 层累计量'"></div>
           <skeleton v-if="loading && !series.length" :rows="5"></skeleton>
           <empty v-else-if="!funnelTotal.view_cnt" chart text="所选窗口内没有行为事件" hint="漏斗第一层为 VIEW 事件数，为 0 时无法计算转化率"></empty>
         </section>
