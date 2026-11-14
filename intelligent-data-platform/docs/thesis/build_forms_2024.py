@@ -59,7 +59,10 @@ def para_texts(cell):
     return out
 
 
-def make_run(text, size=10.5, bold=False):
+CITE_RE = re.compile(r"\[\[(\d{1,2}(?:,\d{1,2})*)\]\]")
+
+
+def make_run(text, size=10.5, bold=False, sup=False):
     r = OxmlElement("w:r")
     rPr = OxmlElement("w:rPr")
     rFonts = OxmlElement("w:rFonts")
@@ -78,6 +81,10 @@ def make_run(text, size=10.5, bold=False):
     szcs = OxmlElement("w:szCs")
     szcs.set(qn("w:val"), str(int(size * 2)))
     rPr.append(szcs)
+    if sup:
+        va = OxmlElement("w:vertAlign")
+        va.set(qn("w:val"), "superscript")
+        rPr.append(va)
     r.append(rPr)
     t = OxmlElement("w:t")
     t.set(qn("xml:space"), "preserve")
@@ -106,7 +113,15 @@ def make_para(text, indent=True, size=10.5, bold=False, align=None, before=0, af
         pPr.append(jc)
     p.append(pPr)
     if text:
-        p.append(make_run(text, size=size, bold=bold))
+        # 引注：[[3]] 或 [[11,12]] → 上标 [3]、[11,12]
+        pos = 0
+        for m in CITE_RE.finditer(text):
+            if m.start() > pos:
+                p.append(make_run(text[pos:m.start()], size=size, bold=bold))
+            p.append(make_run("[%s]" % m.group(1), size=size, sup=True))
+            pos = m.end()
+        if pos < len(text):
+            p.append(make_run(text[pos:], size=size, bold=bold))
     return p
 
 
@@ -344,6 +359,7 @@ def rebuild(key, tbl_el, out_path):
 # 不再从旧稿 docx 搬运，也不再就地插入段落（旧做法会在二次运行时读到自己的输出）。
 from forms_content_2024 import (  # noqa: E402
     LIT,
+    REFS,
     METHOD,
     OUTLINE,
     TASK_LIT,
@@ -358,11 +374,30 @@ old_task = cur_task.tables[0]
 # 参考文献取自基线《任务书》的第 6 行（旧模板该行标题是「参考文献」），
 # 12 条 GB/T 7714 已逐条核对格式与顺序；2024 版已把这一行改为「文献资料收集要求」，
 # 所以参考文献改由《开题报告》的文献综述栏末尾承载。
-TASK_REFS = para_texts(old_task.rows[5].cells[-1])
+# 参考文献改为在 forms_content_2024.REFS 里维护（16 条，含 4 条中文文献），
+# 不再从基线稿搬运：基线稿只有 12 条外文，且条目里有两处页码错误。
+TASK_REFS = list(REFS)
 
 LIT_CELL = LIT + ["", "附：参考文献"] + TASK_REFS
 PROP_VALUE = VALUE + OUTLINE
 PROP_METHOD = METHOD
+
+
+# 「1 绪论」「1.2.1 …」这类小节标题：加粗且不缩进，与正文区分开。
+# 只用于开题报告的三格正文；任务书里的「2027 年 1 月 6 日」也以数字开头，
+# 所以靠"短行 + 编号里有点或紧跟汉字"来避免误伤。
+SECTION_RE = re.compile(r"^\d{1,2}(?:\.\d{1,2}){0,2}\.?\s+\S")
+
+
+def as_section_lines(lines):
+    """把小节标题行转成 (text, {"bold": True, "indent": False}) 的元组。"""
+    out = []
+    for line in lines:
+        if isinstance(line, str) and len(line) <= 34 and SECTION_RE.match(line):
+            out.append((line, {"bold": True, "indent": False}))
+        else:
+            out.append(line)
+    return out
 
 
 def _dedup(seq):
@@ -415,11 +450,11 @@ fill_tc(row_tcs(trs[1])[5], [CLASSNAME], indent=False)
 fill_tc(row_tcs(trs[2])[1], [TOPIC], indent=False)
 fill_tc(row_tcs(trs[2])[3], [FIELD], indent=False)
 # r3: 选题价值
-fill_tc(row_tcs(trs[3])[1], PROP_VALUE)
+fill_tc(row_tcs(trs[3])[1], as_section_lines(PROP_VALUE))
 # r4: 文献综述（含参考文献）
-fill_tc(row_tcs(trs[4])[1], LIT_CELL)
+fill_tc(row_tcs(trs[4])[1], as_section_lines(LIT_CELL))
 # r5: 研究方法与思路
-fill_tc(row_tcs(trs[5])[1], PROP_METHOD)
+fill_tc(row_tcs(trs[5])[1], as_section_lines(PROP_METHOD))
 # r6: 指导教师意见 → 清空【填写说明】，留白待手写
 fill_tc(row_tcs(trs[6])[1], [""])
 # r7: 签名 / 时间 保持模板空白
