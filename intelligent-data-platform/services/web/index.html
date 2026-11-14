@@ -569,7 +569,7 @@
               <p>
                 「{{ funnelBreak.from }}」计数为 <span class="mono">0</span>，
                 因此从这一级往后（{{ funnelBreak.to }}）的转化率全部为 0 ——
-                这是**数据在该窗口内没有该行为**，不是链路故障。
+                这是<strong>数据在该窗口内没有该行为</strong>，不是链路故障。
               </p>
             </div>
           </div>
@@ -994,7 +994,7 @@
         <p class="rc-hero__note">
           <span class="tip" tabindex="0" role="note"
                 data-tip="对账口径：在两侧数据范围求交、尾部留 3 分钟安全边界的对账区间内，按 window_start 全外连接、缺失侧补 0，逐窗口比对交易域 7 个可加指标 + 1 个去重指标（order_user_cnt）。比率列是派生指标，只做每侧自洽性诊断，不参与判据。">?</span>
-          判据为**逐窗口数值相等**（缺失侧补 0）。比对窗口包含"两侧均为 0"的业务静默窗口 ——
+          判据为<strong>逐窗口数值相等</strong>（缺失侧补 0）。比对窗口包含"两侧均为 0"的业务静默窗口 ——
           它们计入"一致"但不构成独立证据，真正承载判别力的是有业务量的窗口。
         </p>
       </section>
@@ -1200,7 +1200,7 @@
             <h2 class="panel__title">用自然语言问数据</h2>
             <p class="panel__desc">
               Agent 会先查指标口径、再生成只读 SQL、通过安全守卫后取数，
-              最后给出**带数据来源**的回答。它没有数据库写权限。
+              最后给出<strong>带数据来源</strong>的回答。它没有数据库写权限。
             </p>
           </div>
         </header>
@@ -1262,7 +1262,7 @@
             <div>
               <h2 class="panel__title">执行轨迹</h2>
               <p class="panel__desc">
-                下面每一段都对应服务端**实际报告过**的动作（<span class="mono">graph.path</span> /
+                下面每一段都对应服务端<strong>实际报告过</strong>的动作（<span class="mono">graph.path</span> /
                 <span class="mono">steps</span> / <span class="mono">executed_sql</span>），
                 不展示模型的推理过程。
               </p>
@@ -1408,9 +1408,9 @@
             <p>
               校验由 CLI 引擎执行：<span class="mono">bash scripts/run-quality-checks.sh</span>
               （加 <span class="mono">--with-lake</span> 才跑需要读 Iceberg 的那 1 条）。
-              本页**不展示**每条的通过情况 —— 数据服务没有暴露质量结论的只读接口，
+              本页<strong>不展示</strong>每条的通过情况 —— 数据服务没有暴露质量结论的只读接口，
               前端无法取得真实结果，因此不做任何推测。下面给出的是
-              **清单本身**与**接口能真实取到的完整性信号**。
+              <strong>清单本身</strong>与<strong>接口能真实取到的完整性信号</strong>。
             </p>
           </div>
         </div>
@@ -1423,7 +1423,7 @@
             <h2 class="panel__title">实时完整性信号（来自对账接口）</h2>
             <p class="panel__desc">
               下面每个数字都是服务端算出来的：<span class="mono">GET /data/api/batch/reconcile</span>。
-              它不是"质量校验的结论"，而是**同一批业务事实经两条独立链路计算后的比对结果**。
+              它不是"质量校验的结论"，而是<strong>同一批业务事实经两条独立链路计算后的比对结果</strong>。
             </p>
           </div>
           <p class="panel__meta" v-if="integrity">对账批次 {{ integrity.batchId }}</p>
@@ -1495,7 +1495,7 @@
           <div>
             <h2 class="panel__title">只读权限边界（{{ tableCount }} 张表）</h2>
             <p class="panel__desc">
-              这是**数据服务实际放行的白名单**（<span class="mono">GET /data/api/meta/tables</span>），
+              这是<strong>数据服务实际放行的白名单</strong>（<span class="mono">GET /data/api/meta/tables</span>），
               也是 Agent 能读到的全部范围 —— 白名单之外的表一律被 SQL 守卫拒绝，
               这一条由 <span class="mono">services/api/app/sqlguard.py</span> 强制，不依赖调用方自觉。
             </p>
@@ -1540,7 +1540,7 @@
           </div>
         </div>
         <p class="qrun__note">
-          失败路径**不是打印一行字而已**：任一条 error 级校验失败，脚本以**非 0 退出码**结束，
+          失败路径<strong>不是打印一行字而已</strong>：任一条 error 级校验失败，脚本以<strong>非 0 退出码</strong>结束，
           可被调度与 CI 真实拦截。<span class="mono">--proof-fail</span> 会把期望值故意改坏来验证这一点
           （实测两种改法都返回退出码 1，恢复后重跑仍全绿 —— 说明失败来自断言而不是数据被改坏）。
         </p>
@@ -1562,7 +1562,7 @@
           <div>
             <h2 class="panel__title">实时链路健康</h2>
             <p class="panel__desc">
-              Kafka → Flink（1 分钟滚动窗口）→ Doris。本页看的是**链路本身的运行状态**，
+              Kafka → Flink（1 分钟滚动窗口）→ Doris。本页看的是<strong>链路本身的运行状态</strong>，
               不是业务主题的历史序列（后者见「交易分析」「流量分析」）。
             </p>
           </div>
@@ -1570,14 +1570,14 @@
         <skeleton v-if="loading && !trade.length" variant="kpi" :rows="3"></skeleton>
         <div class="kpi-grid kpi-grid--4" v-else-if="trade.length">
           <kpi label="最新窗口" :value="freshness ? fmtShort(freshness.windowStart) : '—'" unit=""
-               :sub="freshness ? ('滞后约 ' + freshness.lagMin + ' 分钟') : '未取到'"
-               tip="实时链路按 1 分钟窗口产出。滞后 = 现在 − 最新窗口时间。本页只如实显示测得值，不设通过阈值——阈值属于告警策略（Prometheus 侧），前端不代替它下结论。"></kpi>
+               :sub="freshness ? freshness.lagText : '未取到'"
+               tip="实时链路按 1 分钟窗口产出。滞后 = 现在 − 最新窗口时间。本页只如实显示测得值，不设通过阈值——阈值属于告警策略（Prometheus 侧），前端不代替它下结论。当前数据集是公开历史数据（交易域 2009–2011、流量域 2017-12），滞后恒为十几年，因此超过 48 小时就不显示分钟数，改说明「不适用」。"></kpi>
           <kpi :label="'窗口密度（最近 ' + trade.length + ' 个）'" :value="density ? density.active : '—'" unit="个"
                :sub="density ? ('占 ' + density.pct.toFixed(1) + '%，其余为无业务量窗口') : '未取到'"
                tip="实时链路在数据稀疏时会出现 count=0 的窗口，那不是故障，但会让人误判“链路没在写”。这里把比例显式写出来。"></kpi>
           <kpi label="GMV 跨窗口可加性" value="可加" unit=""
                sub="GMV / 订单量 / PV 等可直接 SUM 上卷"
-               tip="可加指标：逐窗口求和等于总体。注意区分——去重指标（UV、下单用户数）与派生比率（客单价、支付成功率）**不可**跨窗口相加或求平均，必须在明细层重新计算。"></kpi>
+               tip="可加指标：逐窗口求和等于总体。注意区分——去重指标（UV、下单用户数）与派生比率（客单价、支付成功率）不可跨窗口相加或求平均，必须在明细层重新计算。"></kpi>
           <kpi label="去重指标" value="不可加" unit=""
                sub="UV / 下单用户数须回明细去重"
                tip="COUNT(DISTINCT user_id) 在窗口之间不可加：SUM(uv) 得到的不是任何有意义的量。要天粒度必须回到明细重新去重。"></kpi>

@@ -3019,6 +3019,11 @@
       // 判据说明：实时链路是 1 分钟窗口，正常情况下滞后应是**分钟级**；
       // 这里只**如实显示**测得的滞后，不设通过阈值 ——
       // 阈值属于告警策略（在 Prometheus 侧），前端不代替它下结论。
+      //
+      // 数据换成公开历史数据集（交易域 2009–2011、流量域 2017-12）之后，
+      // "现在 − 最新窗口"会算出几百万分钟这种无意义的数 —— 那是**数据集是历史区间**
+      // 的事实，不是链路故障。超过 48 小时就不再显示分钟数，直接说明不适用。
+      var LAG_LIVE_LIMIT_MIN = 48 * 60;
       var freshness = computed(function () {
         var rows = trade.value;
         if (!rows.length) return null;
@@ -3028,7 +3033,15 @@
         var d = new Date(String(ts).replace(' ', 'T'));
         if (isNaN(d.getTime())) return null;
         var lagMin = Math.floor((Date.now() - d.getTime()) / 60000);
-        return { windowStart: ts, lagMin: lagMin };
+        var historical = lagMin > LAG_LIVE_LIMIT_MIN;
+        return {
+          windowStart: ts,
+          lagMin: lagMin,
+          historical: historical,
+          lagText: historical
+            ? '历史数据集 · 按原始事件时间保留，滞后不适用'
+            : ('滞后约 ' + lagMin + ' 分钟')
+        };
       });
 
       var latest = computed(function () {
