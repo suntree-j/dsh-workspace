@@ -58,10 +58,16 @@
 | --- | --- | --- | --- | --- |
 | `scripts/real-data/build_uci_dataset.py` | `f760bb21ff7f1e0d…` | `bc0211952836ed98…` | 本地可配置窗口、默认全量；服务器写死 2011-11 | **已部署本地版**（同窗口对照：输出逐行相同） |
 | `scripts/real-data/build_tianchi_dataset.py` | `9cca081d63de6f44…` | `162835b8ee2c1dc1…` | 服务器版商品主键会重复 356 行 | **已部署本地版** |
-| `infrastructure/quality/checks.conf` | `ca82f3dc047e2da0…` | `af9c8867ed0ff26e…` | 服务器版注释仍写死旧合成值 51,890,375.77（仅注释） | 待随下次配置类发布同步 |
-| `services/api/app/doris.py` | `b4a384982cdd66c7…` | `5b935814a3d1e84e…` | 仅文档字符串示例金额不同 | 待随 API 改动同步 |
-| `data-generator/README.md` | `c311d25c750cf0e1…` | `5159b29e1fad8953…` | 本地有【现状说明】块 | 文档类，可随下次同步 |
-| `sql/metadata/kafka_topics.md` | `611d335900924eac…` | `69fcdcdd87c61f18…` | 本地补了真实单价口径说明 | 文档类，可随下次同步 |
+| `infrastructure/quality/checks.conf` | `ca82f3dc047e2da0…` | `af9c8867ed0ff26e…` | 服务器版注释仍写死旧合成值 51,890,375.77（仅注释） | **已同步**（2026-11-16 05:45，两侧 MD5 `6eef4537aad58898d71b967760274107`；服务器已无该常量） |
+| `services/api/app/doris.py` | `b4a384982cdd66c7…` | `5b935814a3d1e84e…` | 仅文档字符串示例金额不同 | **已同步** + 重启 api（两侧 MD5 `e5f3f275878f7358d00a24382f3a1953`，health/overview 均 200） |
+| `data-generator/README.md` | `c311d25c750cf0e1…` | `5159b29e1fad8953…` | 本地有【现状说明】块 | **已同步**（两侧 MD5 `465fdee9e5aebf2120258cac21fa56ca`） |
+| `sql/metadata/kafka_topics.md` | `611d335900924eac…` | `69fcdcdd87c61f18…` | 本地补了真实单价口径说明 | **已同步**（两侧 MD5 `a959c63b858a59363e5cec70c2cc93ba`） |
+
+> 状态更新（2026-11-16 05:45）：上表 6 项差异中，前两项在 D0 已部署，其余 4 项本次同步完毕，
+> 服务器与本地**逐文件 MD5 一致**（部署后用 `systemctl restart data-platform-api` 让运行代码与部署文件一致）。
+> `tests/test_frontend_quality_manifest.py` 仍不上线（服务器不跑测试）。
+> 注意：表格里的「本地 / 部署」两列是 **D0 采集时**的 SHA-256（LF 归一化），用于复现当时的差异；
+> 同步后的核验值是上表处理列里的 MD5，两种算法不要混读。
 | `tests/test_frontend_quality_manifest.py` | `c5d92b79866a8307…` | **缺失** | 测试文件，服务器不跑测试 | 不上线 |
 
 ## 六、数据文件清单（`data-generator/data/real/`，服务器实测）
