@@ -48,11 +48,10 @@
 交接包第五节列了五项：意图与执行、RAG 业务知识、Skill 任务知识、MCP 取数、回答与决策支持。
 已完成：意图与执行（能力边界 `services/agent/app/scope.py`）、MCP 取数取证（`docs/evidence/E05_智能体路径.md` 第六节）。
 
-未做：RAG 与 Skill 的正文段落——需要写清"检索到什么、怎么用、错了会怎样"，
-数据来源是 `services/agent/app/{corpus,retrieval,lexical}.py` 与 66 条检索库。
+已完成（2026-11-16）：5.8 与 5.9 已按实测口径回写。5.8 更新为 69 条语料（metric 22 / convention 16 / topic 4 / layering 8 / table 19，交接描述的 66 条与本次接口返回不一致，以 `/retrieval` 实测为准），补 `doc_id`/`citation`/`as_context`/无命中与降级语义，并写明标题加成未彻底消除“约定行压过定义行”；Skill 明示为设计边界、未实现。5.9 按“实际 HTTP / MCP 可选已部署 / 工具级对照”三分法改写，明确未做完整 MCP 问答链路。DOCX 已重建（937,342 字节，34 表 7 图，断言通过）。证据：`docs/evidence/W3_论文5.8_5.9回写.md`。
 
-入口：`docs/thesis/REPORT_DRAFT.md` 的 `## 5.8 检索` 与 `## 5.9 MCP` 两节，
-写完重跑 `python docs/thesis/md_to_thesis_docx.py`。
+入口：`docs/thesis/REPORT_DRAFT.md` 的 `## 5.8 检索` 与 `## 5.9 MCP` 两节；
+重建命令：`python docs/thesis/md_to_thesis_docx.py`。
 
 ## 3. 推送（阻塞在凭据，不在代码）
 

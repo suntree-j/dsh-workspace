@@ -892,29 +892,32 @@ retrieve → plan ─┬─(规划成功)→ execute → validate ─┬─(有�
 
 ## 5.8 检索：BM25 词法检索 + 显式同义词表
 
-**语料构成**（实测 `/retrieval`，`docs/sprint/SPRINT_9.md` 第 9.2 节）：
+**语料构成与实测口径。** 检索语料不是硬编码在提示词里的几段说明，而是每次装载时由三类来源生成：`sql/metadata/metrics.md` 的指标行与通用约定、`sql/metadata/kafka_topics.md` 的事件类型、`services/agent/knowledge/layering.md` 的分层说明，再加上经只读数据服务 `GET /meta/tables` 取得的授权表结构。2026-11-16 07:39:29 装载、07:43 实测 `GET /retrieval`，结果如下：
 
 ```text
-docs_total = 65
-  metric      22  ← sql/metadata/metrics.md 的指标行（逐行成块，同名合并）
-  convention  15  ← 同文件的通用约定
-  topic        4  ← sql/metadata/kafka_topics.md 的事件类型
+docs_total = 69
+  metric      22  ← metrics.md 的指标行（逐行成块，同名指标合并）
+  convention  16  ← 同文件的通用约定
+  topic        4  ← kafka_topics.md 的事件类型
   layering     8  ← services/agent/knowledge/layering.md
-  table       16  ← GET /meta/tables（与 sqlguard 白名单逐表对应）
+  table       19  ← GET /meta/tables（与 sqlguard 授权表逐表对应）
 
 channels = {
-  'sql/metadata/metrics.md'                  : 'ok（37 条）'
-  'sql/metadata/kafka_topics.md'             : 'ok（4 条）'
-  'services/agent/knowledge/layering.md'     : 'ok（8 条）'
-  'live_tables'                              : 'ok（16 张表）'
+  'sql/metadata/metrics.md'               : 'ok（38 条）'
+  'sql/metadata/kafka_topics.md'          : 'ok（4 条）'
+  'services/agent/knowledge/layering.md'  : 'ok（8 条）'
+  'live_tables'                           : 'ok（19 张表）'
 }
+synonyms.size = 54
 ```
 
-`channels` 是**刻意暴露**的：任何一路语料缺失都会在这里显示原因，而不是让检索悄悄变差——"少了一路语料却假装完整"是最难发现的故障（同上）。
+这一版比早期记录的 65 条多 4 条：通用约定由 15 增至 16，授权表由 16 张增至 19 张。数字变化本身说明语料是**运行时生成**的，而不是写死在代码里的常量；论文中的语料规模必须以当次接口返回为准。
 
-**文档模型带行号**。每条语料是一个 `Doc`，含 `doc_id`（如 `metrics.md#L33`）、`title`、`text`、`source`、`line`、`kind`。**为什么要行号**：回答里写"依据 `sql/metadata/metrics.md`"只能证明"有这么个文件"；写上 `L33` 才能让人**当场翻到那一行核对**（`docs/sprint/SPRINT_9.md` 第 3.1 节）。
+`channels` 是**刻意暴露**的：任何一路语料缺失都会在这里显示原因，而不是让检索悄悄变差。表结构一路尤其不能想当然——它走的是只读数据服务的 `/meta/tables`，不是 Agent 直连 `information_schema`；接口不可达时，`live_tables` 会写出失败原因，同时 `degraded=true`，而不是返回一份看起来完整的旧语料。把“少了一路语料”显式暴露出来，比让检索静默降级更重要，因为后者最难从最终回答里发现。
 
-**`retrieve` 是图的第一个节点，不是"让模型自己决定要不要查"**：
+**文档模型带行号。** 每条语料是一个 `Doc`，含 `doc_id`、`title`、`text`、`source`、`line`、`kind`。`doc_id` 是稳定标识，例如 `metric:gmv`；真正给人核对的是 `Doc.citation()` 返回的 `source:line`，例如 `sql/metadata/metrics.md:33`。**为什么要行号**：回答里写“依据 `sql/metadata/metrics.md`”只能证明“有这么个文件”；写上 `:33` 才能让人**当场翻到那一行核对**。`doc_id` 与 `citation` 各司其职，不能把前者当成可引用的文件位置。
+
+**`retrieve` 是图的第一个节点，不是“让模型自己决定要不要查”**：
 
 ```text
 retrieve（确定性执行，命中写入 state.docs）
@@ -924,39 +927,55 @@ plan（提示词里带上 state.docs 的格式化结果）
 execute → validate → reflect → …
 ```
 
-**为什么不让模型决定要不要检索**：检索是**每问必需**的前置步骤，让模型"有时想起来查"会得到不稳定的口径引用——而这正是本阶段要消除的问题。同时 `retrieve` 仍作为第 5 个工具注册进 `/tools`（能力面可枚举、可审查），但**不参与模型的工具选择循环**（`docs/sprint/SPRINT_9.md` 第 3.3 节）。
+**为什么不让模型决定要不要检索**：在默认配置下，检索是**每问必需**的前置步骤，让模型“有时想起来查”会得到不稳定的口径引用——而这正是本阶段要消除的问题。同时 `retrieve_docs` 仍作为第 5 个工具注册进 `/tools`（能力面可枚举、可审查），但图内的检索节点直接调用 `Retriever`，不依赖模型发起工具调用。检索结果不是整段塞进提示词：`RetrievalResult.as_context(max_docs=5, max_chars=2400)` 只取前 5 条、总长不超过 2,400 字符，每条以 `[来源 citation｜kind｜title]` 开头；`sources()` 另给出 `doc_id/title/source/line/citation/score/matched_terms`，供回答附来源、供事后核查。**无命中时**，上下文会明确要求“如实说明语料没有相关口径，不要凭常识给出公式”，而不是让模型用参数化知识补一个看起来合理的公式。
 
-**同义词真实生效的实证**（核心验收项，`docs/sprint/SPRINT_9.md` 第 9.3 节）：
+**同义词扩展的实测结果。** 问句“最近一周卖了多少钱”不含 `GMV` 字样，但同义词表把它展开为 `gmv` 与 `payment_amount`：
 
 ```text
-问：最近一周卖了多少钱        ← 问法里不含 GMV 字样
-  expanded : ('卖了多少钱', ['gmv', 'payment_amount'], w=1.00)
-             ('卖了多少',   ['gmv'],                  w=0.90)
-  hit      : metric:payment_amount | sql/metadata/metrics.md:38 | 支付金额（payment_amount）
-  hit      : metric:gmv            | sql/metadata/metrics.md:33 | GMV（gmv）
+问：最近一周卖了多少钱（k=5，2026-11-16 07:43:50）
+expanded_terms:
+  卖了多少钱 -> [gmv, payment_amount]  w=1.00
+  卖了多少   -> [gmv]                  w=0.90
+
+top5:
+  1  metric:payment_amount            6.4946  sql/metadata/metrics.md:38
+  2  convention:可加指标（7 个）       5.1263  sql/metadata/metrics.md:79
+  3  metric:gmv                       5.0406  sql/metadata/metrics.md:33
+  4  table:ads_batch_trade_1m         3.9187
+  5  table:ads_batch_trade_1d         3.8529
 ```
 
-**负例同样成立**（只有正例的话，"把所有词都映射一遍"的坏配置也能全绿）：
+两条指标定义都被召回，说明同义词扩展确实参与了排序，而不是只出现在返回字段里。**但也要如实记录一个未完全解决的现象**：第 2 条是列举了 7 个可加指标的通用约定行，它同时命中 `gmv` 与 `payment_amount` 两个词项，分数仍高于只命中 `gmv` 的指标定义行；本次复测中 `gmv` 定义行排在第 3 位，仍在约定行之后。因此本节只声称“同义词扩展生效、标题加成参与了排序”，**不声称“提到与定义混淆的问题已彻底修复”**。
+
+**负例同样成立**（只有正例的话，“把所有词都映射一遍”的坏配置也能全绿）：
 
 ```text
-问：今天天气怎么样适合钓鱼吗
+问：今天天气怎么样适合钓鱼吗（k=5，2026-11-16 07:43:52）
   hits = []            ← 不硬凑命中
+  docs_total = 69
+  elapsed_ms = 1
 ```
 
-**四条检索质量踩坑**（全部由真实问句暴露，`docs/sprint/SPRINT_9.md` 第 9.5 节）：
+**四条检索质量踩坑**（全部由真实问句暴露）：
 
-1. **"提到某词的文档"压过"定义该词的文档"**：问「最近一周卖了多少钱」（同义词 → `gmv` + `payment_amount`）时，排第一的是 `metrics.md` 里那句列举了所有可加指标的约定行——它同时命中两个查询词项，长度惩罚压不住它；而真正定义 GMV 的那一行只命中一个词项。修法：加"标题命中加成"（`TITLE_BONUS`），理由是**词袋模型没有字段概念，"提到"某词的行不该压过"定义"该词的行**。另把同名指标（`gmv` 在交易域与类目域各一行）**合并成一条**，既保证来源不重复，也避免"用户问 GMV 却拿到类目口径"。
+1. **“提到某词的文档”压过“定义该词的文档”**：问「最近一周卖了多少钱」时，排在前面的曾是 `metrics.md` 里那句列举所有可加指标的约定行——它同时命中两个查询词项，长度惩罚压不住它；而真正定义 GMV 的那一行只命中一个词项。修法有两步：加“标题命中加成”（`TITLE_BONUS`），理由是词袋模型没有字段概念，“提到”某词的行不该压过“定义”该词的行；另把同名指标（`gmv` 在交易域与类目域各一行）**合并成一条**，既保证来源不重复，也避免“用户问 GMV 却拿到类目口径”。复测边界见上：排序确实发生了变化（约定行不再排第 1），但约定行仍排在 `gmv` 定义行之前；因此只写“缓解”，不写“修复”。标题只切 ASCII，因此这项加成只对英文指标名、表名生效，中文标题并不受益，作用范围有限。
 2. **短词项是噪声**：`payment_amount` 自身含子串 `amount`，ASCII 切分会同时产出两者；而 `amount` 出现在每一行业务指标里，把无关文档也拉进了结果。修法：**给长词项当子串的短词项直接丢弃**。
-3. **孤立中文单字是噪声**：`算`、`的`、`是` 这类单字几乎出现在每一篇文档里，idf 很低却数量极多，把 `matched_terms` 填满噪声——表现为"看起来命中了很多，其实无关"。修法：分词丢弃**孤立中文单字**。
-4. **markdown 表头会被当成一条数据**：第一版解析器把 `| 指标 | 字段名 |` 这行也当成了一条口径条目。表头与数据行的**形态完全一样**，只有"它在分隔行 `| --- |` 的上一行"这个位置信息能识别它。修法：解析器在遇到分隔行时回退掉紧邻的上一行，并做成默认行为而不是让调用方各自判断（漏掉的后果是语料里多出一条叫"指标"的假条目）。
+3. **孤立中文单字是噪声**：`算`、`的`、`是` 这类单字几乎出现在每一篇文档里，idf 很低却数量极多，把 `matched_terms` 填满噪声——表现为“看起来命中了很多，其实无关”。修法：分词丢弃**孤立中文单字**；连续中文串保留整串并补 bigram，避免把“支付成功率”切成无意义的碎片。
+4. **markdown 表头会被当成一条数据**：第一版解析器把 `| 指标 | 字段名 |` 这行也当成了一条口径条目。表头与数据行的**形态完全一样**，只有“它在分隔行 `| --- |` 的上一行”这个位置信息能识别它。修法：解析器在遇到分隔行时回退掉紧邻的上一行，并做成默认行为而不是让调用方各自判断（漏掉的后果是语料里多出一条叫“指标”的假条目）。
 
-**一条自证诚实的取舍**：文档写清这是 **BM25 词法检索**（含 idf 与长度归一化），**不声称**语义检索。项目在风险表里把"声称 RAG 却只是关键词 `grep`"列为需要正面回答的质疑，并给出结论："诚实描述比夸大更安全"（`docs/sprint/SPRINT_9.md` 第 6 节风险表末行）。
+**失败语义与缓存。** 检索器不把“表结构取不到”伪装成“没有表”：`degraded` 由 `live_tables` 通道的状态决定，失败原因写入 `channels`。语料缓存的键包含三个语料文件的 `mtime_ns` 与 `size`、以及 `synonyms.json` 的 `mtime`，文件一改就重新装载；表结构单独走 600 秒 TTL，避免每次提问都打一次 `/meta/tables`。同义词文件缺 `phrase` 或 `terms` 时直接抛 `ValueError`，不静默跳过——配置错误应当在启动或首次检索时暴露，而不是让某些问句悄悄失去扩展。
 
-**一条架构边界的澄清**（很重要，容易被误解）：Agent 读自己仓库里的文档**不属于持有数据库凭据**。"Agent 不允许直接拥有数据库管理员权限"约束的是**数据库权限**；RAG 语料是**知识**，不是**凭据**。Agent 仍然没有任何数据库连接信息，取数仍只经 `POST /query`（`docs/sprint/SPRINT_9.md` 第 2.4 节）。
+**一条自证诚实的取舍**：文档写清这是 **BM25 词法检索**（含 idf 与长度归一化，`k1=1.2`、`b=0.75`），**不声称**语义检索。项目在风险表里把“声称 RAG 却只是关键词 `grep`”列为需要正面回答的质疑，并给出结论：“诚实描述比夸大更安全”。语料只有几十条量级，提问又高度依赖 `GMV`、`UV`、`复购率`、`ads_batch_trade_1m` 这类精确词项，这正是 BM25 擅长的场景；换成本地向量模型则受本机内存与“未批准技术栈”两条约束，代价与收益不成比例。
+
+**一条架构边界的澄清**（很重要，容易被误解）：Agent 读自己仓库里的文档**不属于持有数据库凭据**。“Agent 不允许直接拥有数据库管理员权限”约束的是**数据库权限**；RAG 语料是**知识**，不是**凭据**。Agent 仍然没有任何数据库连接信息，取数仍只经只读数据服务的 `POST /data/api/query`。
+
+**任务知识（Skill）的边界。** 检索解决的是“口径是什么”，并不解决“这类问题该套哪个分析模板”。交接清单曾规划一个“期间比较”技能：定义适用意图、输入条件、引用哪条业务口径、允许调用哪些工具、返回什么结构，并由 `graph.py` 的规划节点消费、在轨迹中可见。截至本文实验，代码库中还没有以 skill 命名的实现，`graph.py` 的 plan 节点也没有消费技能文件的入口；因此本文**不把它列为已实现能力**，只把它作为后续工作记录。用“目录里放了一份技能说明”代替“轨迹能指出是否选中该技能”，正是这项验收要防止的写法。
 
 ## 5.9 MCP：把只读能力声明出来
 
-**两条路径**（`docs/sprint/SPRINT_10.md` 第 2 节）：
+MCP 在本项目里不是“再写一个取数服务”，而是把同一份只读能力以可枚举的工具列表暴露出来。围绕它有三个容易混在一起的事实，必须分开写：**本次实际走哪条路径、MCP 是否已部署、做过哪一种对照**。否则论文很容易被读成“Agent 已经通过 MCP 取数”，或者反过来被读成“MCP 只是纸面设计”。
+
+**两条路径**：
 
 ```text
 路径 A（直连）  Agent ── HTTP ─────────────────────────► 只读数据服务 ──► Doris
@@ -964,26 +983,61 @@ execute → validate → reflect → …
                                                               └─ 无凭据
 ```
 
-**两条路径的终点、守卫、账号完全相同**（`POST /data/api/query` + `sqlguard` + `agent_ro`），差别只在"谁来发起那次 HTTP"。这一点是本阶段的设计核心：**MCP 不是一条新的取数通道，而是同一份只读能力的另一种暴露方式。如果它变成"另一条能取数的路"，那"不得绕过 sqlguard"这条铁律立刻就被绕过了——因为绕过的方式恰恰是"再实现一遍"。**
+**两条路径的终点、守卫、账号完全相同**（`POST /data/api/query` + `sqlguard` + `agent_ro` 只读账号），差别只在“谁来发起那次 HTTP”。这一点是设计核心：**MCP 不是一条新的取数通道，而是同一份只读能力的另一种暴露方式。如果它变成“另一条能取数的路”，那“不得绕过 sqlguard”这条铁律立刻就被绕过了——因为绕过的方式恰恰是“再实现一遍”。**
 
-**铁律在代码里的落点与证明方式**（同文件第 3 节）：
+**事实一：本次部署的实际路径是直连 HTTP。** 线上 `.env` 只有 `DATA_API_BASE=http://127.0.0.1:8000`，没有设置 `AGENT_DATA_PATH`；`services/agent/app/config.py:148` 的 `data_path` 默认值就是 `http`，代码也明确排除了“能连 MCP 就用 MCP”的自动选择。实测 `GET /mcp` 返回：
+
+```text
+path = http
+transport = streamable-http
+server_url = http://127.0.0.1:8200/mcp
+reachable = null
+detail = 当前取数路径是 http，未连接 MCP
+```
+
+因此第 5.7 节的问答链路与第 6 章的探针，取数调用实际全部走 HTTP：`ToolBox` → `urllib` → `POST /data/api/query`。`reachable=null` 表示这次没有发起 MCP 连接，不是“连接失败”，更不是“已连通”。
+
+**事实二：MCP 作为可选实现已经部署并可逐一验证。** 服务地址 `127.0.0.1:8200/mcp`，由 `data-platform-mcp` 单元以 `.venv-agent/bin/python -m app.main --transport streamable-http` 启动。以 `mcp 2.2.0` 客户端执行 `initialize` 与 `list_tools`，实测结果如下：
+
+```text
+服务标识        data-platform-readonly-mcp，version 1.0.0
+工具数          4
+工具名          metrics_lookup / tables_lookup / sql_query / reconciliation
+
+metrics_lookup("gmv")     ok=true  found=true
+                          source_document=sql/metadata/metrics.md  version=V1.2
+                          返回 2,031 字符
+tables_lookup("trade")    ok=true  found=true  返回 31,814 字符
+reconciliation()          ok=true  返回 1,033 字符
+sql_query(SUM(gmv) … ads_batch_trade_1m)
+                          ok=true  row_count=1  rows=[{"g":"17068016.12"}]
+sql_query(… ecommerce.ods_orders)
+                          ok=false code=TABLE_NOT_ALLOWED
+                          detail=未授权：ods_orders；允许的表见 sqlguard.ALLOWED_TABLES
+```
+
+最后一行是本节最关键的证据：**SQL 守卫在 MCP 这条路上同样生效**，不是只有 HTTP 入口才拦。MCP 服务自身不持有数据库凭据，它的唯一取数实现是 HTTP 调 `POST /data/api/query`；守卫、只读账号、可访问表清单三条约束对两条路径完全一致，差别只在“谁来发起这次 HTTP”。
+
+**事实三：已做过的对照是工具级结果对照，不是完整问答链路。** Sprint 10 用同一条 SQL 分别经 MCP 与直连 HTTP 执行，`rows` 规范化后逐字段 `IDENTICAL`，`executed_sql` 也相同；比对之前先检查两边都非空，避免“两边都空”的假通过。拒绝语义同样没有在 MCP 层被吞掉：`DELETE` 经 MCP 返回 `is_error=False` 加 `structured_content={"ok":false,"error":{"code":"NOT_SELECT"}}`，底层 HTTP 400 同码——传输层成功、应用层失败，错误码原样保留。**但本轮没有把线上 `AGENT_DATA_PATH` 切成 `mcp` 再跑一遍完整问答**；切换是显式开关（改 `.env` + `systemctl restart data-platform-agent`），会改变演示环境的取数路径，因此留到需要时再做。上面的 MCP 证据来自独立客户端直连 MCP 服务，证明的是**能力面与守卫**，不是“Agent 经 MCP 的完整问答链路”。
+
+**铁律在代码里的落点与证明方式**：
 
 | 铁律 | 落点 | 怎么证明 |
 | --- | --- | --- |
-| 不得给 MCP 直接数据库凭据 | `services/mcp/app/config.py` 只读非敏感环境变量；systemd 单元**没有** `EnvironmentFile=.env` | 验收第 3 步：扫单元文件 + 扫 `/proc/<pid>/environ` + 扫源码，都不许出现任何口令键名 |
-| 不得绕过 `sqlguard` | `services/mcp/app/client.py` 唯一的取数实现是 HTTP 调 `POST /data/api/query`；MCP 的依赖里**没有**任何数据库驱动 | 验收第 4 步：经 MCP 发 DELETE / 未授权表 / 多语句 / 注释注入，四类都必须被拒绝且原因正确 |
-| 权限最小化 | 暴露 4 个只读工具，与只读接口一一对应；没有写工具、没有任意 HTTP 出口、没有文件读写 | 验收第 2 步：工具数恰为 4，且与 Agent 的取数工具**逐名相等** |
-| 失败即失败 | `client.py` 把数据服务的错误信封原样抛出；`server.py` 里不存在任何兜底默认值分支 | 验收第 4 步的拒绝原因；单元测试 `test_mcp_failure_does_not_fall_back_to_direct_http` |
+| 不得给 MCP 直接数据库凭据 | `services/mcp/app/config.py` 只读非敏感环境变量；systemd 单元**没有** `EnvironmentFile=.env` | 扫单元文件、扫 `/proc/<pid>/environ`、扫源码，都不出现任何口令键名 |
+| 不得绕过 `sqlguard` | `services/mcp/app/client.py` 唯一的取数实现是 HTTP 调 `POST /data/api/query`；MCP 的依赖里**没有**任何数据库驱动 | 经 MCP 发 DELETE、未授权表、多语句、注释注入，四类都被拒绝且原因正确 |
+| 权限最小化 | 暴露 4 个只读工具，与只读接口一一对应；没有写工具、没有任意 HTTP 出口、没有文件读写 | 工具数恰为 4，且与 Agent 的取数工具**逐名相等** |
+| 失败即失败 | `client.py` 把数据服务的错误信封原样抛出；`server.py` 不存在兜底默认值分支 | 拒绝原因；单元测试 `test_mcp_failure_does_not_fall_back_to_direct_http` |
 
-**端到端一致性实证**：同一 SQL 经 MCP 路径与直接 HTTP 路径的结果**逐字段 IDENTICAL**，`executed_sql` 也相同；比对之前先加**非空守卫**（避免"两边都空"的假通过）。**拒绝经 MCP 透传后语义未丢**：DELETE 的真实返回是 `is_error=False` + `structured_content={"ok":false,"error":{"code":"NOT_SELECT"}}`，底层 HTTP 400 同码（`AGENTS.md` 第 15.12 节）。
+**为什么不做“能连 MCP 就用 MCP”的自动降级**：验收必须能回答“这一次到底走了哪条路”。自动降级会让 MCP 路径在任何一次连接抖动后**悄悄消失**，而所有断言仍然全绿——这是最难发现的一类失效。因此路径由 `AGENT_DATA_PATH` 显式决定（`http` 或 `mcp`），MCP 不可达时工具返回失败结果，**不**自动回退到直连。
 
-**为什么不做"能连 MCP 就用 MCP"的自动降级**：验收必须能回答"这一次到底走了哪条路"。自动降级会让 MCP 路径在任何一次连接抖动后**悄悄消失**，而所有断言仍然全绿——这是最难发现的一类失效。因此路径由 `AGENT_DATA_PATH` 显式决定（`http` 或 `mcp`），MCP 不可达时工具返回失败结果，**不**自动回退到直连（`docs/sprint/SPRINT_10.md` 第 5.2 节）。
+**三条值得单独记的设计取舍**：
 
-**三条值得单独记的设计取舍**（同文件第 9.2 节）：
+1. **分流点只有一个**：`ToolBox.call()` 是唯一的取数路径分流点（`if self.data_path == "mcp" and name in _MCP_TOOL_NAMES`）。放在这一处而不是散在五个方法内部有两个实际好处：“哪些工具走了 MCP”是一眼可读的事实；而 Sprint 7 已验收的直连实现一行都不用改，回归风险最小。
+2. **非取数工具不走 MCP**：`retrieve_docs` 查的是 Agent 自己的语料文件，`propose_sql` 是图内部的规划协议。把它们也塞进 MCP 会让“最小能力集合”这个说法失真——它们本来就不是取数能力。单元测试 `test_non_fetch_tools_never_go_through_mcp` 锁住这一点。
+3. **`tables_lookup` 的“查不到”报失败，而“没有可用表”报成功**：`tables_lookup(table=不存在)` 返回 `ok=False` 并列出可用表——因为对模型来说“表不存在”与“表存在但没有列”是完全不同的信息，后者会让它以为“这张表是空的”从而写出一条**语法正确但语义错误**的 SQL。
 
-1. **分流点只有一个**：`ToolBox.call()` 是唯一的取数路径分流点（`if self.data_path == "mcp" and name in _MCP_TOOL_NAMES`）。放在这一处而不是散在五个方法内部有两个实际好处："哪些工具走了 MCP"是一眼可读的事实；而 Sprint 7 已验收的直连实现一行都不用改，回归风险最小。
-2. **非取数工具不走 MCP**：`retrieve_docs` 查的是 Agent 自己的语料文件，`propose_sql` 是图内部的规划协议。把它们也塞进 MCP 会让"最小能力集合"这个说法失真——它们本来就不是取数能力。单元测试 `test_non_fetch_tools_never_go_through_mcp` 锁住这一点。
-3. **`tables_lookup` 的"查不到"报失败，而"没有可用表"报成功**：`tables_lookup(table=不存在)` 返回 `ok=False` 并列出可用表——因为对模型来说"表不存在"与"表存在但没有列"是完全不同的信息，后者会让它以为"这张表是空的"从而写出一条**语法正确但语义错误**的 SQL。
+**本节结论**：平台提供两条取数路径，本次部署实际使用直连只读服务；MCP 作为可替换实现已部署，并通过工具列表枚举、四类工具实测与 SQL 守卫验证。MCP 的价值在于**能力面可枚举、可安全审查**，而不是“多一跳”。本轮没有把它写成“Agent 已经通过 MCP 取数”，也没有把工具级结果一致扩大成完整问答链路的一致。
 
 ## 5.10 数据质量与监控
 
@@ -1227,7 +1281,7 @@ Metastore 起不来时报的是 `DatastoreDriverNotFoundException: com.mysql.cj.
 | 4 | Airflow 调度 + 流量域归档 | `verify-sprint-4.sh` | **通过 40 / 失败 0 / 跳过 0**；DAG 9 任务；归档 10,098,974 行 == Kafka latest offset 合计；703 个 dt 分区；内存闸门主动拒绝一次 | `AGENTS.md` 第 15.8 节 |
 | 5 | Iceberg + 流量域分层 | `verify-sprint-5.sh` | Iceberg 迁移**两次运行的校验各按自身范围计**：18 张表那次 **60/60**、扩到 23 张表复跑那次 **70/70**（详见 5.4.1 的范围说明）；流量域 DWD 21/21、DWS 20/20、ADS 36/36、对账 10/10；**12957 个窗口不一致 0**；`realtime_rate_anomaly_windows = 1` | `AGENTS.md` 第 15 节与第 15.12 节；`SPRINT_5.md` 第 8.1、9 节 |
 | 8 | LangGraph Data Agent | `verify-sprint-8.sh` | **通过 71 / 失败 0 / 跳过 0**；图单测 27 passed；langgraph 实际版本 1.1.0；回归 `verify-sprint-7.sh` 49/49 | `AGENTS.md` 第 15.12 节 |
-| 9 | RAG + Metadata（词法检索） | `verify-sprint-9.sh` | **通过 59 / 失败 0 / 跳过 0**；检索单测 26 passed；语料 65 篇；向量库相关包数量 0 | `AGENTS.md` 第 15.12 节 |
+| 9 | RAG + Metadata（词法检索） | `verify-sprint-9.sh` | **通过 59 / 失败 0 / 跳过 0**；检索单测 26 passed；语料 69 篇；向量库相关包数量 0 | `AGENTS.md` 第 15.12 节 |
 | 10 | MCP | `verify-sprint-10.sh` | **通过 84 / 失败 0 / 跳过 0**；4 个只读工具；MCP 与直接 HTTP 逐字段 IDENTICAL | `AGENTS.md` 第 15.12 节 |
 | 11 | Data Quality + Monitoring | `verify-sprint-11.sh` | **通过 61 / 失败 0 / 跳过 0**；质量校验 24 通过 / 0 失败 / 1 跳过；`--proof-fail` 两次退出码 1；Prometheus 4/4 up | `AGENTS.md` 第 15.11 节 |
 | 12 | 测试 + 性能优化 | `verify-sprint-12.sh` | **通过 32 / 失败 0 / 跳过 0**；全量 pytest 353/0/0/3 xfail | `AGENTS.md` 第 15.12 节 |
