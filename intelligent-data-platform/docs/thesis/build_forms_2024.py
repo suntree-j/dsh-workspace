@@ -455,6 +455,29 @@ fill_tc(row_tcs(trs[3])[1], as_section_lines(PROP_VALUE))
 fill_tc(row_tcs(trs[4])[1], as_section_lines(LIT_CELL))
 # r5: 研究方法与思路
 fill_tc(row_tcs(trs[5])[1], as_section_lines(PROP_METHOD))
+# 调整开题正文的层级、参考文献的悬挂缩进及跨页段落。
+for row_index in (3, 4, 5):
+    for paragraph_element in row_tcs(trs[row_index])[1].findall(qn("w:p")):
+        paragraph = Paragraph(paragraph_element, None)
+        line = paragraph.text
+        fmt = paragraph.paragraph_format
+        if re.match(r"^\[\d+\]", line):
+            old_indent = paragraph_element.find(qn("w:pPr")).find(qn("w:ind"))
+            if old_indent is not None:
+                old_indent.getparent().remove(old_indent)
+            fmt.left_indent = Pt(20)
+            fmt.first_line_indent = Pt(-20)
+            fmt.keep_together = True
+            fmt.space_after = Pt(1)
+        elif line == "附：参考文献" or (SECTION_RE.match(line) and len(line) <= 34):
+            fmt.keep_with_next = True
+            fmt.space_before = Pt(3)
+            fmt.space_after = Pt(1)
+            if line == "附：参考文献":
+                for run in paragraph.runs:
+                    run.bold = True
+        else:
+            fmt.widow_control = True
 # r6: 指导教师意见 → 清空【填写说明】，留白待手写
 fill_tc(row_tcs(trs[6])[1], [""])
 # r7: 签名 / 时间 保持模板空白
