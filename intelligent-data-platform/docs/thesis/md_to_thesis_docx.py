@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import re
 import sys
 import unicodedata
@@ -314,6 +315,9 @@ def strip_html_comments(md: str) -> tuple[str, int]:
     return md, count
 
 
+_IMAGE_RE = re.compile(r"^!\[(?P<alt>[^\]]*)\]\((?P<src>[^)\s]+)(?:\s+\"[^\"]*\")?\)\s*$")
+
+
 def parse_blocks(md: str) -> list[Block]:
     """把 Markdown 文本切成块序列。"""
     lines = md.split("\n")
@@ -323,6 +327,13 @@ def parse_blocks(md: str) -> list[Block]:
     while i < n:
         s = lines[i].strip()
         if not s:
+            i += 1
+            continue
+
+        img = _IMAGE_RE.match(s)                      # 图片（图题在下方）
+        if img:
+            blocks.append(Block(kind="image", text=img.group("alt").strip(),
+                                lines=[img.group("src")]))
             i += 1
             continue
 
@@ -882,6 +893,45 @@ TABLE_CAPTIONS: tuple[str, ...] = (
 "正文数据表题名，按出现顺序一一对应；表序自动编号。"
 
 
+def _figure_caption(doc, number: int, name: str) -> Paragraph:
+    """图题：五号宋体加粗居中，置于图**下方**（与表题在上相反，规范 2024 ㈦.6）。"""
+    paragraph = doc.add_paragraph()
+    pf = paragraph.paragraph_format
+    pf.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    pf.line_spacing = Pt(BODY_LINE_PT)
+    pf.space_before = Pt(3)
+    pf.space_after = Pt(9)
+    _set_indent(paragraph, left_cm=0.0, right_cm=0.0,
+                first_line_pt=0.0, first_line_chars=0)
+    run = paragraph.add_run(f"图{number}  {name}")
+    apply_run_format(run, size=TABLE_PT, cn=FONT_BODY_CN, en=FONT_BODY_EN,
+                     bold=True, color=RGBColor(0, 0, 0))
+    return paragraph
+
+
+def _figure_block(doc, block: Block) -> None:
+    """插入图片：宽度占满版心（16 cm），单倍行距，居中。
+
+    为什么固定宽度而不是按原始像素：截图是 1600×1000、示意图是 1280×720，
+    若按原尺寸会溢出页面；固定 16 cm 与版心等宽，跨图视觉一致，
+    也让"图是否被裁掉"这件事在导出后一眼可查。
+    """
+    src = block.lines[0]
+    path = src if os.path.isabs(src) else os.path.join(os.path.dirname(os.path.abspath(__file__)), src)
+    if not os.path.exists(path):
+        raise SystemExit(f"图片不存在：{path}")
+
+    paragraph = doc.add_paragraph()
+    pf = paragraph.paragraph_format
+    pf.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    pf.line_spacing = 1.0
+    pf.space_before = Pt(6)
+    pf.space_after = Pt(0)
+    _set_indent(paragraph, left_cm=0.0, right_cm=0.0,
+                first_line_pt=0.0, first_line_chars=0)
+    paragraph.add_run().add_picture(path, width=Cm(TEXT_WIDTH_CM))
+
+
 def _caption_paragraph(doc, number: int, name: str) -> Paragraph:
     """表题：五号宋体加粗居中，置于表上方（规范 2024 ㈦.6）。"""
     paragraph = doc.add_paragraph()
@@ -1129,6 +1179,7 @@ def _toc_page(doc, notes: list[Block]) -> None:
 def _body(doc, blocks: list[Block]) -> None:
     previous: str = ""
     table_no: int = 0
+    figure_no: int = 0
     for block in blocks:
         if block.kind == "rule":
             continue
@@ -1146,6 +1197,10 @@ def _body(doc, blocks: list[Block]) -> None:
             _quote_paragraph(doc, block.text, marker=block.marker)
         elif block.kind == "code":
             _code_block(doc, block.lines)
+        elif block.kind == "image":
+            figure_no += 1
+            _figure_block(doc, block)
+            _figure_caption(doc, figure_no, block.text)
         elif block.kind == "table":
             table_no += 1
             _empty_paragraph(doc)          # 表前空段

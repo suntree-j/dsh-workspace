@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; }
+  body {
+    width: 1280px; height: 600px; box-sizing: border-box;
+    padding: 24px 30px; background: #ffffff;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif; color: #1f2937;
+  }
+  .row { display: flex; align-items: center; gap: 12px; }
+  .card {
+    flex: 1; border: 1.4px solid #1f4e79; border-radius: 6px; background: #f4f8fc;
+    padding: 10px 12px; font-size: 12.5px; line-height: 1.55;
+  }
+  .card b { display: block; color: #14395c; font-size: 13px; margin-bottom: 3px; }
+  .card.mid { background: #eef6ee; border-color: #2f7a4f; }
+  .card.mid b { color: #1f5a37; }
+  .arrow { font-size: 19px; color: #1f4e79; }
+  .down { text-align: center; font-size: 18px; color: #1f4e79; margin: 8px 0 6px; }
+  .states { display: flex; gap: 10px; }
+  .st {
+    flex: 1; border-radius: 5px; padding: 8px 10px; font-size: 12px; line-height: 1.45;
+    border: 1.2px solid; background: #fff;
+  }
+  .ok { border-color: #2f7a4f; color: #1f5a37; }
+  .warn { border-color: #b06a00; color: #8a5300; }
+  .bad { border-color: #b3251f; color: #8a1c17; }
+  .unk { border-color: #6b7280; color: #4b5563; }
+  .st b { display: block; font-size: 12.5px; margin-bottom: 2px; }
+  .foot { margin-top: 12px; font-size: 11.5px; color: #6b7280; }
+  code { font-family: Consolas, monospace; }
+</style>
+</head>
+<body>
+  <div class="row">
+    <div class="card">
+      <b>实时侧 ecommerce.ads_realtime_trade_1m</b>
+      Flink 1 分钟窗口写入<br>40,360 个窗口
+    </div>
+    <div class="card mid" style="flex:0 0 300px">
+      <b>同区间重读（一条 UNION ALL）</b>
+      取对账批次 <code>scope_start / scope_end</code><br>
+      半开区间，缺表侧补 0；<code>observed_at</code> 记录观测时刻
+    </div>
+    <div class="card">
+      <b>离线侧 lakehouse_ads.ads_batch_trade_1m</b>
+      Spark 全量重算写入<br>40,360 个窗口
+    </div>
+  </div>
+
+  <div class="down">↓</div>
+
+  <div class="row">
+    <div class="card" style="flex:0 0 300px">
+      <b>逐窗口比较</b>
+      交易域 7 个可加指标 + 1 个去重指标（<code>order_user_cnt</code>）<br>
+      流量域 7 个判据列；比率列只做诊断
+    </div>
+    <div class="arrow">→</div>
+    <div class="card">
+      <b>四态判定（同一套语义，交易域与流量域共用）</b>
+      <div class="states" style="margin-top:6px">
+        <div class="st ok"><b>consistent</b>两侧逐窗口相等</div>
+        <div class="st warn"><b>realtime_behind</b>实时偏低：可能正在重放，需再采样</div>
+        <div class="st bad"><b>diverged</b>实时偏高：批层缺数据或写序异常</div>
+        <div class="st unk"><b>unknown</b>任一侧无可比值</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="down">↓</div>
+
+  <div class="row">
+    <div class="card">
+      <b>明细表</b><code>ads_reconcile_trade_1m</code> / <code>ads_reconcile_traffic_1m</code>：每窗口 <code>is_match</code> 与各列差异
+    </div>
+    <div class="card">
+      <b>汇总表</b><code>ads_reconcile_*_summary</code>：<code>batch_id</code>、区间、窗口数、不一致窗口数、<code>is_pass</code>
+    </div>
+    <div class="card">
+      <b>只读接口</b><code>/data/api/batch/reconcile</code>：<code>latest</code>（批次固定区间）、<code>live</code>（此刻重读）、<code>totals</code>（全表，标注口径）
+    </div>
+  </div>
+
+  <div class="foot">
+    三个口径必须分开读：<code>latest</code> 是历史批次的判定，<code>live</code> 是此刻的同区间重读，<code>totals</code> 是全表汇总；把它们并列会得到自相矛盾的结论。
+  </div>
+</body>
+</html>
