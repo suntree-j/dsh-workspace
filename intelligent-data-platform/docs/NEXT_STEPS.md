@@ -22,6 +22,16 @@
      这三页的 `panel__meta` 只写了"最近 N 个窗口累计 / 共 N 个窗口"，是**计数不是时刻**；
      要补的是 `series` 首末行的 `window_start`。
 
+   **流量页为什么炸（已用实验定位，别再照抄）**：在 `#tpl-traffic` 里调用 `fmtTime(...)`
+   ——哪怕参数写死成字面量——整页会空白（截图 47 KB，只剩页头与侧栏）。
+   做过的对照实验：把交易页同样的表达式搬到流量页 → 空白；换回原样 → 正常（107 KB）；
+   再把参数换成 "2017-12-03 23:59:00" 字面量 → 又是 47 KB 空白。
+   结论：**TrafficPanel 的 setup 返回值里没有 `fmtTime`**（对比：TradePanel 在 `app.js:1736`、
+   OrdersPanel 在 `:2280` 都导出了 `fmtTime: formatTime`）。
+   修法：在 `var TrafficPanel = { ... setup: function () { ... return { ... } } }` 的 return 里
+   补一行 `fmtTime: formatTime,`，然后再用 `series[0].window_start`；
+   改完必须截图确认，不能只看 diff。
+
    **注意：没有共享的页头组件**。`index.html` 里 10 个页面各是一个独立
    `<div class="page">`（256 / 413 / 522 / 602 / 693 / 848 / 951 / 1209 / 1424 / 1582 行），
    页头标题与副标题都是各写一遍的静态标记，所以不存在"改一处、十页生效"的位置。
