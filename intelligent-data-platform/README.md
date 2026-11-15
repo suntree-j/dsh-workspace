@@ -1153,7 +1153,10 @@ docs/thesis/求职材料/RESUME_PROJECT.md 简历项目条目（中英双语）
 docs/thesis/EVIDENCE_MATRIX.md        证据矩阵（主张 → 证据 → 结论分类）
 docs/thesis/DATA_AND_LIMITATIONS.md  数据来源与已知限制
 docs/thesis/外部审查包.md             外部审查包（主张 / 证据 / 边界对照）
+docs/thesis/论文写作_规范操作手册.md    ★ 写作流程 / 章节→证据映射 / 五道质量门
+docs/thesis/开题材料/                  ★ 开题重做所需（需求说明 / Codex 提示词 / 文件清单）
 docs/thesis/ui-audit-screenshots/    改造前后页面截图（作品集可用）
+docs/thesis/_归档/                    已废弃脚本（build_appendix_docs.py 等，仅作历史参考）
 docs/sprint/SPRINT_13.md             本 Sprint 的任务书与结算
 ```
 
