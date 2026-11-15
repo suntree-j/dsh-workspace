@@ -16,11 +16,13 @@
 
 from __future__ import annotations
 
+import re
+from decimal import Decimal
 from typing import Any
 
 from .doris import DorisClient
 
-__all__ = ["Repository", "BATCH_DATABASE"]
+__all__ = ["Repository", "BATCH_DATABASE", "classify_reconcile_state"]
 
 # 离线（批处理）指标所在库 —— 由 Sprint 3 的 load-batch-to-doris.sh 装载。
 #
@@ -30,6 +32,73 @@ __all__ = ["Repository", "BATCH_DATABASE"]
 #   变成需要靠记忆判断的事 —— 这正是数据口径事故的温床。
 #   分库之后：库名即链路来源。
 BATCH_DATABASE = "lakehouse_ads"
+
+
+#: 从汇总表取出的 scope 时间串必须是这个形状，才允许拼进 SQL。
+_DT_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+
+
+def _dec(value: Any) -> Decimal | None:
+    """把 DECIMAL 字符串转 Decimal；缺失或非数字返回 None（不猜 0）。"""
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except Exception:  # noqa: BLE001 - 非数字就如实当作没有
+        return None
+
+
+def _diff(batch_value: Any, realtime_value: Any) -> Any:
+    """离线减实时；任一侧缺失返回 None（不把"没有数据"当成 0）。"""
+    b, r = _dec(batch_value), _dec(realtime_value)
+    if b is None or r is None:
+        return None
+    return str(b - r)
+
+
+def classify_reconcile_state(
+    realtime: dict[str, Any], batch: dict[str, Any]
+) -> tuple[str, str]:
+    """判定"同一区间内两侧是否一致"，并区分"恢复中"与"真的不一致"。
+
+    为什么需要这个函数：
+        实时链路重启后会从 earliest 重放，期间的即时汇总必然偏低。
+        直接把"实时 < 离线"判成不一致，会把正常恢复误报成数据错误；
+        反过来把任何差异都当成"恢复中"，又会掩盖真实缺陷。所以分四态：
+            consistent      两侧窗口数与金额完全相同
+            realtime_behind 实时侧不低于"少"的那一侧（窗口更少、或金额更小）→ 可能是
+                            回放/恢复中，必须相隔一段时间再采一次确认是否收敛；
+                            同窗口数但金额偏小也可能是窗口未收满，单次采样无法区分
+            diverged        实时侧反而更高（窗口更多或金额更大）→ 批层缺数据或写序异常，
+                            属于真实问题，需查首个差异窗口
+            unknown         任一侧取不到值
+        注意：`realtime_behind` 是"待确认"，不是"通过"。
+    """
+    if not realtime or not batch:
+        return "unknown", "任一侧没有取到数据"
+    rw, bw = realtime.get("windows"), batch.get("windows")
+    if rw is None or bw is None:
+        return "unknown", "窗口数缺失"
+    rg, bg = _dec(realtime.get("gmv")), _dec(batch.get("gmv"))
+    rp, bp = _dec(realtime.get("paid")), _dec(batch.get("paid"))
+    if bg is None or rg is None:
+        return "unknown", "GMV 缺失"
+
+    same_windows = int(rw) == int(bw)
+    same_gmv = rg == bg
+    same_paid = (rp == bp) if (rp is not None and bp is not None) else None
+    if same_windows and same_gmv and (same_paid is not False):
+        return "consistent", "同一半开区间内，两侧窗口数与 GMV/支付金额完全相等"
+    if int(rw) < int(bw) or rg < bg:
+        return "realtime_behind", (
+            "实时侧落后：窗口 %s/%s、GMV %s/%s。可能是重放或恢复中，"
+            "需相隔一段时间再采一次确认是否收敛" % (rw, bw, rg, bg)
+        )
+    return "diverged", (
+        "实时侧高于离线侧：窗口 %s/%s、GMV %s/%s。恢复期只会偏低，"
+        "偏高说明批层缺数据或写序异常，需查首个差异窗口"
+        % (rw, bw, rg, bg)
+    )
 
 
 class Repository:
@@ -428,14 +497,18 @@ class Repository:
         return self.client.query(sql).rows, [f"{BATCH_DATABASE}.ads_batch_category_1m"], fields
 
     def reconciliation(self) -> tuple[dict[str, Any], list[str], list[str]]:
-        """批流对账结论（最近一批）+ 实时/离线关键指标并排对比。
+        """批流对账结论：**历史批次快照** 与 **同区间即时比较** 两套口径分开返回。
 
-        这是"数据可信"的对外证据：
-            latest   —— 最近一次对账的区间、窗口数、不一致数、GMV 对比
-            mismatch —— 若存在差异，给出差异最大的若干窗口（便于定位）
-        服务层只读，不参与对账本身（对账是 Spark 作业完成的）。
+        为什么必须分开（本接口最容易出错的地方）：
+            `latest` 是 Spark 作业在某一时刻对**固定区间**的判定；
+            `totals` 是两张表的**全表即刻汇总**。两者口径不同，混在一起就会出现
+            "批次判定 0 不一致、页面却显示差十几万"的误导。
+            `live` 才是能与历史结论并列看的：它按 latest 的同一半开区间重读两侧，
+            并给出三态判定（consistent / realtime_behind / diverged）。
+        恢复期如实呈现：实时侧落后时判为 `realtime_behind`，既不当"不一致"，
+        也不当"通过"。判定规则见 `classify_reconcile_state`。
         """
-        latest = self.client.query(
+        latest = (self.client.query(
             f"""
             SELECT batch_id, compared_at, scope_start, scope_end,
                    realtime_windows, batch_windows, matched_windows, mismatched_windows,
@@ -445,8 +518,10 @@ class Repository:
             LIMIT 1
             """,
             max_limit=1,
-        ).first
+        ).first) or {}
 
+        # 明细表按 window_start 做主键，正常只有最近一次对账的写入；
+        # 这里再按 compared_at 收敛一次，避免日后改成多批次并存时串批。
         mismatches = self.client.query(
             f"""
             SELECT window_start, diff_gmv, diff_order_cnt, diff_order_user_cnt,
@@ -454,31 +529,100 @@ class Repository:
                    diff_refund_cnt, diff_refund_amount
             FROM {BATCH_DATABASE}.ads_reconcile_trade_1m
             WHERE is_match = false
+              AND compared_at = (
+                  SELECT MAX(compared_at) FROM {BATCH_DATABASE}.ads_reconcile_trade_1m
+              )
             ORDER BY window_start
             LIMIT 20
             """
         ).rows
 
-        realtime = self.client.query(
+        # 全表即时汇总：保留旧字段供"整体把握"，但显式标注口径，不与 latest 并列解读
+        realtime_all = self.client.query(
             "SELECT SUM(gmv) AS gmv, SUM(order_cnt) AS order_cnt, "
             "SUM(payment_amount) AS payment_amount, SUM(refund_amount) AS refund_amount "
             "FROM ads_realtime_trade_1m",
             max_limit=1,
         ).first
-        batch = self.client.query(
+        batch_all = self.client.query(
             f"SELECT SUM(gmv) AS gmv, SUM(order_cnt) AS order_cnt, "
             f"SUM(payment_amount) AS payment_amount, SUM(refund_amount) AS refund_amount "
             f"FROM {BATCH_DATABASE}.ads_batch_trade_1m",
             max_limit=1,
         ).first
 
+        # 同区间即时比较：一条 UNION ALL 读两侧，避免"两次读取不属于同一时刻"
+        scope_start = str(latest.get("scope_start") or "")
+        scope_end = str(latest.get("scope_end") or "")
+        live: dict[str, Any] = {
+            "scope": {
+                "start": scope_start or None,
+                "end": scope_end or None,
+                "batch_id": latest.get("batch_id"),
+            },
+            "observed_at": None,
+            "realtime": {},
+            "batch": {},
+            "diff": {},
+            "state": "unknown",
+            "state_detail": "尚无可比的已保存批次区间",
+        }
+        if _DT_RE.match(scope_start) and _DT_RE.match(scope_end):
+            rows = self.client.query(
+                f"""
+                SELECT 'realtime' AS side, COUNT(*) AS windows,
+                       COALESCE(SUM(gmv), 0) AS gmv,
+                       COALESCE(SUM(payment_amount), 0) AS paid,
+                       COALESCE(SUM(order_cnt), 0) AS orders,
+                       MAX(window_start) AS last_window
+                FROM ads_realtime_trade_1m
+                WHERE window_start >= '{scope_start}' AND window_start < '{scope_end}'
+                UNION ALL
+                SELECT 'batch', COUNT(*), COALESCE(SUM(gmv), 0),
+                       COALESCE(SUM(payment_amount), 0), COALESCE(SUM(order_cnt), 0),
+                       MAX(window_start)
+                FROM {BATCH_DATABASE}.ads_batch_trade_1m
+                WHERE window_start >= '{scope_start}' AND window_start < '{scope_end}'
+                """
+            ).rows
+            keys = ("windows", "gmv", "paid", "orders", "last_window")
+            rt = next((r for r in rows if str(r.get("side")) == "realtime"), {}) or {}
+            bt = next((r for r in rows if str(r.get("side")) == "batch"), {}) or {}
+            state, detail = classify_reconcile_state(rt, bt)
+            # 注意：sqlguard 要求语句里有可识别的表名，`SELECT NOW()` 会被判 NO_TABLE；
+            # 这里借汇总表做 FROM，只取一行时间。
+            observed = (
+                self.client.query(
+                    f"SELECT NOW() AS observed_at FROM {BATCH_DATABASE}.ads_reconcile_summary LIMIT 1",
+                    max_limit=1,
+                ).first
+                or {}
+            )
+            live.update(
+                {
+                    "observed_at": observed.get("observed_at"),
+                    "realtime": {k: rt.get(k) for k in keys},
+                    "batch": {k: bt.get(k) for k in keys},
+                    "diff": {
+                        "windows": _diff(bt.get("windows"), rt.get("windows")),
+                        "gmv": _diff(bt.get("gmv"), rt.get("gmv")),
+                        "paid": _diff(bt.get("paid"), rt.get("paid")),
+                        "orders": _diff(bt.get("orders"), rt.get("orders")),
+                    },
+                    "state": state,
+                    "state_detail": detail,
+                }
+            )
+
         data = {
-            "latest": latest or {},
+            "latest": latest,
+            "live": live,
             "mismatches": mismatches,
             "mismatch_count_shown": len(mismatches),
             "totals": {
-                "realtime": realtime or {},
-                "batch": batch or {},
+                "scope": "full_table",
+                "realtime": realtime_all or {},
+                "batch": batch_all or {},
             },
         }
         tables = [

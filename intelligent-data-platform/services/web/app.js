@@ -2441,9 +2441,45 @@
       });
 
       // 实时 vs 离线的并排对比：差异列直接展示，一眼看到"是不是同一个数"
+      //
+      // 口径优先级（2026-11-16 起）：
+      //   ① `rep.live` —— 服务端按 latest 批次的**同一半开区间**重读两侧，
+      //      加与不加这一步，差别是"全表汇总"和"同区间比较"两种口径；
+      //   ② 回退 `rep.totals` —— 旧字段（全表即刻汇总），仅在 live 缺失时用，
+      //      否则会出现"批次判 PASS、表格差十几万"的自相矛盾。
       var compareRows = computed(function () {
         var rep = reconcile.value;
-        if (!rep || !rep.totals) return [];
+        if (!rep) return [];
+        var live = rep.live;
+        if (live && live.realtime && live.batch) {
+          var lrt = live.realtime || {};
+          var lbt = live.batch || {};
+          var ld = live.diff || {};
+          if (isMissing(lrt.gmv) && isMissing(lbt.gmv)) return [];
+          return [
+            {
+              label: 'GMV（元）',
+              realtime: formatMoney(lrt.gmv), batch: formatMoney(lbt.gmv),
+              diff: formatDelta(ld.gmv)
+            },
+            {
+              label: '订单量（笔）',
+              realtime: formatInt(lrt.orders), batch: formatInt(lbt.orders),
+              diff: formatDelta(ld.orders)
+            },
+            {
+              label: '支付金额（元）',
+              realtime: formatMoney(lrt.paid), batch: formatMoney(lbt.paid),
+              diff: formatDelta(ld.paid)
+            },
+            {
+              label: '比对窗口（个）',
+              realtime: formatInt(lrt.windows), batch: formatInt(lbt.windows),
+              diff: formatDelta(ld.windows)
+            }
+          ];
+        }
+        if (!rep.totals) return [];
         var rt = rep.totals.realtime || {};
         var bt = rep.totals.batch || {};
         var deltas = rep.deltas || {};
@@ -2470,6 +2506,38 @@
             diff: formatDelta(deltas.refund_amount)
           }
         ];
+      });
+
+      // "同区间即时比较"的四态：服务端算的 live.state，前端只负责翻译成人话。
+      // 为什么要显示 observed_at：三态判定的结论**有时效**，不写观测时间，
+      // 恢复期的"落后"和收敛后的"一致"就会被读成同一个结论。
+      var live = computed(function () {
+        return (reconcile.value && reconcile.value.live) || null;
+      });
+      var liveState = computed(function () {
+        var v = live.value;
+        return (v && v.state) || 'unknown';
+      });
+      var liveTone = computed(function () {
+        var s = liveState.value;
+        if (s === 'consistent') return 'ok';
+        if (s === 'realtime_behind') return 'warn';
+        if (s === 'diverged') return 'bad';
+        return 'unknown';
+      });
+      var liveStateText = computed(function () {
+        var s = liveState.value;
+        if (s === 'consistent') return '同区间一致';
+        if (s === 'realtime_behind') return '实时侧落后 · 待再采样确认';
+        if (s === 'diverged') return '同区间不一致';
+        return '不可比';
+      });
+      var liveScope = computed(function () {
+        var v = live.value;
+        if (!v || !v.scope) return '';
+        var a = v.scope.start, b = v.scope.end;
+        if (!a || !b) return '';
+        return shortDate(a) + ' ~ ' + shortDate(b);
       });
 
       var compareAllZero = computed(function () {
@@ -2533,6 +2601,11 @@
         kpiCards: kpiCards,
         reconcile: reconcile,
         isPass: isPass,
+        live: live,
+        liveState: liveState,
+        liveTone: liveTone,
+        liveStateText: liveStateText,
+        liveScope: liveScope,
         compareRows: compareRows,
         compareAllZero: compareAllZero,
         mismatches: mismatches,

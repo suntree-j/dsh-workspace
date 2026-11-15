@@ -547,7 +547,11 @@ def batch_reconcile() -> dict[str, Any]:
         time_range={"start": latest.get("scope_start"), "end": latest.get("scope_end")},
         note=(
             "对账由 Spark 作业完成（infrastructure/spark/jobs/reconcile_batch_realtime.py），"
-            "服务层只读结论。不一致窗口数 = 0 表示两条链路在这些窗口上完全一致。"
+            "服务层只读结论。三个口径必须分开读：`latest` 是最近一个批次的固定区间判定；"
+            "`live` 是按同一半开区间在此刻重读两侧的即时比较（state = consistent / "
+            "realtime_behind / diverged / unknown，其中 realtime_behind 表示实时链路可能正在"
+            "重放，需间隔再采样确认，不是通过）；`totals` 是两张表的全表汇总，口径与 latest 不同，"
+            "不要并列解读。"
         ),
     )
 
