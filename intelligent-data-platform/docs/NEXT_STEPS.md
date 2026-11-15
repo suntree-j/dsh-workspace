@@ -15,6 +15,12 @@
    `services/web/index.html:303` 的 `<p class="panel__meta" v-if="overview">数据窗口 {{ fmtTime(overview.earliest_window) }} ~ {{ fmtTime(overview.latest_window) }}</p>`
    其余页面照这个形态补一行即可，字段用自己的 `earliest/ latest` 或 `latest_window`，
    不要用取数时刻（取数时刻是顶栏的「观测时间」，`index.html:1742-1748`）。
+
+   **注意：没有共享的页头组件**。`index.html` 里 10 个页面各是一个独立
+   `<div class="page">`（256 / 413 / 522 / 602 / 693 / 848 / 951 / 1209 / 1424 / 1582 行），
+   页头标题与副标题都是各写一遍的静态标记，所以不存在"改一处、十页生效"的位置；
+   要逐页改 6 处，且每页可用的窗口字段不同（实时页是"最新窗口"、序列页是 `series` 的
+   首末窗口、对账页是 `scope`）。这也是这项一直没做的原因——不是难，是要逐页读上下文。
 2. **环比徽标统一走 `buildDelta()`** —— ✅ 已核实不必再改。
    `app.js` 里 6 处 `delta:` 调用（1406 / 1450 / 1455 / 1460 / 1669 / 1674）全部经由
    `buildDelta()`，历史判定在函数内部（`app.js:478`，阈值 `HISTORICAL_LIMIT_MIN`），
