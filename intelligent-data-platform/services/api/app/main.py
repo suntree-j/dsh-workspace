@@ -286,6 +286,7 @@ def metrics_category(
         rows,
         tables=tables,
         metric_definitions=doc.definitions_for(fields),
+        time_range=repo.category_window(window_limit or None),
         note=("全量口径" if not window_limit else f"最近 {window_limit} 分钟窗口口径"),
     )
 

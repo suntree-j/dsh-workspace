@@ -526,7 +526,7 @@
             <h2 class="panel__title">流量规模</h2>
             <p class="panel__desc">PV 口径为窗口内全部行为事件数（含 VIEW / CLICK / CART / FAVORITE / BUY），非狭义页面浏览。</p>
           </div>
-          <p class="panel__meta" v-if="series.length">最近 {{ series.length }} 个窗口</p>
+          <p class="panel__meta" v-if="series.length">数据窗口 {{ fmtTime(series[0].window_start) }} ~ {{ fmtTime(series[series.length - 1].window_start) }} · 最近 {{ series.length }} 个窗口</p>
         </div>
         <skeleton v-if="loading && !series.length" variant="kpi" :rows="4"></skeleton>
         <div class="kpi-grid kpi-grid--4" v-else>
@@ -605,6 +605,7 @@
           <div>
             <h2 class="panel__title">类目 GMV 排行</h2>
             <p class="panel__desc">按 GMV 降序；切换时间范围或排行条数会重新聚合。</p>
+            <p class="panel__meta" v-if="categoryTime">数据窗口 {{ fmtTime(categoryTime.start) }} ~ {{ fmtTime(categoryTime.end) }}</p>
           </div>
           <div class="toolbar">
             <div class="seg" role="group" aria-label="时间范围">

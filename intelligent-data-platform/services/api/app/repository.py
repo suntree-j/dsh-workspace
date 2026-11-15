@@ -286,6 +286,32 @@ class Repository:
         fields = ["order_cnt", "gmv", "total_quantity", "avg_order_amount"]
         return self.client.query(sql).rows, ["ecommerce.ads_realtime_category_1m"], fields
 
+    def category_window(self, window_limit: int | None = None) -> dict[str, Any]:
+        """类目排行的数据窗口，与 category_top 使用同一套窗口过滤条件。
+
+        为什么单独查 MIN/MAX 而不从排行结果推：
+            排行结果是按类目聚合后的行，时间字段已被 GROUP BY 丢掉；
+            数据窗口描述的是"这批聚合覆盖了哪些 1 分钟窗口"，
+            必须回到明细窗口表上取边界。
+        """
+        if window_limit:
+            sql = f"""
+                SELECT MIN(window_start) AS min_window,
+                       MAX(window_start) AS max_window
+                FROM ads_realtime_category_1m
+                WHERE window_start >= DATE_SUB(
+                    (SELECT MAX(window_start) FROM ads_realtime_category_1m),
+                    INTERVAL {int(window_limit)} MINUTE)
+            """
+        else:
+            sql = """
+                SELECT MIN(window_start) AS min_window,
+                       MAX(window_start) AS max_window
+                FROM ads_realtime_category_1m
+            """
+        row = self.client.query(sql).first
+        return {"start": row.get("min_window"), "end": row.get("max_window")}
+
     # ========================================================
     # 时间序列
     # ========================================================

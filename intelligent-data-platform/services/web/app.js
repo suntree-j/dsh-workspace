@@ -615,6 +615,20 @@ var HISTORICAL_LIMIT_MIN = 48 * 60;
   }
 
   /**
+   * 与 apiGet 相同的请求与错误处理，但返回**完整信封**。
+   *
+   * 为什么需要它：source.time_range 是接口自报的数据覆盖区间，只有拿到
+   * source 才能显示「数据窗口」。默认 apiGet 只返回 data，业务层看不到它；
+   * 为了不改动既有调用方的返回形态（例如 OrdersPanel 把类目接口当数组用），
+   * 这里单独留一个读信封的入口。
+   */
+  function apiGetEnvelope(path, params, base) {
+    var target = base || API_BASE;
+    var init = { method: 'GET', headers: { Accept: 'application/json' }, cache: 'no-store' };
+    return runRequest(buildUrl(target, path, params), init, target, true);
+  }
+
+  /**
    * 统一 POST（Sprint 7 起需要）。
    *
    * 为什么看板会出现 POST：
@@ -638,7 +652,7 @@ var HISTORICAL_LIMIT_MIN = 48 * 60;
     return runRequest(buildUrl(target, path, null), init, target);
   }
 
-  function runRequest(url, init, target) {
+  function runRequest(url, init, target, returnEnvelope) {
     return fetch(url, init).then(function (resp) {
       return resp.text().then(function (text) {
         var body = null;
@@ -664,7 +678,7 @@ var HISTORICAL_LIMIT_MIN = 48 * 60;
           sourceLabel.value = src.label;
           sourceDetail.value = src.detail;
         }
-        return body.data;
+        return returnEnvelope ? body : body.data;
       });
     }, function (cause) {
       // 网络层失败（后端未启动 / Nginx 未转发）与业务错误分开提示，便于定位
@@ -683,6 +697,9 @@ var HISTORICAL_LIMIT_MIN = 48 * 60;
     traffic: function (limit) { return apiGet('/metrics/traffic', { limit: limit }); },
     category: function (limit, windowLimit) {
       return apiGet('/metrics/category', { limit: limit, window_limit: windowLimit });
+    },
+    categoryEnvelope: function (limit, windowLimit) {
+      return apiGetEnvelope('/metrics/category', { limit: limit, window_limit: windowLimit });
     },
     funnel: function (windowLimit) { return apiGet('/funnel', { window_limit: windowLimit }); },
     orders: function (params) { return apiGet('/orders', params); },
@@ -1952,7 +1969,8 @@ var HISTORICAL_LIMIT_MIN = 48 * 60;
         funnelBreak: funnelBreak,
         chartEl: chartEl,
         funnelEl: funnelEl,
-        fmtInt: formatInt
+        fmtInt: formatInt,
+        fmtTime: formatTime
       };
     }
   };
@@ -1969,17 +1987,25 @@ var HISTORICAL_LIMIT_MIN = 48 * 60;
       var rows = ref([]);
       var windowLimit = ref(60);
       var topN = ref(10);
+      var categoryTime = ref(null);
       var barEl = ref(null);
       var pieEl = ref(null);
 
       function load() {
         var limit = clamp(topN.value, 3, 50);
         return panel.run(function () {
-          return api.category(limit, windowLimit.value).then(function (list) {
-            rows.value = list || [];
+          // 用信封版接口：排行数据仍从 data 取，数据窗口从 source.time_range 取。
+          // 不能把 api.category 改成返回对象 —— OrdersPanel 也用它取类目下拉项。
+          return api.categoryEnvelope(limit, windowLimit.value).then(function (body) {
+            rows.value = (body && body.data) || [];
+            var range = body && body.source && body.source.time_range;
+            categoryTime.value = range && range.start ? range : null;
             return rows.value;
           });
-        }, function () { return []; });
+        }, function () {
+          categoryTime.value = null;
+          return [];
+        });
       }
       panel.setReload(load);
       onMounted(load);
@@ -2090,6 +2116,7 @@ var HISTORICAL_LIMIT_MIN = 48 * 60;
         list: list,
         windowLimit: windowLimit,
         topN: topN,
+        categoryTime: categoryTime,
         ALL_WINDOWS: ALL_WINDOWS,
         setWindow: setWindow,
         totalGmv: totalGmv,
@@ -2097,7 +2124,8 @@ var HISTORICAL_LIMIT_MIN = 48 * 60;
         barEl: barEl,
         pieEl: pieEl,
         fmtMoney: formatMoney,
-        fmtInt: formatInt
+        fmtInt: formatInt,
+        fmtTime: formatTime
       };
     }
   };
