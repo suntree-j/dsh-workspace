@@ -11,11 +11,15 @@
 
 要统一的三件事：
 
-1. 每个页面顶部要能看出"这份数据的时间范围是什么"——用页面已有的 `数据窗口` 字段，
-   不要用取数时刻（取数时刻是顶栏的「观测时间」）。
-2. 历史数据集上不显示"比上一窗口涨跌"——`buildDelta()` 已按 `HISTORICAL_LIMIT_MIN` 处理，
-   但只接在总览页；其余页面若有环比徽标，要确认都走这个函数。
-3. 口径说明入口：`#/metrics` 是指标口径字典页，各页的「?」提示应指向它而不是各写一段。
+1. **每页显示数据时间范围**（6 页还缺）。已做的只有总览页：
+   `services/web/index.html:303` 的 `<p class="panel__meta" v-if="overview">数据窗口 {{ fmtTime(overview.earliest_window) }} ~ {{ fmtTime(overview.latest_window) }}</p>`
+   其余页面照这个形态补一行即可，字段用自己的 `earliest/ latest` 或 `latest_window`，
+   不要用取数时刻（取数时刻是顶栏的「观测时间」，`index.html:1742-1748`）。
+2. **环比徽标统一走 `buildDelta()`** —— ✅ 已核实不必再改。
+   `app.js` 里 6 处 `delta:` 调用（1406 / 1450 / 1455 / 1460 / 1669 / 1674）全部经由
+   `buildDelta()`，历史判定在函数内部（`app.js:478`，阈值 `HISTORICAL_LIMIT_MIN`），
+   没有任何页面绕过它自算环比。
+3. **口径说明入口**：`#/metrics` 是指标口径字典页，各页的「?」提示应指向它而不是各写一段。
 
 入口：`services/web/index.html`（x-template）、`services/web/app.js`（页面组件与 `buildDelta`）。
 
