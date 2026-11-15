@@ -471,7 +471,9 @@
   // 为什么必须有这条：交易域是 2009–2011、流量域是 2017-12 的公开历史数据，
   // "最后两个窗口"之间的差额不是"最近的变化"，而是某个历史日最后两分钟之间的差额。
   // 把它渲染成「▼ -26.5%」会被读成"业务在跌"，属于口径错位 —— 宁可不展示。
-  var DELTA_HISTORICAL_LIMIT_MIN = 48 * 60;
+  // 历史数据集的判定阈值（分钟）：距当前超过 48 小时即视为历史数据集。
+// 环比徽标与"滞后"提示共用这一个常量——两处各写一遍时曾经漂移过一次。
+var HISTORICAL_LIMIT_MIN = 48 * 60;
 
   function buildDelta(rows, field, mode, unit) {
     var list = rows || [];
@@ -479,7 +481,7 @@
     var lastTs = list[list.length - 1] && list[list.length - 1].window_start;
     if (!isMissing(lastTs)) {
       var lastMs = new Date(String(lastTs).replace(' ', 'T')).getTime();
-      if (!isNaN(lastMs) && (Date.now() - lastMs) > DELTA_HISTORICAL_LIMIT_MIN * 60000) {
+      if (!isNaN(lastMs) && (Date.now() - lastMs) > HISTORICAL_LIMIT_MIN * 60000) {
         return {
           text: '历史数据集 · 不展示环比',
           glyph: '·',
@@ -3150,7 +3152,7 @@
       // 数据换成公开历史数据集（交易域 2009–2011、流量域 2017-12）之后，
       // "现在 − 最新窗口"会算出几百万分钟这种无意义的数 —— 那是**数据集是历史区间**
       // 的事实，不是链路故障。超过 48 小时就不再显示分钟数，直接说明不适用。
-      var LAG_LIVE_LIMIT_MIN = 48 * 60;
+      // 与 buildDelta() 的历史判定共用同一个阈值，见文件开头的 HISTORICAL_LIMIT_MIN。
       var freshness = computed(function () {
         var rows = trade.value;
         if (!rows.length) return null;
@@ -3160,7 +3162,7 @@
         var d = new Date(String(ts).replace(' ', 'T'));
         if (isNaN(d.getTime())) return null;
         var lagMin = Math.floor((Date.now() - d.getTime()) / 60000);
-        var historical = lagMin > LAG_LIVE_LIMIT_MIN;
+        var historical = lagMin > HISTORICAL_LIMIT_MIN;
         return {
           windowStart: ts,
           lagMin: lagMin,
