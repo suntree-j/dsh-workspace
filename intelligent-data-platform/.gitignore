@@ -126,3 +126,6 @@ data-generator/output/
 *.csv
 *.parquet
 !tests/**/*.csv
+
+# 含服务器登录信息，不入公开仓库
+docs/thesis/开题重做_一次性完整提示词.md
