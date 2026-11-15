@@ -65,6 +65,13 @@ BUSINESS_TABLES = {
     # 批流对账结果（Sprint 3）：服务层只读，用于展示"两链路是否一致"
     "ads_reconcile_trade_1m",
     "ads_reconcile_summary",
+    # 流量域对账（D4 补）：两个域对账口径不同，交易域比 GMV/支付金额，
+    # 流量域比窗口数与 PV，因此流量域需要自己的汇总表与分钟表。
+    # 注意这两张是**新增的只读白名单项**，不改变任何既有权限边界：
+    # 它们同样是 ADS 层结果表，不含明细与个人信息。
+    "ads_reconcile_traffic_1m",
+    "ads_reconcile_traffic_summary",
+    "ads_traffic_1m",
 }
 
 # 元数据查询（只在 /meta/tables 接口里由本服务自己拼接，不接受用户输入）

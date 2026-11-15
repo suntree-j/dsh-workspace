@@ -2228,6 +2228,9 @@ h5.md-h, h6.md-h { font-size: var(--fs-13); }
   display: flex;
   flex-wrap: wrap;
   align-items: center;
+  /* 两个域各占一行：交易域与流量域并列时不能挤在同一行，
+     否则「同区间一致」会出现两次、读者无法判断哪一条属于哪个域。 */
+  flex: 1 0 100%;
   gap: 6px 18px;
   margin-top: 14px;
   padding-top: 12px;
@@ -2264,3 +2267,25 @@ h5.md-h, h6.md-h { font-size: var(--fs-13); }
   border-color: rgba(148, 163, 184, 0.35);
 }
 .rc-live__at { margin-left: auto; opacity: 0.75; }
+
+/* 流量域同区间横条：左侧加域标签，与交易域区分而不重复状态芯片语义 */
+.rc-live__scope {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--ink-2, #8fa3bb);
+  padding-right: 4px;
+  border-right: 1px solid rgba(148, 173, 203, 0.35);
+}
+
+/* 每个业务域一条同区间横条，强制纵向排列 */
+.rc-live-stack {
+  display: block;
+  width: 100%;
+  grid-column: 1 / -1;
+  flex: 1 0 100%;
+}
+.rc-live-stack .rc-live {
+  flex: initial;
+  width: 100%;
+}

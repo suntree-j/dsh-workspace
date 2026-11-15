@@ -2525,7 +2525,35 @@
         if (s === 'diverged') return 'bad';
         return 'unknown';
       });
-      var liveStateText = computed(function () {
+      // 流量域：与交易域同一套四态，只是比的是窗口数与 PV。
+    var trafficLive = computed(function () {
+      return (reconcile.value && reconcile.value.traffic && reconcile.value.traffic.live) || null;
+    });
+    var trafficLiveState = computed(function () {
+      var v = trafficLive.value;
+      return (v && v.state) || 'unknown';
+    });
+    var trafficLiveTone = computed(function () {
+      var s = trafficLiveState.value;
+      if (s === 'consistent') return 'ok';
+      if (s === 'realtime_behind') return 'warn';
+      if (s === 'diverged') return 'bad';
+      return 'unknown';
+    });
+    var trafficLiveStateText = computed(function () {
+      var s = trafficLiveState.value;
+      if (s === 'consistent') return '同区间一致';
+      if (s === 'realtime_behind') return '实时侧落后·待再采样确认';
+      if (s === 'diverged') return '同区间不一致';
+      return '不可比';
+    });
+    var trafficLiveScope = computed(function () {
+      var v = trafficLive.value;
+      if (!v || !v.scope || !v.scope.start || !v.scope.end) return '';
+      return shortDate(v.scope.start) + ' ~ ' + shortDate(v.scope.end);
+    });
+
+    var liveStateText = computed(function () {
         var s = liveState.value;
         if (s === 'consistent') return '同区间一致';
         if (s === 'realtime_behind') return '实时侧落后 · 待再采样确认';
@@ -2604,6 +2632,10 @@
         live: live,
         liveState: liveState,
         liveTone: liveTone,
+        trafficLive: trafficLive,
+        trafficLiveStateText: trafficLiveStateText,
+        trafficLiveTone: trafficLiveTone,
+        trafficLiveScope: trafficLiveScope,
         liveStateText: liveStateText,
         liveScope: liveScope,
         compareRows: compareRows,

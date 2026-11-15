@@ -101,6 +101,40 @@ def classify_reconcile_state(
     )
 
 
+def classify_traffic_state(
+    realtime: dict[str, Any], batch: dict[str, Any]
+) -> tuple[str, str]:
+    """流量域的同一区间判定（与交易域同一套四态语义）。
+
+    与交易域的差别只在可比字段：流量侧没有金额，用 PV 与去重 UV 代替。
+    注意 `uv` 是「每个窗口内的去重用户数」，跨窗口相加不是真 UV；
+    这里只在**同一区间、同一口径**下比较两侧，两个值是可比的自洽量，
+    不能把它当成全周期 UV 使用（全周期 UV 见 `/traffic` 的窗口峰值口径）。
+    """
+    if not realtime or not batch:
+        return "unknown", "任一侧没有取到数据"
+    rw, bw = realtime.get("windows"), batch.get("windows")
+    if rw is None or bw is None:
+        return "unknown", "窗口数缺失"
+    rp, bp = _dec(realtime.get("pv")), _dec(batch.get("pv"))
+    if rp is None or bp is None:
+        return "unknown", "PV 缺失"
+
+    same_windows = int(rw) == int(bw)
+    same_pv = rp == bp
+    if same_windows and same_pv:
+        return "consistent", "同一半开区间内，两侧窗口数与 PV 完全相等"
+    if int(rw) < int(bw) or rp < bp:
+        return "realtime_behind", (
+            "实时侧落后：窗口 %s/%s、PV %s/%s。可能是重放或恢复中，"
+            "需相隔一段时间再采一次确认是否收敛" % (rw, bw, rp, bp)
+        )
+    return "diverged", (
+        "实时侧高于离线侧：窗口 %s/%s、PV %s/%s。恢复期只会偏低，"
+        "偏高说明批层缺数据或写序异常，需查首个差异窗口" % (rw, bw, rp, bp)
+    )
+
+
 class Repository:
     """指标与明细的只读查询集合。"""
 
@@ -614,9 +648,87 @@ class Repository:
                 }
             )
 
+        # ---------------- 流量域 ----------------
+        # 与交易域同构：latest（历史批次判定）+ live（同区间即时比较）。
+        # 交易域用金额/GMV，流量域用窗口数/PV —— 两个域不可能用同一个字段比对。
+        t_latest = (self.client.query(
+            f"""
+            SELECT batch_id, compared_at, scope_start, scope_end,
+                   realtime_windows, batch_windows, matched_windows, mismatched_windows,
+                   realtime_only_windows, batch_only_windows,
+                   realtime_total_pv, batch_total_pv, is_pass
+            FROM {BATCH_DATABASE}.ads_reconcile_traffic_summary
+            ORDER BY compared_at DESC
+            LIMIT 1
+            """,
+            max_limit=1,
+        ).first) or {}
+
+        t_start = str(t_latest.get("scope_start") or "")
+        t_end = str(t_latest.get("scope_end") or "")
+        t_live: dict[str, Any] = {
+            "scope": {
+                "start": t_start or None,
+                "end": t_end or None,
+                "batch_id": t_latest.get("batch_id"),
+            },
+            "observed_at": None,
+            "realtime": {},
+            "batch": {},
+            "diff": {},
+            "state": "unknown",
+            "state_detail": "尚无可比的已保存批次区间",
+        }
+        if _DT_RE.match(t_start) and _DT_RE.match(t_end):
+            t_rows = self.client.query(
+                f"""
+                SELECT 'realtime' AS side, COUNT(*) AS windows,
+                       COALESCE(SUM(pv), 0) AS pv,
+                       COALESCE(SUM(uv), 0) AS uv,
+                       COALESCE(SUM(cart_cnt), 0) AS carts,
+                       COALESCE(SUM(buy_cnt), 0) AS buys,
+                       MAX(window_start) AS last_window
+                FROM ads_realtime_traffic_1m
+                WHERE window_start >= '{t_start}' AND window_start < '{t_end}'
+                UNION ALL
+                SELECT 'batch', COUNT(*), COALESCE(SUM(pv), 0), COALESCE(SUM(uv), 0),
+                       COALESCE(SUM(cart_cnt), 0), COALESCE(SUM(buy_cnt), 0),
+                       MAX(window_start)
+                FROM {BATCH_DATABASE}.ads_traffic_1m
+                WHERE window_start >= '{t_start}' AND window_start < '{t_end}'
+                """
+            ).rows
+            t_keys = ("windows", "pv", "uv", "carts", "buys", "last_window")
+            t_rt = next((r for r in t_rows if str(r.get("side")) == "realtime"), {}) or {}
+            t_bt = next((r for r in t_rows if str(r.get("side")) == "batch"), {}) or {}
+            t_state, t_detail = classify_traffic_state(t_rt, t_bt)
+            t_observed = (
+                self.client.query(
+                    f"SELECT NOW() AS observed_at FROM {BATCH_DATABASE}"
+                    f".ads_reconcile_traffic_summary LIMIT 1",
+                    max_limit=1,
+                ).first
+                or {}
+            )
+            t_live.update(
+                {
+                    "observed_at": t_observed.get("observed_at"),
+                    "realtime": {k: t_rt.get(k) for k in t_keys},
+                    "batch": {k: t_bt.get(k) for k in t_keys},
+                    "diff": {
+                        "windows": _diff(t_bt.get("windows"), t_rt.get("windows")),
+                        "pv": _diff(t_bt.get("pv"), t_rt.get("pv")),
+                        "uv": _diff(t_bt.get("uv"), t_rt.get("uv")),
+                    },
+                    "state": t_state,
+                    "state_detail": t_detail,
+                }
+            )
+
         data = {
             "latest": latest,
             "live": live,
+            "traffic": {"latest": t_latest, "live": t_live},
             "mismatches": mismatches,
             "mismatch_count_shown": len(mismatches),
             "totals": {
@@ -630,6 +742,9 @@ class Repository:
             f"{BATCH_DATABASE}.ads_reconcile_trade_1m",
             f"{BATCH_DATABASE}.ads_batch_trade_1m",
             "ecommerce.ads_realtime_trade_1m",
+            f"{BATCH_DATABASE}.ads_reconcile_traffic_summary",
+            f"{BATCH_DATABASE}.ads_traffic_1m",
+            "ecommerce.ads_realtime_traffic_1m",
         ]
         fields = ["gmv", "order_cnt", "payment_amount", "refund_amount"]
         return data, tables, fields

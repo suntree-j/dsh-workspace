@@ -1002,11 +1002,24 @@
              为什么必须分开：批次结论是 Spark 作业在某个时刻对固定区间的判定，
              这条是**此刻**按同一区间重读两侧的结果。恢复期（实时链路重放）时
              两者会不一致，把"正在恢复"当成"数据错误"或反过来，都是误读。 -->
-        <div class="rc-live" v-if="live && live.scope && live.scope.start">
-          <span class="rc-live__chip" :class="'rc-live__chip--' + liveTone">{{ liveStateText }}</span>
-          <span class="rc-live__item">实时 <span class="mono">{{ formatInt(live.realtime && live.realtime.windows) }}</span> 窗 · <span class="mono">{{ formatMoney(live.realtime && live.realtime.gmv) }}</span> 元</span>
-          <span class="rc-live__item">离线 <span class="mono">{{ formatInt(live.batch && live.batch.windows) }}</span> 窗 · <span class="mono">{{ formatMoney(live.batch && live.batch.gmv) }}</span> 元</span>
-          <span class="rc-live__item rc-live__at"><span class="mono">{{ liveScope }}</span> · 观测于 <span class="mono">{{ formatTime(live.observed_at) }}</span></span>
+        <!-- 两个域各占一行：父容器是网格/弹性布局，这里用一层 stack 强制纵向排列，
+             否则「同区间一致」会出现两次、看不出哪条属于哪个域。 -->
+        <div class="rc-live-stack">
+          <div class="rc-live" v-if="live && live.scope && live.scope.start">
+            <span class="rc-live__chip" :class="'rc-live__chip--' + liveTone">{{ liveStateText }}</span>
+            <span class="rc-live__item">实时 <span class="mono">{{ formatInt(live.realtime && live.realtime.windows) }}</span> 窗 · <span class="mono">{{ formatMoney(live.realtime && live.realtime.gmv) }}</span> 元</span>
+            <span class="rc-live__item">离线 <span class="mono">{{ formatInt(live.batch && live.batch.windows) }}</span> 窗 · <span class="mono">{{ formatMoney(live.batch && live.batch.gmv) }}</span> 元</span>
+            <span class="rc-live__item rc-live__at"><span class="mono">{{ liveScope }}</span> · 观测于 <span class="mono">{{ formatTime(live.observed_at) }}</span></span>
+          </div>
+
+          <!-- 流量域同区间：与交易域同一套四态，但比的是窗口数与 PV（流量域没有金额）。 -->
+          <div class="rc-live" v-if="trafficLive && trafficLive.scope && trafficLive.scope.start">
+            <span class="rc-live__scope">流量域</span>
+            <span class="rc-live__chip" :class="'rc-live__chip--' + trafficLiveTone">{{ trafficLiveStateText }}</span>
+            <span class="rc-live__item">实时 <span class="mono">{{ formatInt(trafficLive.realtime && trafficLive.realtime.windows) }}</span> 窗 · PV <span class="mono">{{ formatInt(trafficLive.realtime && trafficLive.realtime.pv) }}</span></span>
+            <span class="rc-live__item">离线 <span class="mono">{{ formatInt(trafficLive.batch && trafficLive.batch.windows) }}</span> 窗 · PV <span class="mono">{{ formatInt(trafficLive.batch && trafficLive.batch.pv) }}</span></span>
+            <span class="rc-live__item rc-live__at"><span class="mono">{{ trafficLiveScope }}</span> · 观测于 <span class="mono">{{ formatTime(trafficLive.observed_at) }}</span></span>
+          </div>
         </div>
       </section>
 
