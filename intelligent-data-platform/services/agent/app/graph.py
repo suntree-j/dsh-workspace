@@ -52,6 +52,7 @@ from typing import Any, Callable, TypedDict
 from .config import Settings
 from .llm import ToolSpec, assistant_message, build_client, create_completion
 from .retrieval import RetrievalResult, build_retriever
+from .scope import classify_question_scope, normalize_answer_wording
 from .tools import REASONING_SPEC, RETRIEVE_SPEC, TOOL_SPECS, ToolBox
 
 __all__ = ["AgentState", "GraphAgent", "GraphTrace", "build_graph"]
@@ -677,6 +678,39 @@ class GraphAgent:
     def ask(self, question: str) -> AnswerBundle:
         """跑一次图并返回带证据的回答。"""
         started = time.perf_counter()
+
+        # ---- 能力边界（确定性前置判定，不交给模型）----
+        # 为什么要前置：问"帮我写一首关于数据平台的诗歌"时，模型会照写，
+        # 而且为了给诗配"真实锚点"再执行一条与问题无关的查询 —— 回答里于是
+        # 出现了真实批次号与窗口数，读起来像平台能力，实际是越界。
+        # 前置拦截让"越界"与"取数"彻底分开：越界时一条 SQL 都不执行。
+        scope = classify_question_scope(question)
+        if not scope.allowed:
+            return AnswerBundle(
+                question=question,
+                answer=scope.refusal,
+                plan="（问题不属于数据问答范围，未进入规划，未执行任何查询）",
+                plan_steps=[],
+                docs=[],
+                tables=[],
+                executed_sql=[],
+                steps=[],
+                issues=[],
+                retries=0,
+                graph_trace=[
+                    {
+                        "node": "scope",
+                        "verdict": scope.verdict,
+                        "reason": scope.reason,
+                        "note": "前置能力边界判定，未进入 retrieve/plan/execute",
+                    }
+                ],
+                elapsed_ms=int((time.perf_counter() - started) * 1000),
+                model="scope-guard",
+                rounds=0,
+                truncated=False,
+            )
+
         initial: AgentState = {
             "question": question,
             "messages": [],
@@ -714,9 +748,25 @@ class GraphAgent:
         truncated = bool(blockers) or int(final.get("tool_rounds", 0)) >= self.settings.max_tool_rounds
 
         rounds = len({step.get("round") for step in steps}) if steps else 0
+        # 措辞规范化（确定性后处理）：把"完全一致/零差异/没有任何差异"这类
+        # 绝对化表述换成可以被数字反查的说法。为什么不让模型自己注意：
+        # 提示词约束在长回答里会被稀释，而这句话一旦出现在对账结论里，
+        # 就等于对一个 40,358 窗口的比对下了"两套系统永远相等"的保证。
+        raw_answer = str(final.get("answer", ""))
+        answer, replaced = normalize_answer_wording(raw_answer)
+        trace = list(final.get("trace") or [])
+        if replaced:
+            trace.append(
+                {
+                    "node": "wording",
+                    "note": "把绝对化表述改成可反查形式",
+                    "replaced": replaced,
+                }
+            )
+
         return AnswerBundle(
             question=question,
-            answer=str(final.get("answer", "")),
+            answer=answer,
             plan=str(final.get("plan", "")),
             plan_steps=list(final.get("plan_steps") or []),
             docs=list(final.get("docs") or []),
@@ -725,7 +775,7 @@ class GraphAgent:
             steps=steps,
             issues=list(final.get("issues") or []),
             retries=int(final.get("retries", 0)),
-            graph_trace=list(final.get("trace") or []),
+            graph_trace=trace,
             elapsed_ms=elapsed_ms,
             model=self.settings.llm_model,
             rounds=rounds,
@@ -808,7 +858,11 @@ def _graph_system_prompt() -> str:
   6. summarize 你基于**已执行查询的结果**汇总结论。
 
 因此：不要跳过规划直接写 SQL；失败时**必须改变做法**（换表/改列），
-不要重复提交同一条已被拒绝的 SQL；引用了口径就写出来源（`文件:行号`）。"""
+不要重复提交同一条已被拒绝的 SQL；引用了口径就写出来源（`文件:行号`）。
+
+对账类结论的措辞有硬要求：用「不一致窗口为 0」「差异为 0」这种**可以被数字反查**的说法，
+不要写「完全一致」「零差异」「没有任何差异」。前者说的是"我这次比对了 N 个窗口、
+其中有 0 个不等"，后者是对两套系统下的绝对保证 —— 一次比对给不出这种保证。"""
     )
 
 
