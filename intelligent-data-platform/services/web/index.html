@@ -424,7 +424,7 @@
             <h2 class="panel__title">交易指标</h2>
             <p class="panel__desc">窗口内累计；悬停或聚焦「?」可查看每项的口径定义。</p>
           </div>
-          <p class="panel__meta" v-if="series.length">最近 {{ series.length }} 个窗口累计</p>
+          <p class="panel__meta" v-if="series.length">最近 {{ series.length }} 个窗口累计 · {{ fmtTime(series[0].window_start) }} ~ {{ fmtTime(series[series.length - 1].window_start) }}</p>
         </div>
         <skeleton v-if="loading && !series.length" variant="kpi" :rows="4"></skeleton>
         <template v-else>
