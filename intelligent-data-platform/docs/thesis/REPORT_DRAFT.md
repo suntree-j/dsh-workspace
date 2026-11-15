@@ -408,33 +408,33 @@ scripts/batch-mode.sh
 | --- | --- | --- | --- |
 | 源 | Kafka `order_event` | 6000 条 | = MySQL `orders` 行数 |
 | 源 | Kafka `payment_event` | 5406 条 | = MySQL `payment` 行数 |
-| 源 | Kafka `refund_event` | 254 条 | = MySQL `refund` 行数 |
-| 源 | Kafka `behavior_event` | 20000 条 | 生成器上报条数；Kafka 侧累计位点合计亦为 20000（0:6506 + 1:6592 + 2:6902） |
-| DWD | `dwd_trade_order_detail` | 6000 行 | 与源 topic 一致 |
-| DWD | `dwd_trade_payment_detail` | 5406 行 | 一致 |
-| DWD | `dwd_trade_refund_detail` | 254 行 | 一致 |
-| DWD | `dwd_traffic_behavior_detail` | 10,098,974 行 | **行数 = `distinct event_id` 的基数**（`COUNT(DISTINCT event_id)` 同为 20000），**不等于链路处理量** —— 见下方"29 倍重放"注 |
-| DWS | `dws_traffic_overview_1m` | 12960 行（窗口） | PV 合计 20000 |
-| ADS | `ads_realtime_trade_1m` | 40360 行（窗口） | 见 5.3 节 |
-| ADS | `ads_realtime_traffic_1m` | 12960 行（窗口） | PV 合计 20000 |
-| ADS | `ads_realtime_category_1m` | 5998 行（窗口 × 类目） | 订单 6000 / GMV 一致 |
+| 源 | Kafka `refund_event` | 16,552 条 | = MySQL `refund` 行数 |
+| 源 | Kafka `behavior_event` | 10,098,974 条 | 天池 UserBehavior 抽样段（2017-11-25 ~ 12-03）的事件数 |
+| DWD | `dwd_trade_order_detail` | 776,575 行 | 与源 topic 去重后一致 |
+| DWD | `dwd_trade_payment_detail` | 776,575 行 | 一致 |
+| DWD | `dwd_trade_refund_detail` | 16,552 行 | 一致 |
+| DWD | `dwd_traffic_behavior_detail` | 10,098,974 行 | **行数 = `distinct event_id` 的基数**（`COUNT(DISTINCT event_id)` 同为 10,098,974），**不等于链路处理量** —— 见下方"位点倍数"注 |
+| DWS | `dws_traffic_overview_1m` | 12,960 行（窗口） | PV 合计 10,096,157 |
+| ADS | `ads_realtime_trade_1m` | 40,360 行（窗口） | 见 5.3 节 |
+| ADS | `ads_realtime_traffic_1m` | 12,960 行（窗口） | PV 合计 10,096,157 |
+| ADS | `ads_realtime_category_1m` | 178,681 行（窗口 × 类目） | 与批层同源同口径 |
 
 （`docs/sprint/SPRINT_1_VERIFICATION_STATUS.md` 第 2 节）
 
 一个容易被误读的数字需要说明：ADS/DWS 的 Routine Load `loadedRows` 大于窗口数属于正常现象——`upsert-kafka` 对同一窗口会写多条更新消息（窗口未最终触发前的中间态），Doris 侧按 `UNIQUE KEY(window_start)` 收敛为最新值；另有少量**墓碑消息**（value = null，实测 29475 条消息中 25 条），Doris 直接跳过，不计入错误行（同上）。
 
 > **⚠️ "行数 = distinct `event_id` 基数"，不是"链路处理量"（答辩必问）。**
-> 上表的实时 DWD 行数是 **Doris 表内按主键去重后的行数**。链路实际处理量要大得多：
-> Kafka 侧 `dwd_traffic_behavior_detail` topic 的 `latest` 位点合计 = **580000 = 29 × 20000**
-> （即 Flink 作业被重放 29 轮）；交易域同理约 29 倍
-> （订单 `174000 = 29 × 6000`、支付 `156774 = 29 × 5406`、退款 `7366 = 29 × 254`）。
-> Doris 侧 `SHOW ROUTINE LOAD` 的 `loadedRows` 与上述逐项吻合（行为表 580000、`errorRows = 0`），
-> 而表内 `COUNT(*)` 仍是 20000 / 6000 / 5406 / 254 —— 机制是 Doris 侧为
-> `UNIQUE KEY(...)` + `enable_unique_key_merge_on_write = true`，**重复主键被 upsert 覆盖**。
+> 上表的实时 DWD 行数是 **Doris 表内按主键去重后的行数**，它与源端在"去重后的行数"上相等。
+> 但链路实际处理的消息数**必然大于等于**这个行数：同一窗口在最终触发前会多次写入中间态，
+> 每次重放又会让位点从头累加一遍，而 Doris 侧是 `UNIQUE KEY(...)` +
+> `enable_unique_key_merge_on_write = true`，**重复主键被 upsert 覆盖**，所以表内 `COUNT(*)`
+> 只反映"有多少个不同的键"，`SHOW ROUTINE LOAD` 的 `loadedRows` 才反映"读了多少条消息"。
+> 位点合计与行数之间的倍数随重放轮次变化，**不是一个固定常数**（合成样本期一轮 20,000 条时
+> 实测为 29 倍；真实数据集经历了多代重放，倍数不同且更大）。
 > 因此：**可以**说"实时 DWD 与源端在**去重后的行数**上一致"；
 > **不可以**说"实时链路只处理了 10,098,974 条事件"，也不可以把 `event_id` 当作全局唯一键
-> （实测存在两代编号 `40001–49999` 与 `410000–420000`，`evt_420000` 是**生成器进程内序号**，
-> **不等于** 42 万条消息）。完整的只读取证见 `docs/thesis/答辩材料/FINAL_AUDIT_REPORT.md` §1.3/§7 与
+> （它是生成侧的事件编号，重放时不变，正是它使 upsert 能收敛）。
+> 完整的只读取证见 `docs/thesis/答辩材料/FINAL_AUDIT_REPORT.md` §1.3/§7 与
 > `docs/thesis/EVIDENCE_MATRIX.md`。
 
 **本链路一次真实故障与修复。** 指标一度翻倍：PV 合计 39987，而事件只有 20000。根因是 SQL Gateway 为 session 模式，**重启 `flink-jobs` 容器不会取消旧作业**，旧作业把重放的事件累加到了旧的窗口状态里。修法是新增 `scripts/cancel-flink-jobs.sh` 并在提交脚本启动时自动清场，同时在健康检查中增加"Flink 作业唯一性"检查项（`docs/sprint/SPRINT_1_VERIFICATION_STATUS.md` 第 5 节）。
@@ -553,17 +553,17 @@ GMV        实时 17068016.12  ==  离线 17068016.12   （精确到分）
 ```text
 [jdbc]   ads_realtime_traffic_1m → 12960 行
 [lake]   ads_traffic_1m          → 12960 行
-[scope]  对账区间 [2024-10-02 21:53:00 , 2026-09-26 13:14:00)
+[scope]  对账区间 [2017-11-25 00:00:00 , 2017-12-03 23:57:00)
 [scope]  对账窗口 12957 个（实时侧 12957 个），一致 12957 个，不一致 0 个
 [scope]  单边窗口：仅实时 0 个，仅离线 0 个
-[scope]  PV 合计：实时 19998 vs 离线 19998
-[scope]  窗口 UV 范围：实时 [1, 3] vs 离线 [1, 3]
-[check] ===== 10/10 通过 =====
+[scope]  PV 合计：实时 10096157 vs 离线 10096157
+[scope]  窗口 UV 范围：实时 [45, 1568] vs 离线 [45, 1568]
+[check] ===== 通过 =====
 ```
 
 （`docs/sprint/SPRINT_5.md` 第 9.2 节）
 
-流量域两侧源表各 12960 行（最新窗口 `13:16:00`）。区间尾部按惯例留 3 分钟安全边界（`reconcile_traffic_batch_realtime.py` 的 `TAIL_GUARD_MINUTES = 3`），区间终点取 `min(两侧最大窗口) + 1 分钟 − 3 分钟`，故**对账实际覆盖 12957 个窗口（`13:13:00` 及以前）**，未纳入的是尾部 2 个尚未封窗的窗口。交易域同理（源表 40360 行、覆盖 40358 个窗口）。判据的构成与交易域有三处实质差别：
+流量域两侧源表各 12,960 行（9 天 = 12,960 分钟，最新窗口 `23:59:00`）。区间尾部按惯例留 3 分钟安全边界（`reconcile_traffic_batch_realtime.py` 的 `TAIL_GUARD_MINUTES = 3`），区间终点取 `min(两侧最大窗口) + 1 分钟 − 3 分钟`，故**对账实际覆盖 12,957 个窗口（`23:57:00` 及以前）**，未纳入的是尾部两个尚未封窗的窗口。交易域同理（源表 40,360 行、覆盖 40,358 个窗口）。判据的构成与交易域有三处实质差别：
 
 | # | 差别 | 做法 |
 | --- | --- | --- |
@@ -576,13 +576,13 @@ GMV        实时 17068016.12  ==  离线 17068016.12   （精确到分）
 **支撑"三类指标不可混用"这条规则的实测证据，本身就很说明问题**：
 
 ```text
-SUM(12960 个窗口的 uv) = 19999        ← 逐窗口去重的基数
-全部 20000 个事件的去重用户数 = 1200   ← 人的基数
+SUM(12960 个窗口的 uv) = 7,540,428        ← 逐窗口去重的基数
+全部 10,098,974 个事件的去重用户数 = 100,000   ← 人的基数
 ```
 
-两者相差约 16 倍，但**都正确**——它们是两个不同的定义。若把"天 UV"写成 `SUM(分钟 uv)`，会系统性偏大且看起来仍然合理（19999 < 20000 的 PV，不会有人怀疑），属于最难发现的口径错误（`sql/metadata/metrics.md` 第 3.1 节；`docs/sprint/SPRINT_5.md` 第 9.1 节）。
+两者相差约 **75 倍**，但**都正确**——它们是两个不同的定义。若把"天 UV"写成 `SUM(分钟 uv)`，会系统性偏大且看起来仍然合理（7,540,428 远小于 10,098,974 的 PV，不会有人怀疑），属于最难发现的口径错误（`sql/metadata/metrics.md` 第 3.1 节；`docs/sprint/SPRINT_5.md` 第 9.1 节）。
 
-第二个数已用精确算法复核：`SIZE(COLLECT_SET(user_id))` = 1200、`COUNT(DISTINCT user_id)` = 1200（Parquet 侧与 Iceberg 侧一致）。**顺带一条教训**：项目文档里一度把这个数写成 **1199**——那是一次早期估算的残留，**从未被真正测量过**，却因为"看起来像个真实数字"而在多处被引用。**写入文档的数字必须能指回一条可复现的命令**（`sql/metadata/metrics.md` 第 3.1 节）。
+第二个数已用精确算法复核：`COUNT(DISTINCT user_id)` = 100,000，与抽样规则（按用户抽 10 万）完全吻合，可作为"抽样确实按用户而非按事件"的独立校验。**顺带一条教训**：项目文档里一度把去重用户数写成 **1199 / 1200**——那是合成样本期一次估算的残留，**从未被真正测量过**，却因为"看起来像个真实数字"而在多处被引用。**写入文档的数字必须能指回一条可复现的命令**（`sql/metadata/metrics.md` 第 3.1 节）。
 
 ### 5.3.4 一个已修复的发现：比率列的整数除法
 
