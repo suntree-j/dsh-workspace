@@ -467,9 +467,31 @@
    * 之所以加这道门槛：实时链路里最新窗口常常尚未写满（甚至为 0），
    * 直接算环比会得到 -100% 这种"看起来像事故"的假信号 —— 宁可显示"待下一窗口"。
    */
+  // 数据落在多久以前就不再算环比：与实时链路页判断"历史数据集"用的是同一个阈值。
+  // 为什么必须有这条：交易域是 2009–2011、流量域是 2017-12 的公开历史数据，
+  // "最后两个窗口"之间的差额不是"最近的变化"，而是某个历史日最后两分钟之间的差额。
+  // 把它渲染成「▼ -26.5%」会被读成"业务在跌"，属于口径错位 —— 宁可不展示。
+  var DELTA_HISTORICAL_LIMIT_MIN = 48 * 60;
+
   function buildDelta(rows, field, mode, unit) {
     var list = rows || [];
     if (list.length < 2) return null;
+    var lastTs = list[list.length - 1] && list[list.length - 1].window_start;
+    if (!isMissing(lastTs)) {
+      var lastMs = new Date(String(lastTs).replace(' ', 'T')).getTime();
+      if (!isNaN(lastMs) && (Date.now() - lastMs) > DELTA_HISTORICAL_LIMIT_MIN * 60000) {
+        return {
+          text: '历史数据集 · 不展示环比',
+          glyph: '·',
+          tone: 'flat',
+          // 与"待下一窗口"同样走 pending 分支（灰字、无彩色 pill）
+          pending: true,
+          a11y: '数据集是历史区间，窗口间差额不构成环比',
+          title: '该数据集是历史区间（最新窗口 ' + formatTime(lastTs) +
+            '），最后两个窗口之间的差不是"最近的变化"，因此不展示环比'
+        };
+      }
+    }
     var last = numberOrNull(list[list.length - 1] && list[list.length - 1][field]);
     var prev = numberOrNull(list[list.length - 2] && list[list.length - 2][field]);
     if (last === null || prev === null) return null;

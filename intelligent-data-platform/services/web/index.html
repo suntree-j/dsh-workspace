@@ -1739,8 +1739,13 @@
                    管不住内部文本，还会破坏父级的收缩计算（实测反而多溢出 511px）。 -->
               <span class="src-badge__note">{{ sourceLabel }}</span>
             </span>
-            <span class="topbar__stamp">
-              <span class="topbar__stamp-label">数据时间</span>
+            <!-- 这里必须写「观测时间」而不是「数据时间」：
+                 两者是不同的东西，混成一个标签会让人以为业务数据更新到了今天。
+                 观测时间 = 浏览器发出请求并拿到响应的时刻（客户端时钟）；
+                 数据本身的时刻见各页的「数据窗口 / 对账区间 / 最新窗口」。 -->
+            <span class="topbar__stamp"
+                  :title="'观测时间：页面最近一次取数的时刻（浏览器时钟）。\n数据本身的时间范围见各页的「数据窗口 / 对账区间」。'">
+              <span class="topbar__stamp-label">观测时间</span>
               <span class="topbar__time">{{ updatedText }}</span>
             </span>
             <button type="button" class="btn btn--primary" :disabled="anyLoading" @click="refreshAll"
