@@ -15,7 +15,7 @@
 
     pause_realtime ── ods_extract ── archive_behavior ── dwd_layers ── dws_layers ── ads_layers
       ── traffic_dwd_layers ── traffic_dws_layers ── traffic_ads_layers
-      ── reconcile ── traffic_reconcile ── load_to_doris ── restore_realtime
+      ── reconcile ── traffic_reconcile ── load_to_doris ── iceberg_migrate ── restore_realtime
 
 **Sprint 5 新增了流量域的四段**（traffic_dwd / traffic_dws / traffic_ads /
 traffic_reconcile）。它们接在 ``archive_behavior`` 之后 —— 归档是流量域的唯一源。
@@ -250,6 +250,25 @@ def offline_lakehouse_pipeline() -> None:
         "离线结果 → Doris lakehouse_ads（S3() TVF 直读 Parquet），供只读服务查询。",
     )
 
+    # ---- 13. 发布到 Iceberg（D3 补：此前 DAG 里缺这一步）----
+    #
+    # !! 为什么必须进 DAG !!
+    #   实测（2026-11-16）：Hive/Parquet 侧与 Iceberg 侧当前行数一致
+    #   （traffic_1m 12,960 / batch_trade_1m 40,360 / dwd_traffic 10,098,974 /
+    #   dws_trade_overview_1d 604），但那是**人工跑过** `batch-mode.sh` 的结果。
+    #   调度链此前停在 load_to_doris，`lakehouse_iceberg.*` 不会被更新；
+    #   只要连续几天只靠调度，Iceberg 就会落后于 Hive —— 而论文里"湖仓"
+    #   指的正是这 23 张 Iceberg 表。
+    #
+    #   顺序放在 load 之后：load 只读 Parquet 写 Doris，与 Iceberg 迁移无数据依赖；
+    #   放在最后可以保证"调度成功 = Parquet 与 Iceberg 两侧都更新过"。
+    iceberg_migrate = _stage(
+        "iceberg_migrate",
+        "iceberg-migrate",
+        "Parquet/Hive 表 → Iceberg（23 张，v2/snappy）\n\n"
+        "作业内逐表核对：行数一致、金额列合计一致、Provider == iceberg。",
+    )
+
     # ---- 9. 恢复实时链路 ----
     # !! trigger_rule="all_done" 是这里最要紧的一个参数 !!
     #   默认的 all_success 会让「上游一失败就不恢复」，
@@ -276,7 +295,7 @@ def offline_lakehouse_pipeline() -> None:
 
     pause >> ods >> archive >> dwd >> dws >> ads \
           >> traffic_dwd >> traffic_dws >> traffic_ads \
-          >> reconcile >> traffic_reconcile >> load >> restore
+          >> reconcile >> traffic_reconcile >> load >> iceberg_migrate >> restore
 
 
 offline_lakehouse_pipeline()

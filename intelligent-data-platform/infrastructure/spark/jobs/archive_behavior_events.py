@@ -177,19 +177,48 @@ def write_ods(spark: SparkSession, events: DataFrame) -> None:
     )
 
 
+from archive_criteria import archive_criteria  # noqa: E402
+
+
 def verify(spark: SparkSession, kafka_count: int, events: DataFrame) -> int:
     """作业内自检。返回退出码（0 = 全部通过）。"""
     checker = Checker("Sprint 4 归档自检（Kafka → 湖仓 ODS）")
 
     archived = spark.table(ODS_TABLE).count()
-
-    # ---- 1. 行数：归档 == Kafka 实际消息数 ----
-    # 这一条是"没有丢消息"的硬证据。注意解析环节会丢掉 event_time 为 null 的
-    # 畸形行，所以这里同时报告差值，便于判断是"丢了"还是"过滤了畸形行"。
-    checker.check("归档行数 == Kafka 消息数", archived, kafka_count)
-
     parsed_count = events.count()
-    checker.check("可解析行数 == Kafka 消息数", parsed_count, kafka_count)
+
+    # ---- 1. 行数：本次覆盖的 dt 分区 == Kafka 实际消息数 ----
+    #
+    # !! 不能拿"整表行数"和"本次消息数"比 !!
+    #   实测（2026-11-16）：`behavior_event` 没有显式 retention，继承 broker
+    #   默认 168 小时。消息一旦过期被删，下一次归档读到 0 条，而 ODS 表里仍有
+    #   1000 万行 —— 于是「整表 10,098,974 != 本次 0」判失败，归档任务每晚失败，
+    #   其后 11 个阶段全部 upstream_failed。
+    #   历史的 archive_behavior 失败 24 次就是这个形态：topic 被消费/清理空，
+    #   归档表却还留着全量，等式永远不成立。
+    #
+    #   正确口径按"本次覆盖的 dt 分区"比：
+    #     本次消息数 == 0  → topic 已被 retention 清空，ODS 保留历史归档属正常，
+    #                        只记录信息，不判失败；
+    #     本次消息数  > 0  → 本次覆盖的每个 dt 分区写入后应刚好等于消息数，
+    #                        另外整表必须是 topic 的超集。
+    if kafka_count == 0:
+        archived_touched = 0
+    else:
+        touched = [
+            r["dt"] for r in events.select(
+                F.date_format(F.col("event_time"), "yyyy-MM-dd").alias("dt")
+            ).distinct().collect() if r["dt"]
+        ]
+        cond = ", ".join("'%s'" % d for d in touched) or "''"
+        archived_touched = spark.sql(
+            f"SELECT COUNT(*) AS c FROM {ODS_TABLE} WHERE dt IN ({cond})"
+        ).first()["c"]
+
+    for name, ok, detail in archive_criteria(
+        kafka_count, archived, archived_touched, parsed_count
+    ):
+        checker.check_true(name, ok, detail)
 
     # ---- 2. 关键字段非空 ----
     #
@@ -201,22 +230,27 @@ def verify(spark: SparkSession, kafka_count: int, events: DataFrame) -> int:
     #   一份"全绿"的自检报告配一个空表 —— 这比直接报错更危险。
     #
     #   现在先断言源非空（防空区间假通过），再在源上查非空。
-    checker.check_true(
-        "源数据非空（防空区间假通过）",
-        parsed_count > 0,
-        f"源行数={parsed_count}",
-    )
+    if parsed_count > 0:
+        checker.check_true(
+            "源数据非空（防空区间假通过）",
+            parsed_count > 0,
+            f"源行数={parsed_count}",
+        )
 
-    src_nulls = events.agg(
-        F.sum(F.col("event_id").isNull().cast("int")).alias("null_id"),
-        F.sum(F.col("event_type").isNull().cast("int")).alias("null_type"),
-        F.sum(F.col("user_id").isNull().cast("int")).alias("null_user"),
-        F.sum(F.col("event_time").isNull().cast("int")).alias("null_time"),
-    ).first()
-    checker.check("源 event_id 无空值", int(src_nulls["null_id"] or 0), 0)
-    checker.check("源 event_type 无空值", int(src_nulls["null_type"] or 0), 0)
-    checker.check("源 user_id 无空值", int(src_nulls["null_user"] or 0), 0)
-    checker.check("源 event_time 无空值", int(src_nulls["null_time"] or 0), 0)
+        src_nulls = events.agg(
+            F.sum(F.col("event_id").isNull().cast("int")).alias("null_id"),
+            F.sum(F.col("event_type").isNull().cast("int")).alias("null_type"),
+            F.sum(F.col("user_id").isNull().cast("int")).alias("null_user"),
+            F.sum(F.col("event_time").isNull().cast("int")).alias("null_time"),
+        ).first()
+        checker.check("源 event_id 无空值", int(src_nulls["null_id"] or 0), 0)
+        checker.check("源 event_type 无空值", int(src_nulls["null_type"] or 0), 0)
+        checker.check("源 user_id 无空值", int(src_nulls["null_user"] or 0), 0)
+        checker.check("源 event_time 无空值", int(src_nulls["null_time"] or 0), 0)
+    else:
+        # 本次没有消息时，源侧的空值检查没有意义（空集里当然没有空值）。
+        # 历史教训正是"空区间假通过"，所以这里显式跳过而不是让它静默通过。
+        print("[archive] 本次无新消息，跳过源侧空值检查", flush=True)
 
     # ---- 3. 枚举合法性 ----
     # 出现未登记的取值说明数据生成器或上游改了协议，必须立刻发现
