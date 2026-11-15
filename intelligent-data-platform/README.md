@@ -580,9 +580,13 @@ bash scripts/health-check.sh
 
 数据接入分两步：先用 `scripts/real-data/build_uci_dataset.py` / `build_tianchi_dataset.py` 把两个公开数据集清洗成 CSV，再用 `data-generator/src/load_real_data.py` 写 MySQL 并发 Kafka。
 
+> 当前版本与部署哈希见 [`docs/DEPLOYMENT_BASELINE.md`](docs/DEPLOYMENT_BASELINE.md)；两版制备脚本的同输入对照见 [`docs/evidence/D0_数据制备版本对照.md`](docs/evidence/D0_数据制备版本对照.md)。
+> **注意**：交易域默认窗口是全量两年，用 `--win-lo/--win-hi` 可切子窗口做对照；流量域的商品维度必须按「主导类目」去重，否则同一商品写出多行会让主键重复。
+
 ```bash
 # 1. 把真实数据集清洗成 CSV（本机运行，产物在 .tmp/realdata/out/）
-python scripts/real-data/build_uci_dataset.py
+python scripts/real-data/build_uci_dataset.py                       # 默认全量 2009-12-01 ~ 2011-12-10
+python scripts/real-data/build_uci_dataset.py --win-lo "2011-11-01 00:00:00" --win-hi "2011-12-01 00:00:00"
 python scripts/real-data/build_tianchi_dataset.py
 
 # 2. 装载（容器内运行；CSV 需先放到 data-generator/data/real/）
